@@ -3,7 +3,7 @@
 
 //! Windows launches end to end. A vendored `.cmd` target: hostile arguments never run an injected command (BatBadBut,
 //! CVE-2024-24576). An argument std can quote reaches the batch file (exit 0); one holding a line break is refused (exit 64).
-//! A program whose path exceeds `MAX_PATH` starts, from a `.direct` and from a classic launcher; one that cannot names the limit.
+//! A program whose path exceeds `MAX_PATH` starts, from a `.launch` and from a classic launcher; one that cannot names the limit.
 //!
 //! Runs on Windows CI only; the dispatch decision itself is a host-run unit in `direct.rs`.
 #![cfg(windows)]
@@ -46,9 +46,9 @@ impl Vendor {
         std::fs::create_dir_all(program.parent().unwrap()).unwrap();
         std::fs::write(&program, PROBE_SCRIPT).unwrap();
         let sidecar = format!(
-            r#"{{"schema_version":1,"vendor_id":"{VENDOR_ID}","self":"{SELF_PATH}","program":"@VENDOR_DIR@/{PROGRAM}","args":[],"unset":[],"env":[]}}"#
+            r#"{{"kind":"direct","schema_version":1,"vendor_id":"{VENDOR_ID}","self":"{SELF_PATH}","program":"@VENDOR_DIR@/{PROGRAM}","args":[],"unset":[],"env":[]}}"#
         );
-        std::fs::write(root.join(format!("{SELF_PATH}.direct")), sidecar).unwrap();
+        std::fs::write(root.join(format!("{SELF_PATH}.launch")), sidecar).unwrap();
         Self { base }
     }
 
@@ -198,10 +198,10 @@ fn a_direct_launcher_starts_a_program_past_max_path() {
     std::fs::create_dir_all(launcher.parent().unwrap()).unwrap();
     std::fs::copy(LAUNCHER_BINARY, &launcher).unwrap();
     let sidecar = format!(
-        r#"{{"schema_version":1,"vendor_id":"{VENDOR_ID}","self":"{SELF_PATH}","program":"@VENDOR_DIR@/{}","args":[],"unset":[],"env":[]}}"#,
+        r#"{{"kind":"direct","schema_version":1,"vendor_id":"{VENDOR_ID}","self":"{SELF_PATH}","program":"@VENDOR_DIR@/{}","args":[],"unset":[],"env":[]}}"#,
         long_path.relative
     );
-    std::fs::write(root.join(format!("{SELF_PATH}.direct")), sidecar).unwrap();
+    std::fs::write(root.join(format!("{SELF_PATH}.launch")), sidecar).unwrap();
 
     let output = Command::new(&launcher).current_dir(&long_path.base).output().unwrap();
 

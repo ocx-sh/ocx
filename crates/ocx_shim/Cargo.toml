@@ -12,7 +12,7 @@ name = "ocx-shim"
 path = "src/main.rs"
 
 [dependencies]
-# The direct-launcher mode (A5) decodes the `.direct` sidecar with these and applies
+# The direct-launcher mode (A5) decodes the `.launch` sidecar with these and applies
 # its records through `ocx_env_apply`; std + serde only, so the size budget holds.
 ocx_env_apply.workspace = true
 serde.workspace = true

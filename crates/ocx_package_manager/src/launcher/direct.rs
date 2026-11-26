@@ -1,18 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Direct launchers: the vendored directory's entry points, a copy of the launcher image beside a `.direct` sidecar.
+//! Direct launchers: the vendored directory's entry points, a copy of the launcher image beside a `.launch` sidecar.
 
 use std::path::Path;
 
-use ocx_env_apply::direct::{DirectSidecar, SIDECAR_EXTENSION, SidecarError};
+use ocx_env_apply::launch::{DirectRecord, RECORD_EXTENSION, RecordError};
 use ocx_store::file_structure::normalise_written_file;
 
 use super::generate::write_launcher_file;
 use crate::exec_env::unforwarded_keys;
 use crate::tasks::vendor::VendorError;
 
-/// Writes the launcher `<name>` (`<name>.exe` for a Windows target) as a byte copy of `blob`, then `<name>.direct`.
+/// Writes the launcher `<name>` (`<name>.exe` for a Windows target) as a byte copy of `blob`, then `<name>.launch`.
 ///
 /// `windows` is the target's, not the host's: a Linux host vendoring for Windows writes `<name>.exe` and applies
 /// the Windows path rules, as the manifest records.
@@ -22,16 +22,16 @@ use crate::tasks::vendor::VendorError;
 /// # Errors
 ///
 /// [`VendorError::ValueUnrepresentable`] or [`VendorError::PathUnrepresentable`] when `sidecar` breaks a rule of
-/// [`DirectSidecar::validate`], before anything is written; [`VendorError::Package`] for a failed write.
+/// [`DirectRecord::validate`], before anything is written; [`VendorError::Package`] for a failed write.
 pub async fn write_direct_launcher_for(
     dir: &Path,
     name: &str,
     blob: &[u8],
-    sidecar: &DirectSidecar,
+    sidecar: &DirectRecord,
     windows: bool,
 ) -> Result<(), VendorError> {
-    // Launcher `X.direct` is the file tool `X`'s sidecar needs; case-folded for a case-insensitive target filesystem.
-    let suffix = format!(".{SIDECAR_EXTENSION}");
+    // Launcher `X.launch` is the file tool `X`'s sidecar needs; case-folded for a case-insensitive target filesystem.
+    let suffix = format!(".{RECORD_EXTENSION}");
     if !windows
         && name.len() >= suffix.len()
         && name.as_bytes()[name.len() - suffix.len()..].eq_ignore_ascii_case(suffix.as_bytes())
@@ -44,7 +44,7 @@ pub async fn write_direct_launcher_for(
     // The launcher's environment is never the caller's: every credential and every plumbing key is removed.
     sidecar.unset = unset_keys();
     sidecar.validate(windows).map_err(|e| match e {
-        SidecarError::PathNotInRoot(path) => VendorError::PathUnrepresentable { path },
+        RecordError::PathNotInRoot(path) => VendorError::PathUnrepresentable { path },
         other => VendorError::ValueUnrepresentable {
             reason: other.to_string(),
         },
@@ -60,7 +60,7 @@ pub async fn write_direct_launcher_for(
     tokio::fs::write(&launcher, blob)
         .await
         .map_err(|e| crate::error::file_error(&launcher, e))?;
-    let sidecar_path = dir.join(format!("{name}.{SIDECAR_EXTENSION}"));
+    let sidecar_path = dir.join(format!("{name}.{RECORD_EXTENSION}"));
     write_launcher_file(sidecar_path.clone(), body).await?;
     // The host umask and clock must not reach the vendored bytes.
     let normalised = launcher.clone();
@@ -94,15 +94,16 @@ fn unset_keys() -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use ocx_env_apply::direct::{DirectSidecar, EnvRecord};
+    use ocx_env_apply::launch::{DirectRecord, EnvRecord};
 
     use ocx_exit::{ClassifyExitCode, ExitCode};
 
     use super::{join_failed, write_direct_launcher_for};
     use crate::tasks::vendor::VendorError;
 
-    fn sidecar(name: &str) -> DirectSidecar {
+    fn sidecar(name: &str) -> DirectRecord {
         serde_json::from_value(serde_json::json!({
+            "kind": "direct",
             "schema_version": 1,
             "vendor_id": "sha256:0b5f2a4e9c7d3b1a0b5f2a4e9c7d3b1a0b5f2a4e9c7d3b1a0b5f2a4e9c7d3b1a",
             "self": name,
@@ -130,7 +131,7 @@ mod tests {
 
         let launcher = dir.join(if cfg!(windows) { "tool.exe" } else { "tool" });
         assert_eq!(std::fs::read(&launcher).expect("launcher"), bytes);
-        assert!(dir.join("tool.direct").is_file(), "sidecar sits beside the launcher");
+        assert!(dir.join("tool.launch").is_file(), "sidecar sits beside the launcher");
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt as _;
@@ -140,25 +141,25 @@ mod tests {
         }
     }
 
-    async fn write(sidecar: &DirectSidecar) -> (tempfile::TempDir, Result<(), VendorError>) {
+    async fn write(sidecar: &DirectRecord) -> (tempfile::TempDir, Result<(), VendorError>) {
         let tmp = tempfile::tempdir().expect("tempdir");
         let result = write_direct_launcher_for(tmp.path(), "tool", b"blob", sidecar, cfg!(windows)).await;
         (tmp, result)
     }
 
-    /// A name ending `.direct` would write its launcher over another tool's sidecar; a Windows launcher is `.exe`, so only a Unix one collides.
+    /// A name ending `.launch` would write its launcher over another tool's sidecar; a Windows launcher is `.exe`, so only a Unix one collides.
     #[tokio::test]
     async fn a_launcher_name_ending_in_the_sidecar_suffix_is_refused() {
-        for name in ["tool.direct", "tool.DIRECT"] {
+        for name in ["tool.launch", "tool.LAUNCH"] {
             let tmp = tempfile::tempdir().expect("tempdir");
             let result = write_direct_launcher_for(tmp.path(), name, b"blob", &sidecar("bin/tool"), false).await;
             assert!(matches!(result, Err(VendorError::PathUnrepresentable { .. })), "{name}");
             assert_eq!(std::fs::read_dir(tmp.path()).expect("dir").count(), 0, "{name}");
         }
         let tmp = tempfile::tempdir().expect("tempdir");
-        write_direct_launcher_for(tmp.path(), "tool.direct", b"blob", &sidecar("bin/tool"), true)
+        write_direct_launcher_for(tmp.path(), "tool.launch", b"blob", &sidecar("bin/tool"), true)
             .await
-            .expect("tool.direct.exe collides with no sidecar");
+            .expect("tool.launch.exe collides with no sidecar");
     }
 
     /// A `program` outside the root is refused with nothing written; a well-formed one is written.
@@ -198,8 +199,8 @@ mod tests {
         }];
         let (tmp, result) = write(&ok).await;
         assert!(result.is_ok());
-        let written: DirectSidecar =
-            serde_json::from_slice(&std::fs::read(tmp.path().join("tool.direct")).expect("sidecar")).expect("json");
+        let written: DirectRecord =
+            serde_json::from_slice(&std::fs::read(tmp.path().join("tool.launch")).expect("sidecar")).expect("json");
         assert!(written.unset.contains(&"OCX_BINARY_PIN".to_owned()));
         assert!(written.unset.contains(&"OCX_IDENTITY_TOKEN".to_owned()));
     }
@@ -219,7 +220,7 @@ mod tests {
             assert!(tmp.path().join(launcher).is_file(), "windows={windows}: {launcher}");
             let other = if windows { "tool" } else { "tool.exe" };
             assert!(!tmp.path().join(other).exists(), "windows={windows}: no {other}");
-            assert!(tmp.path().join("tool.direct").is_file());
+            assert!(tmp.path().join("tool.launch").is_file());
         }
     }
 
@@ -248,7 +249,7 @@ mod tests {
     async fn written_files_carry_fixed_modes_and_the_normalised_mtime() {
         use std::os::unix::fs::PermissionsExt as _;
         let tmp = tempfile::tempdir().expect("tempdir");
-        for file in ["tool", "tool.direct"] {
+        for file in ["tool", "tool.launch"] {
             let path = tmp.path().join(file);
             std::fs::write(&path, "old").expect("pre-create");
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("chmod");
@@ -258,7 +259,7 @@ mod tests {
             .expect("writer succeeds");
 
         let epoch = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(315_532_800);
-        for (file, mode) in [("tool", 0o755), ("tool.direct", 0o644)] {
+        for (file, mode) in [("tool", 0o755), ("tool.launch", 0o644)] {
             let metadata = std::fs::metadata(tmp.path().join(file)).expect("metadata");
             assert_eq!(metadata.permissions().mode() & 0o777, mode, "{file} mode");
             assert_eq!(metadata.modified().expect("mtime"), epoch, "{file} mtime");

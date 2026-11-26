@@ -40,7 +40,7 @@ fail() {
 
 # The sidecar the generator writes, with the fields every case shares; the program path is per case.
 sidecar() {
-    printf '{"schema_version":1,"vendor_id":"%s","self":"%s","program":"@VENDOR_DIR@/%s","args":%s,"unset":[],"env":%s}' \
+    printf '{"kind":"direct","schema_version":1,"vendor_id":"%s","self":"%s","program":"@VENDOR_DIR@/%s","args":%s,"unset":[],"env":%s}' \
         "$VENDOR_ID" "$SELF_PATH" "$1" "$2" "$3"
 }
 
@@ -79,7 +79,7 @@ case_no_sidecar() {
 case_malformed_sidecar() {
     local launcher
     launcher=$(vendor malformed)
-    printf '{' >"${launcher%"$EXE"}.direct"
+    printf '{' >"${launcher%"$EXE"}.launch"
     run "$launcher"
     expect malformed-sidecar 78 "malformed sidecar"
 }
@@ -92,7 +92,7 @@ case_direct_starts_child() {
     root=$WORK/direct-child/vendor
     mkdir -p "$root/$(dirname "$child")"
     cp -f "$BLOB" "$root/$child"
-    sidecar "$child" '[]' '[]' >"${launcher%"$EXE"}.direct"
+    sidecar "$child" '[]' '[]' >"${launcher%"$EXE"}.launch"
     run "$launcher"
     expect direct-starts-child 78 "probe-child"
 }
@@ -107,7 +107,7 @@ case_direct_args_env_exit() {
     printf '#!/bin/sh\nprintf "%%s\\n" "$PROBE_VALUE" "$@"\nexit 7\n' >"$root/$program"
     chmod +x "$root/$program"
     sidecar "$program" '["--baked"]' '[{"key":"PROBE_VALUE","value":"@VENDOR_DIR@/data","kind":"constant"}]' \
-        >"${launcher%"$EXE"}.direct"
+        >"${launcher%"$EXE"}.launch"
     run "$launcher" "caller arg"
     if [ "$STATUS" -ne 7 ]; then
         fail direct-args-env-exit "exit $STATUS, want 7"

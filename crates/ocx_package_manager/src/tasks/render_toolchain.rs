@@ -34,7 +34,7 @@ use super::super::PackageManager;
 use super::common::ClosureNode;
 use super::toolchain_names::{NotEnumerablePolicy, exposed_names, fold_case_insensitive};
 use super::vendor::VendorError;
-use ocx_env_apply::direct::DirectSidecar;
+use ocx_env_apply::launch::DirectRecord;
 
 /// The `__OCX_TESTING_RENDER_FAULT` value that aborts a render between the first `bin/` entry
 /// write and the stamp write.
@@ -658,7 +658,7 @@ pub async fn render_direct_bin(
     names: &[&str],
     blob: &[u8],
     windows: bool,
-    sidecar_for: &dyn Fn(&str) -> Result<DirectSidecar, VendorError>,
+    sidecar_for: &dyn Fn(&str) -> Result<DirectRecord, VendorError>,
 ) -> Result<(), VendorError> {
     if names.is_empty() {
         return Ok(());
@@ -1899,8 +1899,9 @@ mod tests {
         node
     }
 
-    fn direct_sidecar(name: &str) -> Result<DirectSidecar, VendorError> {
+    fn direct_sidecar(name: &str) -> Result<DirectRecord, VendorError> {
         Ok(serde_json::from_value(serde_json::json!({
+            "kind": "direct",
             "schema_version": 1,
             "vendor_id": "sha256:0b5f2a4e9c7d3b1a0b5f2a4e9c7d3b1a0b5f2a4e9c7d3b1a0b5f2a4e9c7d3b1a",
             "self": format!("selections/default/shells/default/bin/{name}"),
@@ -1940,8 +1941,8 @@ mod tests {
                 name.to_owned()
             });
             assert_eq!(std::fs::read(&launcher).expect("launcher"), b"blob");
-            let sidecar: DirectSidecar =
-                serde_json::from_slice(&std::fs::read(bin.join(format!("{name}.direct"))).expect("sidecar"))
+            let sidecar: DirectRecord =
+                serde_json::from_slice(&std::fs::read(bin.join(format!("{name}.launch"))).expect("sidecar"))
                     .expect("json");
             assert_eq!(sidecar.program, format!("@VENDOR_DIR@/packages/p/content/bin/{name}"));
             assert_eq!(

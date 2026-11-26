@@ -121,18 +121,18 @@ pub(super) const SIDECAR_PROBE_ORDER: [(&str, SidecarParser); 3] = [
 ];
 
 /// The vendored launcher's sidecar extension; a vendor set writes nothing else.
-pub(super) const DIRECT_EXTENSION: &str = ocx_env_apply::direct::SIDECAR_EXTENSION;
+pub(super) const RECORD_EXTENSION: &str = ocx_env_apply::launch::RECORD_EXTENSION;
 
 /// The sidecar extensions a launcher probes, in precedence order.
 ///
-/// Unix probes `.direct` alone, so a `.shim`, `.shimref` or `.exec` there is never read and the launcher exits 78;
-/// Windows probes the three existing kinds first, so a `.direct` never shadows one.
+/// Unix probes `.launch` alone, so a `.shim`, `.shimref` or `.exec` there is never read and the launcher exits 78;
+/// Windows probes the three existing kinds first, so a `.launch` never shadows one.
 pub(super) fn probe_extensions(windows: bool) -> Vec<&'static str> {
     let mut order: Vec<&'static str> = Vec::new();
     if windows {
         order.extend(SIDECAR_PROBE_ORDER.iter().map(|(extension, _)| *extension));
     }
-    order.push(DIRECT_EXTENSION);
+    order.push(RECORD_EXTENSION);
     order
 }
 

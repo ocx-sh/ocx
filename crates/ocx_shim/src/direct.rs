@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! The vendored (`.direct`) launcher: decoding its sidecar and finding the vendor root it ships in.
+//! The vendored (`.launch`) launcher: decoding its sidecar and finding the vendor root it ships in.
 //!
 //! Every filesystem question goes through [`LookupFs`], so the lookup rules run in unit tests without a disk.
 
 use super::ShimError;
 use super::core;
-use ocx_env_apply::direct::{DirectSidecar, EnvRecord, VENDOR_DIR_TOKEN};
+use ocx_env_apply::launch::{DirectRecord, EnvRecord, VENDOR_DIR_TOKEN};
 use ocx_env_apply::{ApplyKind, KeyFold, apply_one};
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
@@ -74,14 +74,14 @@ pub(super) struct LookupContext<'a> {
 pub(super) enum Probed {
     /// An existing kind; only a Windows launcher can see one, and its own path handles it.
     Legacy(&'static str),
-    /// A decoded `.direct` sidecar and the root it was found for.
+    /// A decoded `.launch` sidecar and the root it was found for.
     Direct(Located),
 }
 
-/// A decoded `.direct` sidecar bound to its vendor root.
+/// A decoded `.launch` sidecar bound to its vendor root.
 #[derive(Debug)]
 pub(super) struct Located {
-    pub sidecar: DirectSidecar,
+    pub sidecar: DirectRecord,
     /// The vendor root: absolute, lexically joined, no symlink resolved.
     pub root: String,
 }
@@ -142,13 +142,13 @@ pub(super) fn read_regular_bounded(path: &Path) -> Result<Option<Vec<u8>>, ReadE
 }
 
 /// Decodes and validates a sidecar read from `path`.
-pub(super) fn decode_sidecar(raw: &[u8], path: &str, windows: bool) -> Result<DirectSidecar, ShimError> {
+pub(super) fn decode_sidecar(raw: &[u8], path: &str, windows: bool) -> Result<DirectRecord, ShimError> {
     if raw.len() as u64 > MAX_SIDECAR_BYTES {
         return Err(refuse(format!(
             "sidecar {path} is larger than {MAX_SIDECAR_BYTES} bytes"
         )));
     }
-    let sidecar: DirectSidecar =
+    let sidecar: DirectRecord =
         serde_json::from_slice(raw).map_err(|err| refuse(format!("malformed sidecar {path}: {err}")))?;
     sidecar
         .validate(windows)
@@ -267,12 +267,12 @@ fn environment_runfiles_roots(started: &str, context: &LookupContext<'_>, fs: &d
     entry_roots(&directory, context.windows, fs)
 }
 
-/// Whether `<root>/<self>.direct` is there and byte-identical to the sidecar beside the started path.
+/// Whether `<root>/<self>.launch` is there and byte-identical to the sidecar beside the started path.
 fn accepts(root: &str, self_path: &str, raw: &[u8], windows: bool, fs: &dyn LookupFs) -> Result<bool, ShimError> {
     let path = format!(
         "{}/{self_path}.{}",
         root.trim_end_matches(separators(windows)),
-        core::DIRECT_EXTENSION
+        core::RECORD_EXTENSION
     );
     match fs.read_sidecar(&path) {
         Ok(found) => Ok(found.is_some_and(|bytes| bytes == raw)),
@@ -308,7 +308,7 @@ pub(super) fn started_path_unix(
 
 /// Finds the sidecar beside `started` and the vendor root it belongs to.
 ///
-/// The root is the first candidate, in candidate order, whose own `<self>.direct` is byte-identical to the sidecar
+/// The root is the first candidate, in candidate order, whose own `<self>.launch` is byte-identical to the sidecar
 /// beside the started path, so a stale tree holding another `vendor_id` is never taken.
 pub(super) fn locate(started: &str, context: &LookupContext<'_>, fs: &dyn LookupFs) -> Result<Probed, ShimError> {
     let windows = context.windows;
@@ -322,7 +322,7 @@ pub(super) fn locate(started: &str, context: &LookupContext<'_>, fs: &dyn Lookup
     let mut found = None;
     for extension in core::probe_extensions(windows) {
         let path = format!("{directory}{stem}.{extension}");
-        if extension != core::DIRECT_EXTENSION {
+        if extension != core::RECORD_EXTENSION {
             if fs.exists(&path) {
                 return Ok(Probed::Legacy(extension));
             }
@@ -340,7 +340,7 @@ pub(super) fn locate(started: &str, context: &LookupContext<'_>, fs: &dyn Lookup
     }
     let Some((sidecar_path, raw)) = found else {
         return Err(refuse(format!(
-            "sidecar not found: none of {}; keep the launcher beside its .direct sidecar",
+            "sidecar not found: none of {}; keep the launcher beside its .launch sidecar",
             probed_paths.join(", ")
         )));
     };
@@ -406,7 +406,7 @@ pub(super) struct Launch {
 /// On Windows keys fold ASCII case, so `Path` and `PATH` are one variable and the inherited spelling survives.
 fn build_env(
     inherited: Vec<(OsString, OsString)>,
-    sidecar: &DirectSidecar,
+    sidecar: &DirectRecord,
     root: &str,
     windows: bool,
 ) -> Vec<(OsString, OsString)> {
@@ -569,7 +569,7 @@ fn exec_program(program: &str, args: &[OsString], env: Vec<(OsString, OsString)>
         .exec()
 }
 
-/// The `.direct` launcher on Unix: finds the vendor root, builds the environment and argv, and `exec`s the tool.
+/// The `.launch` launcher on Unix: finds the vendor root, builds the environment and argv, and `exec`s the tool.
 ///
 /// Writes nothing to disk and sets no environment of its own, so it runs from a read-only directory.
 #[cfg(unix)]
@@ -610,7 +610,7 @@ pub(super) fn run() -> Result<i32, ShimError> {
     })
 }
 
-/// The `.direct` launcher on Windows: finds the vendor root, then starts the tool.
+/// The `.launch` launcher on Windows: finds the vendor root, then starts the tool.
 ///
 /// A batch target goes through `std::process::Command`, whose batch-file escaping refuses what it cannot quote
 /// safely (BatBadBut, CVE-2024-24576), and anything else through the existing `CreateProcessW` path.
@@ -782,7 +782,7 @@ mod tests {
 
     fn sidecar_json(vendor_id: &str, self_path: &str) -> Vec<u8> {
         format!(
-            r#"{{"schema_version":1,"vendor_id":"{vendor_id}","self":"{self_path}","program":"@VENDOR_DIR@/packages/p/content/bin/cmake","args":[],"unset":[],"env":[]}}"#
+            r#"{{"kind":"direct","schema_version":1,"vendor_id":"{vendor_id}","self":"{self_path}","program":"@VENDOR_DIR@/packages/p/content/bin/cmake","args":[],"unset":[],"env":[]}}"#
         )
         .into_bytes()
     }
@@ -857,20 +857,20 @@ mod tests {
     // ── Kinds per platform ────────────────────────────────────────────
 
     #[test]
-    fn v52_unix_probes_the_direct_kind_alone() {
-        assert_eq!(core::probe_extensions(false), ["direct"]);
+    fn v52_unix_probes_the_launch_record_alone() {
+        assert_eq!(core::probe_extensions(false), ["launch"]);
     }
 
     #[test]
-    fn v52_windows_probes_the_direct_kind_after_the_three_existing_ones() {
-        assert_eq!(core::probe_extensions(true), ["shim", "shimref", "exec", "direct"]);
+    fn v52_windows_probes_the_launch_record_after_the_three_existing_ones() {
+        assert_eq!(core::probe_extensions(true), ["shim", "shimref", "exec", "launch"]);
     }
 
     #[test]
     fn v52_a_direct_sidecar_is_accepted_on_unix() {
         let started = format!("/vendor/{SELF_PATH}");
         let bytes = sidecar_json(VENDOR_A, SELF_PATH);
-        let fs = FakeFs::default().with_file(&format!("{started}.direct"), &bytes);
+        let fs = FakeFs::default().with_file(&format!("{started}.launch"), &bytes);
         let located = direct(locate(&started, &unix(None), &fs).unwrap());
         assert_eq!(located.root, "/vendor");
         assert_eq!(located.sidecar.vendor_id, VENDOR_A);
@@ -884,7 +884,7 @@ mod tests {
             fs = fs.with_file(&format!("{started}.{extension}"), b"/some/root\n");
         }
         let message = refusal(locate(&started, &unix(None), &fs));
-        assert!(message.contains("cmake.direct"), "{message}");
+        assert!(message.contains("cmake.launch"), "{message}");
     }
 
     #[test]
@@ -893,7 +893,7 @@ mod tests {
         let stem_path = started.strip_suffix(".exe").unwrap();
         let fs = FakeFs::default()
             .with_file(&format!("{stem_path}.shim"), b"C:\\root\n")
-            .with_file(&format!("{stem_path}.direct"), &sidecar_json(VENDOR_A, SELF_PATH));
+            .with_file(&format!("{stem_path}.launch"), &sidecar_json(VENDOR_A, SELF_PATH));
         let context = LookupContext {
             cwd: "C:\\work",
             runfiles_dir: None,
@@ -910,11 +910,11 @@ mod tests {
     #[test]
     fn candidate_a_strips_the_launcher_path_from_the_started_path_on_windows() {
         let started = "C:\\Vendor\\Selections\\Default\\Shells\\Default\\BIN\\CMAKE.EXE";
-        let sidecar_path = "C:\\Vendor\\Selections\\Default\\Shells\\Default\\BIN\\CMAKE.direct";
+        let sidecar_path = "C:\\Vendor\\Selections\\Default\\Shells\\Default\\BIN\\CMAKE.launch";
         let bytes = sidecar_json(VENDOR_A, SELF_PATH);
         let fs = FakeFs::default()
             .with_file(sidecar_path, &bytes)
-            .with_file(&format!("C:\\Vendor/{SELF_PATH}.direct"), &bytes);
+            .with_file(&format!("C:\\Vendor/{SELF_PATH}.launch"), &bytes);
         let context = LookupContext {
             cwd: "C:\\work",
             runfiles_dir: None,
@@ -929,9 +929,9 @@ mod tests {
         let started = "/out/bin/tool";
         let bytes = sidecar_json(VENDOR_A, SELF_PATH);
         let fs = FakeFs::default()
-            .with_file("/out/bin/tool.direct", &bytes)
+            .with_file("/out/bin/tool.launch", &bytes)
             .with_dir("/out/bin/tool.runfiles", &["_main", "pkg"])
-            .with_file(&format!("/out/bin/tool.runfiles/pkg/{SELF_PATH}.direct"), &bytes);
+            .with_file(&format!("/out/bin/tool.runfiles/pkg/{SELF_PATH}.launch"), &bytes);
         let located = direct(locate(started, &unix(None), &fs).unwrap());
         assert_eq!(located.root, "/out/bin/tool.runfiles/pkg");
     }
@@ -940,14 +940,14 @@ mod tests {
     fn candidate_b_skips_an_entry_whose_sidecar_has_another_vendor_id() {
         let started = "/out/bin/tool";
         let fs = FakeFs::default()
-            .with_file("/out/bin/tool.direct", &sidecar_json(VENDOR_A, SELF_PATH))
+            .with_file("/out/bin/tool.launch", &sidecar_json(VENDOR_A, SELF_PATH))
             .with_dir("/out/bin/tool.runfiles", &["a_other", "b_mine"])
             .with_file(
-                &format!("/out/bin/tool.runfiles/a_other/{SELF_PATH}.direct"),
+                &format!("/out/bin/tool.runfiles/a_other/{SELF_PATH}.launch"),
                 &sidecar_json(VENDOR_B, SELF_PATH),
             )
             .with_file(
-                &format!("/out/bin/tool.runfiles/b_mine/{SELF_PATH}.direct"),
+                &format!("/out/bin/tool.runfiles/b_mine/{SELF_PATH}.launch"),
                 &sidecar_json(VENDOR_A, SELF_PATH),
             );
         let located = direct(locate(started, &unix(None), &fs).unwrap());
@@ -959,10 +959,10 @@ mod tests {
         let names: Vec<String> = (0..5000).map(|i| format!("e{i:05}")).collect();
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
         FakeFs::default()
-            .with_file("/out/bin/tool.direct", &bytes)
+            .with_file("/out/bin/tool.launch", &bytes)
             .with_dir("/out/bin/tool.runfiles", &refs)
             .with_file(
-                &format!("/out/bin/tool.runfiles/{}/{SELF_PATH}.direct", names[position]),
+                &format!("/out/bin/tool.runfiles/{}/{SELF_PATH}.launch", names[position]),
                 &bytes,
             )
     }
@@ -984,10 +984,10 @@ mod tests {
     fn candidate_b_examines_entries_in_name_order_whatever_the_listing_order() {
         let bytes = sidecar_json(VENDOR_A, SELF_PATH);
         let fs = FakeFs::default()
-            .with_file("/out/bin/tool.direct", &bytes)
+            .with_file("/out/bin/tool.launch", &bytes)
             .with_dir("/out/bin/tool.runfiles", &["zz", "aa"])
-            .with_file(&format!("/out/bin/tool.runfiles/zz/{SELF_PATH}.direct"), &bytes)
-            .with_file(&format!("/out/bin/tool.runfiles/aa/{SELF_PATH}.direct"), &bytes);
+            .with_file(&format!("/out/bin/tool.runfiles/zz/{SELF_PATH}.launch"), &bytes)
+            .with_file(&format!("/out/bin/tool.runfiles/aa/{SELF_PATH}.launch"), &bytes);
         let located = direct(locate("/out/bin/tool", &unix(None), &fs).unwrap());
         assert_eq!(located.root, "/out/bin/tool.runfiles/aa");
     }
@@ -997,9 +997,9 @@ mod tests {
     fn v59_a_stale_runfiles_dir_is_not_used_when_the_started_path_is_outside_it() {
         let bytes = sidecar_json(VENDOR_A, SELF_PATH);
         let fs = FakeFs::default()
-            .with_file("/own/tool.direct", &bytes)
+            .with_file("/own/tool.launch", &bytes)
             .with_dir("/stale/runfiles", &["tree"])
-            .with_file(&format!("/stale/runfiles/tree/{SELF_PATH}.direct"), &bytes);
+            .with_file(&format!("/stale/runfiles/tree/{SELF_PATH}.launch"), &bytes);
         let message = refusal(locate("/own/tool", &unix(Some("/stale/runfiles")), &fs));
         assert!(message.contains("no vendored root"), "{message}");
     }
@@ -1008,7 +1008,7 @@ mod tests {
     #[test]
     fn v45_no_root_on_windows_names_the_enable_runfiles_flag() {
         let bytes = sidecar_json(VENDOR_A, SELF_PATH);
-        let fs = FakeFs::default().with_file("C:\\out\\bin\\tool.direct", &bytes);
+        let fs = FakeFs::default().with_file("C:\\out\\bin\\tool.launch", &bytes);
         let context = LookupContext {
             cwd: "C:\\work",
             runfiles_dir: None,
@@ -1018,7 +1018,7 @@ mod tests {
         assert!(message.contains("no vendored root found"), "{message}");
         assert!(message.contains("--enable_runfiles"), "{message}");
 
-        let fs = FakeFs::default().with_file("/out/bin/tool.direct", &bytes);
+        let fs = FakeFs::default().with_file("/out/bin/tool.launch", &bytes);
         let message = refusal(locate("/out/bin/tool", &unix(None), &fs));
         assert!(message.contains("no vendored root found"), "{message}");
         assert!(!message.contains("--enable_runfiles"), "{message}");
@@ -1033,7 +1033,7 @@ mod tests {
         let message = refusal(locate("/own/tool", &unix(None), &FakeFs::default()));
         assert!(message.contains("sidecar not found: none of "), "{message}");
         assert!(
-            message.ends_with("keep the launcher beside its .direct sidecar"),
+            message.ends_with("keep the launcher beside its .launch sidecar"),
             "{message}"
         );
     }
@@ -1042,9 +1042,9 @@ mod tests {
     fn v59_control_the_runfiles_dir_is_used_when_the_started_path_is_under_it() {
         let bytes = sidecar_json(VENDOR_A, SELF_PATH);
         let fs = FakeFs::default()
-            .with_file("/runfiles/_main/tool.direct", &bytes)
+            .with_file("/runfiles/_main/tool.launch", &bytes)
             .with_dir("/runfiles", &["tree"])
-            .with_file(&format!("/runfiles/tree/{SELF_PATH}.direct"), &bytes);
+            .with_file(&format!("/runfiles/tree/{SELF_PATH}.launch"), &bytes);
         let located = direct(locate("/runfiles/_main/tool", &unix(Some("/runfiles")), &fs).unwrap());
         assert_eq!(located.root, "/runfiles/tree");
     }
@@ -1053,9 +1053,9 @@ mod tests {
     fn v59_a_prefix_that_is_not_a_path_component_is_not_under_the_runfiles_dir() {
         let bytes = sidecar_json(VENDOR_A, SELF_PATH);
         let fs = FakeFs::default()
-            .with_file("/runfiles-old/tool.direct", &bytes)
+            .with_file("/runfiles-old/tool.launch", &bytes)
             .with_dir("/runfiles", &["tree"])
-            .with_file(&format!("/runfiles/tree/{SELF_PATH}.direct"), &bytes);
+            .with_file(&format!("/runfiles/tree/{SELF_PATH}.launch"), &bytes);
         refusal(locate("/runfiles-old/tool", &unix(Some("/runfiles")), &fs));
     }
 
@@ -1065,7 +1065,7 @@ mod tests {
         let names: Vec<String> = (0..12).map(|i| format!("e{i:02}")).collect();
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
         let fs = FakeFs::default()
-            .with_file("/out/bin/tool.direct", &bytes)
+            .with_file("/out/bin/tool.launch", &bytes)
             .with_dir("/out/bin/tool.runfiles", &refs);
         let message = refusal(locate("/out/bin/tool", &unix(None), &fs));
         assert!(message.contains("12 candidate"), "{message}");
@@ -1075,14 +1075,14 @@ mod tests {
     #[test]
     fn a_missing_sidecar_names_the_path_it_tried() {
         let message = refusal(locate("/vendor/bin/cmake", &unix(None), &FakeFs::default()));
-        assert!(message.contains("/vendor/bin/cmake.direct"), "{message}");
+        assert!(message.contains("/vendor/bin/cmake.launch"), "{message}");
     }
 
     // ── Root shape ────────────────────────────────────────────
 
     fn root_under(dir: &str) -> Result<Probed, ShimError> {
         let started = format!("{dir}/{SELF_PATH}");
-        let fs = FakeFs::default().with_file(&format!("{started}.direct"), &sidecar_json(VENDOR_A, SELF_PATH));
+        let fs = FakeFs::default().with_file(&format!("{started}.launch"), &sidecar_json(VENDOR_A, SELF_PATH));
         locate(&started, &unix(None), &fs)
     }
 
@@ -1107,10 +1107,10 @@ mod tests {
         let bytes = sidecar_json(VENDOR_A, SELF_PATH);
         for (root, accepted) in [("C:\\a;b", false), ("C:\\ab", true)] {
             let started = format!("{root}\\{}.exe", SELF_PATH.replace('/', "\\"));
-            let sidecar_path = format!("{root}\\{}.direct", SELF_PATH.replace('/', "\\"));
+            let sidecar_path = format!("{root}\\{}.launch", SELF_PATH.replace('/', "\\"));
             let fs = FakeFs::default()
                 .with_file(&sidecar_path, &bytes)
-                .with_file(&format!("{root}/{SELF_PATH}.direct"), &bytes);
+                .with_file(&format!("{root}/{SELF_PATH}.launch"), &bytes);
             let result = locate(&started, &context, &fs);
             assert_eq!(result.is_ok(), accepted, "{root}");
         }
@@ -1169,8 +1169,8 @@ mod tests {
 
     #[test]
     fn a_sidecar_with_an_unknown_field_exits_78() {
-        let raw = br#"{"schema_version":1,"vendor_id":"v","self":"a","program":"@VENDOR_DIR@/a","args":[],"unset":[],"env":[],"extra":1}"#;
-        assert_eq!(decode_sidecar(raw, "/s.direct", false).unwrap_err().exit_code(), 78);
+        let raw = br#"{"kind":"direct","schema_version":1,"vendor_id":"v","self":"a","program":"@VENDOR_DIR@/a","args":[],"unset":[],"env":[],"extra":1}"#;
+        assert_eq!(decode_sidecar(raw, "/s.launch", false).unwrap_err().exit_code(), 78);
     }
 
     #[test]
@@ -1179,7 +1179,7 @@ mod tests {
             .unwrap()
             .replace("\"schema_version\":1", "\"schema_version\":2");
         assert_eq!(
-            decode_sidecar(raw.as_bytes(), "/s.direct", false)
+            decode_sidecar(raw.as_bytes(), "/s.launch", false)
                 .unwrap_err()
                 .exit_code(),
             78
@@ -1192,7 +1192,7 @@ mod tests {
             .unwrap()
             .replace("@VENDOR_DIR@/packages", "/packages");
         assert_eq!(
-            decode_sidecar(raw.as_bytes(), "/s.direct", false)
+            decode_sidecar(raw.as_bytes(), "/s.launch", false)
                 .unwrap_err()
                 .exit_code(),
             78
@@ -1202,14 +1202,14 @@ mod tests {
     #[test]
     fn a_well_formed_sidecar_decodes() {
         let raw = sidecar_json(VENDOR_A, SELF_PATH);
-        assert_eq!(decode_sidecar(&raw, "/s.direct", false).unwrap().self_path, SELF_PATH);
+        assert_eq!(decode_sidecar(&raw, "/s.launch", false).unwrap().self_path, SELF_PATH);
     }
 
     #[test]
     fn a_sidecar_over_one_mebibyte_exits_78_even_when_well_formed() {
         let mut raw = sidecar_json(VENDOR_A, SELF_PATH);
         raw.resize(MAX_SIDECAR_BYTES as usize + 1, b' ');
-        assert_eq!(decode_sidecar(&raw, "/s.direct", false).unwrap_err().exit_code(), 78);
+        assert_eq!(decode_sidecar(&raw, "/s.launch", false).unwrap_err().exit_code(), 78);
     }
 
     /// A NUL in a value ends its `KEY=VALUE` entry in a Windows environment block, so the rest would be a new entry.
@@ -1218,14 +1218,14 @@ mod tests {
         let value = r#"[{"key":"K","value":"x\u0000OCX_SIGNING_KEY=s","kind":"constant"}]"#;
         let raw = sidecar_with("[]", r#"["OCX_SIGNING_KEY"]"#, value);
         assert_eq!(
-            decode_sidecar(raw.as_bytes(), "/s.direct", true)
+            decode_sidecar(raw.as_bytes(), "/s.launch", true)
                 .unwrap_err()
                 .exit_code(),
             78
         );
         let raw = sidecar_with(r#"["a\u0000b"]"#, "[]", "[]");
         assert_eq!(
-            decode_sidecar(raw.as_bytes(), "/s.direct", false)
+            decode_sidecar(raw.as_bytes(), "/s.launch", false)
                 .unwrap_err()
                 .exit_code(),
             78
@@ -1245,7 +1245,7 @@ mod tests {
     #[test]
     fn a_sidecar_the_fs_refuses_exits_78() {
         let mut fs = FakeFs::default();
-        fs.unreadable.insert("/vendor/bin/cmake.direct".to_string());
+        fs.unreadable.insert("/vendor/bin/cmake.launch".to_string());
         let message = refusal(locate("/vendor/bin/cmake", &unix(None), &fs));
         assert!(message.contains("not a regular file"), "{message}");
     }
@@ -1254,14 +1254,14 @@ mod tests {
 
     fn located(json: &str, root: &str) -> Located {
         Located {
-            sidecar: decode_sidecar(json.as_bytes(), "/s.direct", false).unwrap(),
+            sidecar: decode_sidecar(json.as_bytes(), "/s.launch", false).unwrap(),
             root: root.to_string(),
         }
     }
 
     fn sidecar_with(args: &str, unset: &str, env: &str) -> String {
         format!(
-            r#"{{"schema_version":1,"vendor_id":"{VENDOR_A}","self":"{SELF_PATH}","program":"@VENDOR_DIR@/p/bin/cmake","args":{args},"unset":{unset},"env":{env}}}"#
+            r#"{{"kind":"direct","schema_version":1,"vendor_id":"{VENDOR_A}","self":"{SELF_PATH}","program":"@VENDOR_DIR@/p/bin/cmake","args":{args},"unset":{unset},"env":{env}}}"#
         )
     }
 
@@ -1430,10 +1430,10 @@ mod tests {
     #[test]
     fn a_regular_file_is_read_and_a_missing_one_is_none() {
         let dir = scratch_dir("regular");
-        let file = dir.join("a.direct");
+        let file = dir.join("a.launch");
         std::fs::write(&file, b"{}").unwrap();
         assert_eq!(read_regular_bounded(&file).unwrap().as_deref(), Some(&b"{}"[..]));
-        assert!(read_regular_bounded(&dir.join("missing.direct")).unwrap().is_none());
+        assert!(read_regular_bounded(&dir.join("missing.launch")).unwrap().is_none());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -1447,7 +1447,7 @@ mod tests {
     #[test]
     fn a_file_over_the_bound_is_refused() {
         let dir = scratch_dir("big");
-        let file = dir.join("big.direct");
+        let file = dir.join("big.launch");
         std::fs::write(&file, vec![b' '; MAX_SIDECAR_BYTES as usize + 1]).unwrap();
         assert!(matches!(read_regular_bounded(&file), Err(ReadError::TooLarge)));
         std::fs::write(&file, vec![b' '; MAX_SIDECAR_BYTES as usize]).unwrap();
@@ -1467,7 +1467,7 @@ mod tests {
     )]
     fn v60_a_fifo_at_the_sidecar_path_is_refused_without_blocking() {
         let dir = scratch_dir("fifo");
-        let fifo = dir.join("cmake.direct");
+        let fifo = dir.join("cmake.launch");
         let made = std::process::Command::new("mkfifo").arg(&fifo).status().unwrap();
         assert!(made.success());
 

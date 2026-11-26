@@ -345,6 +345,9 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",
     "Win32_Storage_FileSystem",
     "Win32_System_Console",
+    # Unified launcher: file-identity, process-image and reparse-point queries.
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
     # SetEnvironmentVariableW — the shim deletes the withdrawn selector variables from its own
     # block before spawning, which is how they are stripped from the
     # child (CreateProcessW runs with lpEnvironment = NULL). Already in the
@@ -356,6 +359,7 @@ windows-sys = { version = "0.61.2", features = [
     # REG_EXPAND_SZ through Win32_System_Registry, then announced with a
     # `WM_SETTINGCHANGE` broadcast (`SendMessageTimeoutW`) from
     # Win32_UI_WindowsAndMessaging. Both in the pinned 0.61.2; no new crate.
+    "Win32_System_ProcessStatus",
     "Win32_System_Registry",
     "Win32_System_Threading",
     "Win32_UI_WindowsAndMessaging",

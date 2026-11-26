@@ -16,7 +16,7 @@ use super::body::{unix_launcher_body, utf8_baked_path};
 use super::direct::write_direct_launcher_for;
 use super::safety::LauncherSafeString;
 use crate::tasks::vendor::VendorError;
-use ocx_env_apply::direct::DirectSidecar;
+use ocx_env_apply::launch::DirectRecord;
 
 /// Generates the launchers baking `pkg_root` for every entrypoint into `dest`; empty `entries`
 /// does not create `dest`. `shim_bin` is used on Windows only.
@@ -95,7 +95,7 @@ pub async fn generate_direct(
     dest: &Path,
     blob: &[u8],
     windows: bool,
-    sidecar_for: &dyn Fn(&str) -> Result<DirectSidecar, VendorError>,
+    sidecar_for: &dyn Fn(&str) -> Result<DirectRecord, VendorError>,
 ) -> Result<(), VendorError> {
     if entries.is_empty() {
         return Ok(());
@@ -273,16 +273,17 @@ mod tests {
     use ocx_store::file_structure::ShimBinStore;
 
     use super::generate_direct;
-    use ocx_env_apply::direct::DirectSidecar;
+    use ocx_env_apply::launch::DirectRecord;
 
-    /// A direct entry-point render writes `<name>` and `<name>.direct` carrying the entry's own sidecar.
+    /// A direct entry-point render writes `<name>` and `<name>.launch` carrying the entry's own sidecar.
     #[tokio::test]
     async fn generate_direct_writes_launcher_and_sidecar_per_entry_point() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let dest = tmp.path().join("entrypoints");
         let entries = Entrypoints::from_names(["alpha", "beta"]);
-        let sidecar_for = |name: &str| -> Result<DirectSidecar, super::VendorError> {
+        let sidecar_for = |name: &str| -> Result<DirectRecord, super::VendorError> {
             Ok(serde_json::from_value(serde_json::json!({
+                "kind": "direct",
                 "schema_version": 1,
                 "vendor_id": "sha256:0b5f2a4e9c7d3b1a0b5f2a4e9c7d3b1a0b5f2a4e9c7d3b1a0b5f2a4e9c7d3b1a",
                 "self": format!("packages/p/entrypoints/{name}"),
@@ -305,8 +306,8 @@ mod tests {
                 name.to_owned()
             });
             assert_eq!(std::fs::read(launcher).expect("launcher"), b"blob");
-            let sidecar: DirectSidecar =
-                serde_json::from_slice(&std::fs::read(dest.join(format!("{name}.direct"))).expect("sidecar"))
+            let sidecar: DirectRecord =
+                serde_json::from_slice(&std::fs::read(dest.join(format!("{name}.launch"))).expect("sidecar"))
                     .expect("json");
             assert_eq!(sidecar.program, format!("@VENDOR_DIR@/packages/p/content/bin/{name}"));
             assert_eq!(sidecar.self_path, format!("packages/p/entrypoints/{name}"));

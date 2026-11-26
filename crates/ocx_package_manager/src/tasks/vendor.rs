@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use futures::{StreamExt, TryStreamExt};
 use ocx_env_apply::ApplyKind;
-use ocx_env_apply::direct::{DirectSidecar, EnvRecord, SCHEMA_VERSION as SIDECAR_VERSION};
+use ocx_env_apply::launch::{DirectRecord, EnvRecord, LaunchKind, SCHEMA_VERSION as SIDECAR_VERSION};
 use ocx_oci::{Digest, OperatingSystem, PackageRef, PinnedPackageRef, Platform};
 use ocx_package::install_info::InstallInfo;
 use ocx_package::metadata::Entrypoints;
@@ -1048,7 +1048,7 @@ async fn write_entrypoint_launchers(
         let no_dependencies = HashMap::new();
         let resolver = TemplateResolver::new(&install_path, &no_dependencies).usage(Usage::EntryPointArgs);
         // Program resolution is async, so every sidecar is built before the generator asks for one.
-        let mut sidecars: HashMap<&str, DirectSidecar> = HashMap::new();
+        let mut sidecars: HashMap<&str, DirectRecord> = HashMap::new();
         for entry in &package.entrypoints {
             let environment = environment_of(manifest, &entry.environment)?;
             let program = resolve_program(
@@ -1115,7 +1115,7 @@ async fn write_selection_launchers(
         by_selection.entry(&tool.selection).or_default().push(tool);
     }
     for (selection, tools) in by_selection {
-        let mut sidecars: HashMap<&str, DirectSidecar> = HashMap::new();
+        let mut sidecars: HashMap<&str, DirectRecord> = HashMap::new();
         for tool in &tools {
             let Some(launcher_path) = &tool.launcher_path else {
                 continue;
@@ -1225,12 +1225,13 @@ fn sidecar_of(
     program: String,
     args: Vec<String>,
     items: &[EnvironmentItem],
-) -> DirectSidecar {
+) -> DirectRecord {
     let self_path = launcher_path
         .strip_suffix(".exe")
         .filter(|_| windows)
         .unwrap_or(launcher_path);
-    DirectSidecar {
+    DirectRecord {
+        kind: LaunchKind::Direct,
         schema_version: SIDECAR_VERSION,
         vendor_id: vendor_id.to_owned(),
         self_path: self_path.to_owned(),
@@ -2580,7 +2581,7 @@ mod tests {
 
     // ── Content half: launchers and sidecars over a staged tree ──────────────
 
-    use ocx_env_apply::direct::DirectSidecar as WrittenSidecar;
+    use ocx_env_apply::launch::DirectRecord as WrittenSidecar;
 
     /// A staging tree holding `files` (paths relative to the root), and the manifest of the registered tool.
     async fn staged_tool(files: &[String]) -> (tempfile::TempDir, VendorLayout, VendorManifest) {
@@ -2607,7 +2608,7 @@ mod tests {
     }
 
     fn sidecar_at(layout: &VendorLayout, launcher: &str) -> WrittenSidecar {
-        serde_json::from_slice(&std::fs::read(layout.resolve(&format!("{launcher}.direct"))).expect("sidecar"))
+        serde_json::from_slice(&std::fs::read(layout.resolve(&format!("{launcher}.launch"))).expect("sidecar"))
             .expect("decodes")
     }
 

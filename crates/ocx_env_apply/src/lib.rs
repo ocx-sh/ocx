@@ -5,7 +5,7 @@
 //!
 //! Std and `serde` only: the launcher links this crate and carries a size budget.
 
-pub mod direct;
+pub mod launch;
 pub mod windows_path;
 
 use std::ffi::{OsStr, OsString};

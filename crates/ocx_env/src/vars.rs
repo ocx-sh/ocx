@@ -540,6 +540,12 @@ crate::env_vars! {
     /// OCX would install the package the outer OCX is still pulling and wait on its lock. Under the
     /// marker OCX behaves as if `--offline` were given.
     pub __OCX_CREDENTIAL_HELPER: Bool, Plumbing, propagation = HookLocal;
+    /// How many launchers have started one another in this process chain; a launcher refuses past the limit.
+    ///
+    /// Written by a launcher into the child it starts and passed on unchanged by every other spawn, so a
+    /// launcher that starts itself (a trampoline resolving to its own directory) ends in an error, not a
+    /// fork loop. Never set it by hand.
+    pub __OCX_LAUNCHER_DEPTH: Integer, Plumbing, propagation = UserInput;
 
     // ── Test seams ──
 

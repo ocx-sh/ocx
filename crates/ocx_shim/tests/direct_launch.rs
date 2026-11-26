@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! The vendored launcher on Unix, end to end: the real `ocx-shim` binary, a hand-written `.direct` sidecar and a
+//! The vendored launcher on Unix, end to end: the real `ocx-shim` binary, a hand-written `.launch` sidecar and a
 //! vendor directory laid out the way `ocx vendor` writes one.
 #![cfg(unix)]
 #![expect(
@@ -65,9 +65,9 @@ impl Vendor {
         std::fs::copy(LAUNCHER_BINARY, self.launcher()).unwrap();
         self.write(PROGRAM, PROBE_SCRIPT.as_bytes(), 0o755);
         let sidecar = format!(
-            r#"{{"schema_version":1,"vendor_id":"{VENDOR_ID}","self":"{SELF_PATH}","program":"@VENDOR_DIR@/{PROGRAM}","args":{args},"unset":{unset},"env":{env}}}"#
+            r#"{{"kind":"direct","schema_version":1,"vendor_id":"{VENDOR_ID}","self":"{SELF_PATH}","program":"@VENDOR_DIR@/{PROGRAM}","args":{args},"unset":{unset},"env":{env}}}"#
         );
-        self.write(&format!("{SELF_PATH}.direct"), sidecar.as_bytes(), 0o644);
+        self.write(&format!("{SELF_PATH}.launch"), sidecar.as_bytes(), 0o644);
     }
 
     /// The launcher with a cleared environment holding only `env`, so a test never depends on the host's.
@@ -285,10 +285,10 @@ fn the_launcher_starts_from_a_read_only_directory_and_changes_nothing() {
 fn a_launcher_without_its_sidecar_exits_78_naming_the_path() {
     let vendor = Vendor::new("nosidecar");
     vendor.install("[]", "[]", "[]");
-    std::fs::remove_file(vendor.root().join(format!("{SELF_PATH}.direct"))).unwrap();
+    std::fs::remove_file(vendor.root().join(format!("{SELF_PATH}.launch"))).unwrap();
     let output = vendor.run(&[], &[]);
     assert_eq!(output.status.code(), Some(78), "{}", stderr_of(&output));
-    assert!(stderr_of(&output).contains("tool.direct"), "{}", stderr_of(&output));
+    assert!(stderr_of(&output).contains("tool.launch"), "{}", stderr_of(&output));
 }
 
 #[test]
@@ -320,8 +320,8 @@ fn the_root_is_found_through_the_runfiles_tree_of_the_started_path() {
     std::fs::create_dir_all(vendor.base.join("out/bin/tool.runfiles/_main")).unwrap();
     std::fs::copy(LAUNCHER_BINARY, outside.join("tool")).unwrap();
     std::fs::copy(
-        vendor.root().join(format!("{SELF_PATH}.direct")),
-        outside.join("tool.direct"),
+        vendor.root().join(format!("{SELF_PATH}.launch")),
+        outside.join("tool.launch"),
     )
     .unwrap();
 
@@ -352,8 +352,8 @@ fn v66_launcher_overhead_with_one_thousand_runfiles_entries() {
     let launcher = outside.join("tool");
     std::fs::copy(LAUNCHER_BINARY, &launcher).unwrap();
     std::fs::copy(
-        vendor.root().join(format!("{SELF_PATH}.direct")),
-        outside.join("tool.direct"),
+        vendor.root().join(format!("{SELF_PATH}.launch")),
+        outside.join("tool.launch"),
     )
     .unwrap();
     let program = vendor.root().join(PROGRAM);

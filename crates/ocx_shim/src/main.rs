@@ -40,7 +40,7 @@ enum ShimError {
     OcxNotFound { pinned: Option<String> },
     /// `CreateProcessW` failed otherwise: exit 74, or 77 when `win32` is `ERROR_ACCESS_DENIED`.
     SpawnFailure { win32: u32, program: String },
-    /// The `.direct` launcher refused: sidecar missing, unreadable, malformed, or no vendored root accepted. Exit 78.
+    /// The `.launch` launcher refused: sidecar missing, unreadable, malformed, or no vendored root accepted. Exit 78.
     ///
     /// `reason` is the whole stderr line after the `ocx-shim:` prefix, so it names what the lookup tried.
     DirectRefused { reason: String },
@@ -104,7 +104,7 @@ impl ShimError {
             ShimError::SidecarNotFound { stem_path } => {
                 format!(
                     "ocx-shim: sidecar not found: none of {stem_path}.shim, {stem_path}.shimref, {stem_path}.exec or \
-                     {stem_path}.direct (re-run `ocx install`, `ocx pull`, or the command that composed this tool, to regenerate the entrypoint)"
+                     {stem_path}.launch (re-run `ocx install`, `ocx pull`, or the command that composed this tool, to regenerate the entrypoint)"
                 )
             }
             ShimError::MalformedSidecar { reason } => {
@@ -308,7 +308,7 @@ fn run() -> Result<i32, ShimError> {
     }
     // No existing kind beside the shim: the vendored kind, or nothing.
     let Some(sidecar) = sidecar else {
-        let direct_sidecar = module_dir.join(format!("{stem}.{}", core::DIRECT_EXTENSION));
+        let direct_sidecar = module_dir.join(format!("{stem}.{}", core::RECORD_EXTENSION));
         if !direct_sidecar.exists() {
             return Err(ShimError::SidecarNotFound {
                 stem_path: stem_path.display().to_string(),
@@ -708,7 +708,7 @@ fn install_console_ctrl_handler() {
     }
 }
 
-/// The Unix launcher runs the vendored (`.direct`) kind alone.
+/// The Unix launcher runs the vendored (`.launch`) kind alone.
 #[cfg(unix)]
 fn run() -> Result<i32, ShimError> {
     direct::run()
