@@ -6,6 +6,8 @@
 
 use std::collections::BTreeMap;
 
+use sha2::{Digest, Sha256};
+
 /// Bumped when a writer change must reach launcher directories already on disk.
 pub const HOME_LAUNCHER_REVISION: u32 = 1;
 
@@ -17,13 +19,23 @@ pub struct LauncherGeneration(String);
 
 impl LauncherGeneration {
     /// The first 16 hex characters of SHA-256 over the `ocx.launcher-generation.v1` lines.
-    pub fn of(_blob: &[u8], _schema_version: u32, _revision: u32) -> Self {
-        unimplemented!("LauncherGeneration::of")
+    pub fn of(blob: &[u8], schema_version: u32, revision: u32) -> Self {
+        let blob_digest = hex::encode(Sha256::digest(blob));
+        let input =
+            format!("ocx.launcher-generation.v1\nblob={blob_digest}\nschema={schema_version}\nrevision={revision}\n");
+        let mut key = hex::encode(Sha256::digest(input.as_bytes()));
+        key.truncate(GENERATION_HEX_LEN);
+        Self(key)
     }
 
     /// `of(shim::host_blob()?, ocx_env_apply::launch::SCHEMA_VERSION, HOME_LAUNCHER_REVISION)`; `None` on a host with no blob.
     pub fn host() -> Option<Self> {
-        unimplemented!("LauncherGeneration::host")
+        let blob = crate::shim::host_blob()?;
+        Some(Self::of(
+            blob,
+            ocx_env_apply::launch::SCHEMA_VERSION,
+            HOME_LAUNCHER_REVISION,
+        ))
     }
 
     /// Reads a generation back from a directory name; `None` unless it is exactly 16 lowercase hex characters.
@@ -38,8 +50,22 @@ impl LauncherGeneration {
 }
 
 /// SHA-256 over the `ocx.toolchain-render.v1` input; 64 lowercase hex, stored in the render stamp.
-pub fn render_fingerprint(_generation: &LauncherGeneration, _records: &BTreeMap<String, Vec<u8>>) -> String {
-    unimplemented!("render_fingerprint")
+pub fn render_fingerprint(generation: &LauncherGeneration, records: &BTreeMap<String, Vec<u8>>) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(format!(
+        "ocx.toolchain-render.v1\ngeneration={}\nnames={}\n",
+        generation.as_str(),
+        records.len()
+    ));
+    // BTreeMap<String, _> iterates in byte order of the name.
+    for (name, record) in records {
+        hasher.update(format!("{}:", name.len()));
+        hasher.update(name.as_bytes());
+        hasher.update(format!("{}:", record.len()));
+        hasher.update(record);
+        hasher.update(b"\n");
+    }
+    hex::encode(hasher.finalize())
 }
 
 #[cfg(test)]
