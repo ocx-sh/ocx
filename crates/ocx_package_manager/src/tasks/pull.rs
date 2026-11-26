@@ -3447,11 +3447,14 @@ mod tests {
                 header.set_cksum();
                 builder.append_data(&mut header, name, content).unwrap();
             }
-            let mut link = tar::Header::new_gnu();
-            link.set_entry_type(tar::EntryType::Symlink);
-            link.set_size(0);
-            link.set_mode(0o777);
-            builder.append_link(&mut link, "bin/alias", "tool").unwrap();
+            // A Windows host refuses an in-layer symlink (`WindowsSymlinksUnsupported`), so only Unix gets the link.
+            if cfg!(unix) {
+                let mut link = tar::Header::new_gnu();
+                link.set_entry_type(tar::EntryType::Symlink);
+                link.set_size(0);
+                link.set_mode(0o777);
+                builder.append_link(&mut link, "bin/alias", "tool").unwrap();
+            }
             builder.finish().unwrap();
         }
         let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
