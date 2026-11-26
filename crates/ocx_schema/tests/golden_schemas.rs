@@ -92,6 +92,7 @@ golden_tests! {
     reports_schema_matches_golden => "reports",
     execution_record_schema_matches_golden => "execution-record",
     errors_schema_matches_golden => "errors",
+    vendor_manifest_schema_matches_golden => "vendor-manifest",
     cli_document_matches_golden => "cli",
     cli_schema_matches_golden => "cli-schema",
 }

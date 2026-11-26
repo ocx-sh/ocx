@@ -2894,6 +2894,21 @@
           "exit_code": 64
         },
         {
+          "value": "vendor_output_not_empty",
+          "description": "The vendor output directory exists and is not an empty directory",
+          "exit_code": 64
+        },
+        {
+          "value": "vendor_path_unrepresentable",
+          "description": "A path cannot be written inside the vendor directory",
+          "exit_code": 65
+        },
+        {
+          "value": "vendor_value_unrepresentable",
+          "description": "A value cannot be written relative to the vendor directory",
+          "exit_code": 65
+        },
+        {
           "value": "version_invalid",
           "description": "A package version does not parse",
           "exit_code": 65

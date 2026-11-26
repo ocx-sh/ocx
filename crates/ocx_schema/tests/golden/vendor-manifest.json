@@ -1,0 +1,463 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "VendorManifest",
+  "description": "The vendor manifest, `https://ocx.sh/schemas/vendor-manifest/v1.json`.\n\nEvery path field is relative to `DIR`, `/`-separated; every list is sorted by its stated key so the bytes are stable.",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "description": "Always [`SCHEMA_VERSION`].",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0,
+      "const": 1
+    },
+    "content": {
+      "description": "`absent` after `--manifest-only`.",
+      "$ref": "#/$defs/Content"
+    },
+    "platform": {
+      "description": "Canonical platform string of the run.",
+      "type": "string"
+    },
+    "available_platforms": {
+      "description": "Platforms on which every selected package has a leaf, computed before leaf selection; sorted.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "vendor_id": {
+      "description": "`sha256:` + hex digest of the platform and the sorted package digests; see [`vendor_id`].",
+      "type": "string"
+    },
+    "dir_token": {
+      "description": "Always [`DIR_TOKEN`].",
+      "type": "string"
+    },
+    "packages": {
+      "description": "Every package of the closure, once; sorted by `digest`.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Package"
+      }
+    },
+    "environments": {
+      "description": "The selection's environment first, then entry-point environments sorted by `id`.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Environment"
+      }
+    },
+    "selections": {
+      "description": "One entry in v1.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Selection"
+      }
+    },
+    "tools": {
+      "description": "Every exposed name; sorted by `(selection, name)`.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Tool"
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "content",
+    "platform",
+    "available_platforms",
+    "vendor_id",
+    "dir_token",
+    "packages",
+    "environments",
+    "selections",
+    "tools"
+  ],
+  "$defs": {
+    "Content": {
+      "description": "Whether the package files are on disk.",
+      "oneOf": [
+        {
+          "description": "Package files, launchers and sidecars exist.",
+          "type": "string",
+          "const": "present"
+        },
+        {
+          "description": "`--manifest-only`: only the manifest exists.",
+          "type": "string",
+          "const": "absent"
+        }
+      ]
+    },
+    "Package": {
+      "description": "One package of the closure.",
+      "type": "object",
+      "properties": {
+        "identifier": {
+          "description": "Pinned identifier `registry/repository[:tag]@sha256:<hex>`.",
+          "type": "string"
+        },
+        "digest": {
+          "description": "Platform-manifest digest.",
+          "type": "string"
+        },
+        "package_dir": {
+          "description": "`packages/<registry>/<algorithm>/<2 hex>/<30 hex>`.",
+          "type": "string"
+        },
+        "content_dir": {
+          "description": "`<package_dir>/content`.",
+          "type": "string"
+        },
+        "dependencies": {
+          "description": "Digests of direct dependencies; sorted.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "names_declared": {
+          "description": "`false` when the metadata claims neither binaries nor entry points.",
+          "type": "boolean"
+        },
+        "entrypoints": {
+          "description": "The package's own launchers; sorted by `name`.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EntryPoint"
+          }
+        },
+        "tree": {
+          "description": "Present iff `content` is `present`.",
+          "$ref": "#/$defs/Tree"
+        }
+      },
+      "required": [
+        "identifier",
+        "digest",
+        "package_dir",
+        "content_dir",
+        "dependencies",
+        "names_declared",
+        "entrypoints"
+      ]
+    },
+    "EntryPoint": {
+      "description": "A launcher of the package under `<package_dir>/entrypoints/`.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "The entry point's name.",
+          "type": "string"
+        },
+        "launcher_path": {
+          "description": "Ends in `.exe` for a Windows platform.",
+          "type": "string"
+        },
+        "environment": {
+          "description": "Id of the entry point's private environment.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "launcher_path",
+        "environment"
+      ]
+    },
+    "Tree": {
+      "description": "The files and links under a package's `content_dir`.",
+      "type": "object",
+      "properties": {
+        "files": {
+          "description": "Every regular file; sorted by `path`.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FileEntry"
+          }
+        },
+        "links": {
+          "description": "Every symlink; sorted by `path`.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/LinkEntry"
+          }
+        },
+        "link_free_dirs": {
+          "description": "Top-most directories with no link at or below them; sorted.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "files",
+        "links",
+        "link_free_dirs"
+      ]
+    },
+    "FileEntry": {
+      "description": "A regular file.",
+      "type": "object",
+      "properties": {
+        "path": {
+          "description": "Relative to `DIR`.",
+          "type": "string"
+        },
+        "executable": {
+          "description": "Whether the executable bit is set.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "path",
+        "executable"
+      ]
+    },
+    "LinkEntry": {
+      "description": "A symlink.",
+      "type": "object",
+      "properties": {
+        "path": {
+          "description": "Relative to `DIR`.",
+          "type": "string"
+        },
+        "target": {
+          "description": "Relative; resolves inside `content_dir`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "target"
+      ]
+    },
+    "Environment": {
+      "description": "A composed environment; the only non-literal text in a value is the dir token.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "description": "Opaque: `selection:default`, or `entrypoint:<digest>:<name>`.",
+          "type": "string"
+        },
+        "scope": {
+          "description": "What the environment belongs to.",
+          "$ref": "#/$defs/EnvironmentScope"
+        },
+        "items": {
+          "description": "In application order.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EnvironmentItem"
+          }
+        }
+      },
+      "required": [
+        "id",
+        "scope",
+        "items"
+      ]
+    },
+    "EnvironmentScope": {
+      "description": "The owner of an [`Environment`].",
+      "oneOf": [
+        {
+          "description": "The selection's composed environment.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "selection"
+            },
+            "selection": {
+              "description": "Selection id.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "selection"
+          ]
+        },
+        {
+          "description": "An entry point's private environment.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "entrypoint"
+            },
+            "package": {
+              "description": "Digest of the owning package.",
+              "type": "string"
+            },
+            "name": {
+              "description": "Entry-point name.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "package",
+            "name"
+          ]
+        }
+      ]
+    },
+    "EnvironmentItem": {
+      "description": "One entry of an environment, shaped like the `ocx env` report's entry.",
+      "type": "object",
+      "properties": {
+        "key": {
+          "description": "The variable name.",
+          "type": "string"
+        },
+        "value": {
+          "description": "The value; may contain the dir token.",
+          "type": "string"
+        },
+        "kind": {
+          "description": "How the value combines with the existing one.",
+          "$ref": "#/$defs/ModifierKind"
+        },
+        "separator": {
+          "description": "The fold separator; `list` entries only.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "key",
+        "value",
+        "kind"
+      ]
+    },
+    "ModifierKind": {
+      "description": "How a declared value combines with the variable's existing value.",
+      "oneOf": [
+        {
+          "description": "Prepended to any existing value of the variable.",
+          "type": "string",
+          "const": "path"
+        },
+        {
+          "description": "Replaces any existing value of the variable.",
+          "type": "string",
+          "const": "constant"
+        },
+        {
+          "description": "Appended to any existing value of the variable, joined by its separator.",
+          "type": "string",
+          "const": "list"
+        }
+      ]
+    },
+    "Selection": {
+      "description": "The packages a run selected and how they are exposed.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "description": "`default` in v1.",
+          "type": "string"
+        },
+        "groups": {
+          "description": "Groups as given.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "bindings": {
+          "description": "Bindings as given, resolved from `-g` included.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "roots": {
+          "description": "Digests of the selected packages, in selection order.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "environment": {
+          "description": "Id of the composed environment.",
+          "type": "string"
+        },
+        "launcher_dir": {
+          "description": "`selections/<id>/shells/default/bin`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "groups",
+        "bindings",
+        "roots",
+        "environment",
+        "launcher_dir"
+      ]
+    },
+    "Tool": {
+      "description": "An exposed name.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "The exposed name.",
+          "type": "string"
+        },
+        "selection": {
+          "description": "Selection id.",
+          "type": "string"
+        },
+        "kind": {
+          "description": "Where the name comes from.",
+          "$ref": "#/$defs/ToolKind"
+        },
+        "package": {
+          "description": "Digest of the owning package (last walked wins).",
+          "type": "string"
+        },
+        "environment": {
+          "description": "The selection's environment id.",
+          "type": "string"
+        },
+        "target_path": {
+          "description": "The binary file, or the package's entry-point launcher.",
+          "type": "string"
+        },
+        "launcher_path": {
+          "description": "`<launcher_dir>/<name>[.exe]`; omitted when no launcher blob exists for the platform.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "selection",
+        "kind",
+        "package",
+        "environment",
+        "target_path"
+      ]
+    },
+    "ToolKind": {
+      "description": "Origin of a [`Tool`].",
+      "oneOf": [
+        {
+          "description": "A binary of the package.",
+          "type": "string",
+          "const": "binary"
+        },
+        {
+          "description": "An entry-point launcher.",
+          "type": "string",
+          "const": "entrypoint"
+        }
+      ]
+    }
+  },
+  "$id": "https://ocx.sh/schemas/vendor-manifest/v1.json"
+}

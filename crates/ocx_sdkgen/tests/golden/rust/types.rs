@@ -3951,6 +3951,12 @@ pub enum ErrorDetail {
     Usage,
     /// The forge offers no users API to resolve owners through
     UsersApiUnavailable,
+    /// The vendor output directory exists and is not an empty directory
+    VendorOutputNotEmpty,
+    /// A path cannot be written inside the vendor directory
+    VendorPathUnrepresentable,
+    /// A value cannot be written relative to the vendor directory
+    VendorValueUnrepresentable,
     /// A package version does not parse
     VersionInvalid,
     /// A source answered a digest request with different content
@@ -4504,6 +4510,9 @@ impl ErrorDetail {
             Self::UpdateSectionInProject => "update_section_in_project",
             Self::Usage => "usage",
             Self::UsersApiUnavailable => "users_api_unavailable",
+            Self::VendorOutputNotEmpty => "vendor_output_not_empty",
+            Self::VendorPathUnrepresentable => "vendor_path_unrepresentable",
+            Self::VendorValueUnrepresentable => "vendor_value_unrepresentable",
             Self::VersionInvalid => "version_invalid",
             Self::WalkedDigestMismatch => "walked_digest_mismatch",
             Self::WrongLayerCount => "wrong_layer_count",
@@ -5050,6 +5059,9 @@ impl ErrorDetail {
             "update_section_in_project" => Self::UpdateSectionInProject,
             "usage" => Self::Usage,
             "users_api_unavailable" => Self::UsersApiUnavailable,
+            "vendor_output_not_empty" => Self::VendorOutputNotEmpty,
+            "vendor_path_unrepresentable" => Self::VendorPathUnrepresentable,
+            "vendor_value_unrepresentable" => Self::VendorValueUnrepresentable,
             "version_invalid" => Self::VersionInvalid,
             "walked_digest_mismatch" => Self::WalkedDigestMismatch,
             "wrong_layer_count" => Self::WrongLayerCount,
@@ -11920,6 +11932,114 @@ impl Unknowns for VarVisibility {
         if matches!(self, Self::Unknown(_)) {
             out.push(pointer.clone());
         }
+    }
+}
+
+/// Whether the run wrote package content.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum VendorContentWord {
+    /// Package content and launchers were written.
+    Present,
+    /// Only `manifest.json` was written.
+    Absent,
+    /// A value this SDK was not generated for, kept as sent.
+    Unknown(String),
+}
+
+impl VendorContentWord {
+    /// The wire value.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Present => "present",
+            Self::Absent => "absent",
+            Self::Unknown(value) => value,
+        }
+    }
+
+    /// The entry for a wire value; one the SDK does not know becomes `Unknown`.
+    pub fn from_value(value: String) -> Self {
+        match value.as_str() {
+            "present" => Self::Present,
+            "absent" => Self::Absent,
+            _ => Self::Unknown(value),
+        }
+    }
+}
+
+impl std::fmt::Display for VendorContentWord {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl Serialize for VendorContentWord {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for VendorContentWord {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(Self::from_value(String::deserialize(deserializer)?))
+    }
+}
+
+impl Unknowns for VendorContentWord {
+    fn collect_unknowns(&self, pointer: &mut String, out: &mut Vec<String>) {
+        if matches!(self, Self::Unknown(_)) {
+            out.push(pointer.clone());
+        }
+    }
+}
+
+/// Result of `ocx vendor` and `ocx package vendor`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct VendorReport {
+    /// The `ocx` that wrote the directory.
+    pub ocx_version: String,
+    /// The vendor directory, absolute.
+    pub output_dir: AbsolutePath,
+    /// The written `manifest.json`, absolute.
+    pub manifest_path: AbsolutePath,
+    /// `present`, or `absent` under `--manifest-only`.
+    pub content: VendorContentWord,
+    /// The platform the set was resolved for.
+    pub platform: String,
+    /// One entry per package, in manifest order.
+    pub packages: Vec<VendoredPackageRow>,
+    /// Tools the manifest lists.
+    pub tool_count: i64,
+    /// Bytes this run wrote.
+    pub written_size: ByteSize,
+}
+
+impl Unknowns for VendorReport {
+    fn collect_unknowns(&self, pointer: &mut String, out: &mut Vec<String>) {
+        field(pointer, out, "ocx_version", &self.ocx_version);
+        field(pointer, out, "output_dir", &self.output_dir);
+        field(pointer, out, "manifest_path", &self.manifest_path);
+        field(pointer, out, "content", &self.content);
+        field(pointer, out, "platform", &self.platform);
+        field(pointer, out, "packages", &self.packages);
+        field(pointer, out, "tool_count", &self.tool_count);
+        field(pointer, out, "written_size", &self.written_size);
+    }
+}
+
+/// One package of a vendored set.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct VendoredPackageRow {
+    /// The package as resolved, pinned by digest.
+    pub identifier: PackageRef,
+    /// The platform manifest digest.
+    pub digest: Digest,
+}
+
+impl Unknowns for VendoredPackageRow {
+    fn collect_unknowns(&self, pointer: &mut String, out: &mut Vec<String>) {
+        field(pointer, out, "identifier", &self.identifier);
+        field(pointer, out, "digest", &self.digest);
     }
 }
 

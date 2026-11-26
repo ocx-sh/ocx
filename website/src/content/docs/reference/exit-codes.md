@@ -143,6 +143,7 @@ The command line is invalid: unknown flag, wrong argument count or bad syntax.
 | `unsigned_type_unsupported` | An unsigned attach names a predicate type with no SBOM media type |
 | `usage` | The command was invoked with arguments it cannot act on |
 | `users_api_unavailable` | The forge offers no users API to resolve owners through |
+| `vendor_output_not_empty` | The vendor output directory exists and is not an empty directory |
 
 ## `65` DataError {#exit-65}
 
@@ -333,6 +334,8 @@ Input data is malformed or fails verification.
 | `unsupported_logo_format` | The logo file has an unsupported format |
 | `unsupported_media_type` | A manifest carries an unsupported media type |
 | `unsupported_tlog_entry_kind` | The transparency log entry kind is not accepted |
+| `vendor_path_unrepresentable` | A path cannot be written inside the vendor directory |
+| `vendor_value_unrepresentable` | A value cannot be written relative to the vendor directory |
 | `version_invalid` | A package version does not parse |
 | `walked_digest_mismatch` | A source answered a digest request with different content |
 | `wrong_layer_count` | An artifact carries other than exactly one layer |

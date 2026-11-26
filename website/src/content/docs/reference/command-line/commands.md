@@ -512,6 +512,30 @@ ocx upgrade [OPTIONS] [NAMES]...
 | `--purge` |  | Also delete each package this command unlinks, when nothing else references it |
 | `--verbose`, `-v` |  | List the bindings that were left alone as well as the ones that moved |
 
+## `ocx vendor` {#vendor}
+
+Write the project's tools, entry points and a manifest to a relocatable directory.
+
+Reads the digest-pinned `ocx.lock` of the nearest `ocx.toml` and writes the selected tools' packages, one launcher per exposed name and `manifest.json` to DIR. The directory runs from wherever it is moved; nothing in it names this machine.
+
+`-g` and NAME select as for `ocx exec`; `--platform` names the target and defaults to the host.
+
+`--manifest-only` writes `manifest.json` alone. `--omit-links` creates no symlink.
+
+DIR must be absent or empty, else the command exits 64 and writes nothing. A missing `-o` exits 64.
+
+```text
+ocx vendor [OPTIONS] --output <DIR> [NAME]...
+```
+
+| Flag | Value | Description |
+| --- | --- | --- |
+| `--group`, `-g` | `GROUPS` | Restrict to the named group(s) |
+| `--manifest-only` |  | Write `manifest.json` only: no package content and no launcher |
+| `--omit-links` |  | Create no symlink under the directory |
+| `--output`, `-o` | `DIR` | Directory to write; absent or empty |
+| `--platform`, `-p` | `PLATFORM` | Target platform to resolve packages against |
+
 ## `ocx version` {#version}
 
 Print the version of OCX.
