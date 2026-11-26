@@ -170,10 +170,6 @@ pub enum EnvScope {
         env: Vec<Entry>,
     },
     /// `ocx vendor`: install paths rooted at `token_root`, no patches, no caller entries, no toolchain tree.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the vendor task constructs it once the lane is wired")
-    )]
     Vendor {
         /// The `@VENDOR_DIR@` token the paths are rooted at.
         token_root: std::path::PathBuf,

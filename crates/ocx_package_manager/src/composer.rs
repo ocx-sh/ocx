@@ -828,10 +828,6 @@ impl ComposePaths {
     }
 
     /// Install paths rooted at `token_root` (the `@VENDOR_DIR@` token), touching no filesystem and no shim slot.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the vendor task constructs it once the lane is wired")
-    )]
     pub(crate) fn vendor(token_root: impl Into<PathBuf>) -> Self {
         Self {
             trusted: HashMap::new(),
@@ -844,13 +840,6 @@ impl ComposePaths {
 
     /// Renders for `platform` rather than this host; only the vendor lane has a target.
     #[must_use]
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the vendor task names its target platform once the lane is wired"
-        )
-    )]
     pub(crate) fn targeting(mut self, platform: &ocx_oci::Platform) -> Self {
         if let Some(lane) = &mut self.vendor {
             lane.windows_target = matches!(
