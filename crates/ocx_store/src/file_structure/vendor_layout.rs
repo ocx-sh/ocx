@@ -215,8 +215,7 @@ fn rename_tree(from: &Path, to: &Path) -> std::io::Result<()> {
 
 /// Sets every directory under `root`, `root` included, to 0755 and mtime 1980-01-01 (C-008), children first.
 ///
-/// Regular files keep what the copy gave them. shortcut: a symlink keeps its write-time mtime,
-/// since std cannot set one without following the link; add `utimensat` when `ocx_store` takes `libc`.
+/// A symlink gets the same mtime on the link itself, never its target. Regular files keep what the copy gave them.
 ///
 /// # Errors
 ///
@@ -228,6 +227,10 @@ fn normalise_tree(root: &Path) -> Result<(), FileError> {
         let file_type = entry.file_type().map_err(|error| FileError::new(entry.path(), error))?;
         if file_type.is_dir() {
             normalise_tree(&entry.path())?;
+        } else if file_type.is_symlink() {
+            let mtime = filetime::FileTime::from_unix_time(NORMALISED_MTIME_SECS as i64, 0);
+            filetime::set_symlink_file_times(entry.path(), mtime, mtime)
+                .map_err(|error| FileError::new(entry.path(), error))?;
         }
     }
     normalise_dir(root).map_err(|error| FileError::new(root, error))
@@ -517,5 +520,34 @@ mod tests {
 
         assert!(std::fs::symlink_metadata(&target).unwrap().is_symlink());
         assert!(staging_siblings(parent.path()).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn publish_sets_a_symlinks_own_mtime_and_leaves_its_target() {
+        let parent = tempfile::tempdir().unwrap();
+        let target = parent.path().join("out");
+        let staged = StagedTree::create(&target).unwrap();
+        std::fs::write(staged.path().join("file"), b"x").unwrap();
+        std::os::unix::fs::symlink("file", staged.path().join("link")).unwrap();
+        let file_mtime = std::fs::metadata(staged.path().join("file"))
+            .unwrap()
+            .modified()
+            .unwrap();
+
+        staged.publish().unwrap();
+
+        let epoch = SystemTime::UNIX_EPOCH + Duration::from_secs(NORMALISED_MTIME_SECS);
+        assert_eq!(
+            std::fs::symlink_metadata(target.join("link"))
+                .unwrap()
+                .modified()
+                .unwrap(),
+            epoch
+        );
+        assert_eq!(
+            std::fs::metadata(target.join("file")).unwrap().modified().unwrap(),
+            file_mtime
+        );
     }
 }
