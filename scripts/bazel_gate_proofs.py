@@ -89,18 +89,18 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # wrong. WP-12's BUILD files are the subject, `bazel query` is the instrument,
 # and every value below is the answer one query gave on this tree:
 #
-#   kind(rust_library, //crates/...)          23
+#   kind(rust_library, //crates/...)          24
 #   kind(rust_proc_macro, //crates/...)        1   (`ocx_exit_derive`)
-#   kind(rust_test, //crates/...)             46
+#   kind(rust_test, //crates/...)             49
 #   kind(rust_binary, //crates/...)            4   (`ocx_cli:ocx`, `ocx_schema:ocx_schema_bin`,
 #                                                  `ocx_sdkgen:ocx_sdkgen_bin`, `ocx_shim:ocx_shim`)
-#   kind(rust_doc_test, //crates/...)         23
-#   kind("^rust_.*rule$", //crates/...)       97
-#   kind(filegroup, //crates/...)              6
-#   kind(rule, //crates/...)                 103   (floor 97: the `sh_test` seam twin and
-#                                                  the `ocx_schema:schemas` genrule are not
-#                                                  summands)
-#   kind(rule, //crates/...) --output=package 25
+#   kind(rust_doc_test, //crates/...)         24
+#   kind("^rust_.*rule$", //crates/...)      102
+#   kind(filegroup, //crates/...)             32   (6 summands + 26 `:tree` filegroups)
+#   kind(rule, //crates/...)                 144   (floor 102: the 8 `sh_test` twins, the 2
+#                                                  genrules and the `:tree` filegroups are
+#                                                  not summands)
+#   kind(rule, //crates/...) --output=package 26
 #
 # The `ocx_sdkgen` SDK targets (three `rust_test`, one `rust_binary`) were added
 # to these by reading their BUILD file, before a query had run over them.
