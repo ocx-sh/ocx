@@ -3323,32 +3323,6 @@
         ],
         "args": [
           {
-            "id": "output",
-            "long": "output",
-            "short": "o",
-            "value": {
-              "type": "path"
-            },
-            "required": true,
-            "required_unless": [],
-            "num_args": {
-              "min": 1,
-              "max": 1
-            },
-            "global": false,
-            "hidden": false,
-            "default": [],
-            "requires": [],
-            "conflicts": [],
-            "overrides": [],
-            "require_equals": false,
-            "allow_hyphen_values": false,
-            "last": false,
-            "trailing_var_arg": false,
-            "stdin_secret": false,
-            "help": "Directory to write; absent or empty"
-          },
-          {
             "id": "platform",
             "long": "platform",
             "short": "p",
@@ -3400,6 +3374,32 @@
             "trailing_var_arg": false,
             "stdin_secret": false,
             "help": "Restrict to the named group(s)"
+          },
+          {
+            "id": "output",
+            "long": "output",
+            "short": "o",
+            "value": {
+              "type": "path"
+            },
+            "required": true,
+            "required_unless": [],
+            "num_args": {
+              "min": 1,
+              "max": 1
+            },
+            "global": false,
+            "hidden": false,
+            "default": [],
+            "requires": [],
+            "conflicts": [],
+            "overrides": [],
+            "require_equals": false,
+            "allow_hyphen_values": false,
+            "last": false,
+            "trailing_var_arg": false,
+            "stdin_secret": false,
+            "help": "Directory to write; absent or empty"
           },
           {
             "id": "manifest_only",
@@ -10341,32 +10341,6 @@
             ],
             "args": [
               {
-                "id": "output",
-                "long": "output",
-                "short": "o",
-                "value": {
-                  "type": "path"
-                },
-                "required": true,
-                "required_unless": [],
-                "num_args": {
-                  "min": 1,
-                  "max": 1
-                },
-                "global": false,
-                "hidden": false,
-                "default": [],
-                "requires": [],
-                "conflicts": [],
-                "overrides": [],
-                "require_equals": false,
-                "allow_hyphen_values": false,
-                "last": false,
-                "trailing_var_arg": false,
-                "stdin_secret": false,
-                "help": "Directory to write; absent or empty"
-              },
-              {
                 "id": "platform",
                 "long": "platform",
                 "short": "p",
@@ -10391,6 +10365,32 @@
                 "trailing_var_arg": false,
                 "stdin_secret": false,
                 "help": "Target platform to resolve packages against"
+              },
+              {
+                "id": "output",
+                "long": "output",
+                "short": "o",
+                "value": {
+                  "type": "path"
+                },
+                "required": true,
+                "required_unless": [],
+                "num_args": {
+                  "min": 1,
+                  "max": 1
+                },
+                "global": false,
+                "hidden": false,
+                "default": [],
+                "requires": [],
+                "conflicts": [],
+                "overrides": [],
+                "require_equals": false,
+                "allow_hyphen_values": false,
+                "last": false,
+                "trailing_var_arg": false,
+                "stdin_secret": false,
+                "help": "Directory to write; absent or empty"
               },
               {
                 "id": "manifest_only",

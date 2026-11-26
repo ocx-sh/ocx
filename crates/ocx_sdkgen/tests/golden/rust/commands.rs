@@ -1788,10 +1788,10 @@ impl PackageUninstallArgs {
 /// The arguments of `ocx package vendor`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PackageVendorArgs {
-    /// Directory to write; absent or empty
-    pub output: PathBuf,
     /// Target platform to resolve packages against
     pub platform: Option<String>,
+    /// Directory to write; absent or empty
+    pub output: PathBuf,
     /// Write `manifest.json` only: no package content and no launcher
     pub manifest_only: bool,
     /// Create no symlink under the directory
@@ -1803,8 +1803,8 @@ pub struct PackageVendorArgs {
 impl PackageVendorArgs {
     /// Appends the arguments to `argv`.
     pub fn push(&self, argv: &mut Argv) {
-        argv.flag("output", [&self.output], Presence::Required, &[]);
         argv.flag("platform", &self.platform, Presence::Optional, &[]);
+        argv.flag("output", [&self.output], Presence::Required, &[]);
         argv.switch("manifest-only", self.manifest_only);
         argv.switch("omit-links", self.omit_links);
         argv.positional("packages", &self.packages, Presence::Required, Hyphen::Refuse);
@@ -2390,12 +2390,12 @@ impl UpgradeArgs {
 /// The arguments of `ocx vendor`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct VendorArgs {
-    /// Directory to write; absent or empty
-    pub output: PathBuf,
     /// Target platform to resolve packages against
     pub platform: Option<String>,
     /// Restrict to the named group(s)
     pub groups: Vec<String>,
+    /// Directory to write; absent or empty
+    pub output: PathBuf,
     /// Write `manifest.json` only: no package content and no launcher
     pub manifest_only: bool,
     /// Create no symlink under the directory
@@ -2407,9 +2407,9 @@ pub struct VendorArgs {
 impl VendorArgs {
     /// Appends the arguments to `argv`.
     pub fn push(&self, argv: &mut Argv) {
-        argv.flag("output", [&self.output], Presence::Required, &[]);
         argv.flag("platform", &self.platform, Presence::Optional, &[]);
         argv.flag("group", &self.groups, Presence::Optional, &[]);
+        argv.flag("output", [&self.output], Presence::Required, &[]);
         argv.switch("manifest-only", self.manifest_only);
         argv.switch("omit-links", self.omit_links);
         argv.positional("names", &self.names, Presence::Optional, Hyphen::Refuse);
