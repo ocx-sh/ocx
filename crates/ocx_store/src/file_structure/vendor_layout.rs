@@ -3,6 +3,7 @@
 
 //! The tree `ocx vendor` writes: where each package, launcher and the manifest sit under `DIR`, and the staged publication of `DIR`.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -33,6 +34,25 @@ pub enum PathViolation {
     DeviceName,
     /// Windows targets only: a segment ending in `.` or a space.
     TrailingDotOrSpace,
+    /// A segment equal to a [`VendorLayout::RESERVED_SEGMENTS`] entry, ASCII case-insensitive.
+    ReservedSegment,
+}
+
+/// The 16 hex characters that name a package under `DIR/p/`: the first 16 of its digest's hex part.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct PackageKey(String);
+
+impl PackageKey {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Two package digests of one run share a [`PackageKey`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackageKeyClash {
+    pub first: Digest,
+    pub second: Digest,
 }
 
 /// Path arithmetic for a vendor directory; every relative path is `/`-separated, as the manifest stores it.
@@ -42,6 +62,9 @@ pub struct VendorLayout {
 }
 
 impl VendorLayout {
+    /// Names ocx never writes, so a consumer may use them; `check_relative_path` refuses them as a segment.
+    pub const RESERVED_SEGMENTS: &'static [&'static str] = &["_ocx_reserved"];
+
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
     }
@@ -74,6 +97,27 @@ impl VendorLayout {
     /// `selections/<id>/shells/default/bin`.
     pub fn relative_launcher_dir(selection: &str) -> String {
         format!("selections/{selection}/shells/default/bin")
+    }
+
+    /// `l/<name>.launch`: the record beside a selection launcher.
+    pub fn relative_record(name: &str) -> String {
+        format!("l/{name}.launch")
+    }
+
+    /// `p/<HEX16>/e/<name>.launch`: the record beside a package entry-point launcher.
+    pub fn relative_entrypoint_record(key: &PackageKey, name: &str) -> String {
+        format!("p/{}/e/{name}.launch", key.as_str())
+    }
+
+    /// Keys every digest by the first 16 hex characters of its hex part.
+    ///
+    /// # Errors
+    ///
+    /// [`PackageKeyClash`] naming two different digests that share a key.
+    pub fn package_keys<'a>(
+        _digests: impl IntoIterator<Item = &'a Digest>,
+    ) -> Result<BTreeMap<Digest, PackageKey>, PackageKeyClash> {
+        unimplemented!("package_keys: filled by the vendor layout step")
     }
 
     /// `DIR` joined with a validated relative path.
@@ -292,6 +336,53 @@ mod tests {
 
     fn digest() -> Digest {
         Digest::Sha256(HEX.to_string())
+    }
+
+    /// Digests that differ after the 16th hex character.
+    fn sibling_digest() -> Digest {
+        Digest::Sha256(format!("{}{}", &HEX[..16], "0".repeat(48)))
+    }
+
+    #[test]
+    fn contract_package_keys_refuses_a_hex16_clash_naming_both() {
+        let (first, second) = (digest(), sibling_digest());
+        let clash = VendorLayout::package_keys([&first, &second]).expect_err("a shared HEX16 is refused");
+        let mut named = [clash.first.clone(), clash.second.clone()];
+        named.sort();
+        let mut expected = [first, second];
+        expected.sort();
+        assert_eq!(named, expected);
+    }
+
+    #[test]
+    fn contract_package_keys_keys_by_first_16_hex() {
+        let (a, b) = (digest(), Digest::Sha256("ab".repeat(32)));
+        let keys = VendorLayout::package_keys([&a, &b]).expect("no clash");
+        assert_eq!(keys.len(), 2);
+        assert_eq!(keys[&a].as_str(), "1f2e3d4c5b6a7988");
+        assert_eq!(keys[&b].as_str(), "abababababababab");
+    }
+
+    #[test]
+    fn contract_check_relative_path_refuses_reserved_segment() {
+        for path in ["_ocx_reserved", "p/x/_OCX_RESERVED/y", "l/_Ocx_Reserved"] {
+            assert_eq!(
+                VendorLayout::check_relative_path(path, false),
+                Err(PathViolation::ReservedSegment),
+                "{path}"
+            );
+        }
+        assert_eq!(VendorLayout::check_relative_path("p/_ocx_reserved_x/y", false), Ok(()));
+    }
+
+    #[test]
+    fn record_paths_sit_beside_their_launchers() {
+        let key = PackageKey("1f2e3d4c5b6a7988".to_string());
+        assert_eq!(VendorLayout::relative_record("cmake"), "l/cmake.launch");
+        assert_eq!(
+            VendorLayout::relative_entrypoint_record(&key, "npm"),
+            "p/1f2e3d4c5b6a7988/e/npm.launch"
+        );
     }
 
     #[test]

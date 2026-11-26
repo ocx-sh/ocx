@@ -21,7 +21,7 @@ pub const DIR_TOKEN: &str = "@VENDOR_DIR@";
 pub const MANIFEST_FILE: &str = "manifest.json";
 
 /// Value of `schema_version`; bumped only through the contract ledger.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// Whether the package files are on disk.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -33,7 +33,7 @@ pub enum Content {
     Absent,
 }
 
-/// The vendor manifest, `https://ocx.sh/schemas/vendor-manifest/v1.json`.
+/// The vendor manifest, `https://ocx.sh/schemas/vendor-manifest/v2.json`.
 ///
 /// Every path field is relative to `DIR`, `/`-separated; every list is sorted by its stated key so the bytes are stable.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -54,10 +54,24 @@ pub struct VendorManifest {
     pub packages: Vec<Package>,
     /// The selection's environment first, then entry-point environments sorted by `id`.
     pub environments: Vec<Environment>,
-    /// One entry in v1.
+    /// One entry in v2.
     pub selections: Vec<Selection>,
     /// Every exposed name; sorted by `(selection, name)`.
     pub tools: Vec<Tool>,
+    /// Present only when the run had `--index`: every path under that directory that resolution read; sorted by
+    /// `path`, each once.
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub index_lookups: Option<Vec<IndexLookup>>,
+}
+
+/// One index document resolution read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct IndexLookup {
+    /// Relative to the `--index` directory, `/`-separated.
+    pub path: String,
+    /// `false` when the document was absent.
+    pub found: bool,
 }
 
 /// The identity of a vendored set: `sha256:` + hex SHA-256 of `platform`, `\n`, then the sorted package digests

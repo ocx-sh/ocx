@@ -22,7 +22,9 @@ pub use local_index::{
 pub use oci_index::OciIndex;
 pub use oci_index::OciIndexConfig;
 pub use regenerate::{RegenerateOutcome, regenerate_catalog};
-pub use store::{CatalogEntryStatus, CatalogTransaction, IndexStore, RootReadResult, SOURCE_LOCK_TIMEOUT};
+pub use store::{
+    CatalogEntryStatus, CatalogTransaction, IndexStore, LookupRecorder, RootReadResult, SOURCE_LOCK_TIMEOUT,
+};
 pub use wire::{
     CatalogDocument, CatalogIndex, IndexFormatConfig, IndexRoot, RootTag, SUPPORTED_FORMAT_VERSION, YankMarker,
 };

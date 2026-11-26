@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "content": "present",
   "platform": "linux/amd64+libc.glibc",
   "available_platforms": ["darwin/arm64", "linux/amd64+libc.glibc", "windows/amd64"],
@@ -9,15 +9,33 @@
     {
       "identifier": "ocx.sh/kitware/cmake:3.31.6@sha256:1f2e3d4c5b6a79881f2e3d4c5b6a79881f2e3d4c5b6a79881f2e3d4c5b6a7988",
       "digest": "sha256:1f2e3d4c5b6a79881f2e3d4c5b6a79881f2e3d4c5b6a79881f2e3d4c5b6a7988",
-      "package_dir": "packages/ocx.sh/sha256/1f/2e3d4c5b6a79881f2e3d4c5b6a7988",
-      "content_dir": "packages/ocx.sh/sha256/1f/2e3d4c5b6a79881f2e3d4c5b6a7988/content",
+      "index_digest": "sha256:9c8b7a6f5e4d3c2b9c8b7a6f5e4d3c2b9c8b7a6f5e4d3c2b9c8b7a6f5e4d3c2b",
+      "package_dir": "p/1f2e3d4c5b6a7988",
+      "content_dir": "p/1f2e3d4c5b6a7988/c",
       "dependencies": [],
       "names_declared": true,
       "entrypoints": [],
       "tree": {
-        "files": [{"path": "packages/ocx.sh/sha256/1f/2e3d4c5b6a79881f2e3d4c5b6a7988/content/bin/cmake", "executable": true}],
-        "links": [{"path": "packages/ocx.sh/sha256/1f/2e3d4c5b6a79881f2e3d4c5b6a7988/content/bin/cmake3", "target": "cmake"}],
-        "link_free_dirs": ["packages/ocx.sh/sha256/1f/2e3d4c5b6a79881f2e3d4c5b6a7988/content/share"]
+        "files": [{"path": "p/1f2e3d4c5b6a7988/c/bin/cmake", "executable": true}],
+        "links": [{"path": "p/1f2e3d4c5b6a7988/c/bin/cmake3", "target": "cmake"}],
+        "link_free_dirs": ["p/1f2e3d4c5b6a7988/c/share"]
+      }
+    },
+    {
+      "identifier": "ocx.sh/nodejs/node:24.21.0@sha256:5a0c1e9d2b7f3a4c5a0c1e9d2b7f3a4c5a0c1e9d2b7f3a4c5a0c1e9d2b7f3a4c",
+      "digest": "sha256:5a0c1e9d2b7f3a4c5a0c1e9d2b7f3a4c5a0c1e9d2b7f3a4c5a0c1e9d2b7f3a4c",
+      "index_digest": "sha256:7e6d5c4b3a291807e6d5c4b3a291807e6d5c4b3a291807e6d5c4b3a29180e6d5",
+      "package_dir": "p/5a0c1e9d2b7f3a4c",
+      "content_dir": "p/5a0c1e9d2b7f3a4c/c",
+      "dependencies": [],
+      "names_declared": true,
+      "entrypoints": [
+        {"name": "npm", "launcher_path": "p/5a0c1e9d2b7f3a4c/e/npm", "record_path": "p/5a0c1e9d2b7f3a4c/e/npm.launch", "environment": "entrypoint:sha256:5a0c1e9d2b7f3a4c5a0c1e9d2b7f3a4c5a0c1e9d2b7f3a4c5a0c1e9d2b7f3a4c:npm"}
+      ],
+      "tree": {
+        "files": [{"path": "p/5a0c1e9d2b7f3a4c/c/bin/node", "executable": true}],
+        "links": [],
+        "link_free_dirs": ["p/5a0c1e9d2b7f3a4c/c/bin", "p/5a0c1e9d2b7f3a4c/c/lib"]
       }
     }
   ],
@@ -26,15 +44,26 @@
       "id": "selection:default",
       "scope": {"type": "selection", "selection": "default"},
       "items": [
-        {"key": "PATH", "value": "@VENDOR_DIR@/packages/ocx.sh/sha256/1f/2e3d4c5b6a79881f2e3d4c5b6a7988/content/bin", "kind": "path"},
-        {"key": "CMAKE_ROOT", "value": "@VENDOR_DIR@/packages/ocx.sh/sha256/1f/2e3d4c5b6a79881f2e3d4c5b6a7988/content/share/cmake-3.31", "kind": "constant"}
+        {"key": "PATH", "value": "@VENDOR_DIR@/p/1f2e3d4c5b6a7988/c/bin", "kind": "path"},
+        {"key": "CMAKE_ROOT", "value": "@VENDOR_DIR@/p/1f2e3d4c5b6a7988/c/share/cmake-3.31", "kind": "constant"},
+        {"key": "PATH", "value": "@VENDOR_DIR@/p/5a0c1e9d2b7f3a4c/c/bin", "kind": "path"},
+        {"key": "PATH", "value": "@VENDOR_DIR@/p/5a0c1e9d2b7f3a4c/e", "kind": "path"}
+      ]
+    },
+    {
+      "id": "entrypoint:sha256:5a0c1e9d2b7f3a4c5a0c1e9d2b7f3a4c5a0c1e9d2b7f3a4c5a0c1e9d2b7f3a4c:npm",
+      "scope": {"type": "entrypoint", "package": "sha256:5a0c1e9d2b7f3a4c5a0c1e9d2b7f3a4c5a0c1e9d2b7f3a4c5a0c1e9d2b7f3a4c", "name": "npm"},
+      "items": [
+        {"key": "PATH", "value": "@VENDOR_DIR@/p/5a0c1e9d2b7f3a4c/c/bin", "kind": "path"}
       ]
     }
   ],
   "selections": [
-    {"id": "default", "groups": [], "bindings": ["cmake"], "roots": ["sha256:1f2e3d4c5b6a79881f2e3d4c5b6a79881f2e3d4c5b6a79881f2e3d4c5b6a7988"], "environment": "selection:default", "launcher_dir": "selections/default/shells/default/bin"}
+    {"id": "default", "groups": [], "bindings": ["cmake", "node"], "roots": ["sha256:1f2e3d4c5b6a79881f2e3d4c5b6a79881f2e3d4c5b6a79881f2e3d4c5b6a7988", "sha256:5a0c1e9d2b7f3a4c5a0c1e9d2b7f3a4c5a0c1e9d2b7f3a4c5a0c1e9d2b7f3a4c"], "environment": "selection:default", "launcher_dir": "l"}
   ],
   "tools": [
-    {"name": "cmake", "selection": "default", "kind": "binary", "package": "sha256:1f2e3d4c5b6a79881f2e3d4c5b6a79881f2e3d4c5b6a79881f2e3d4c5b6a7988", "environment": "selection:default", "target_path": "packages/ocx.sh/sha256/1f/2e3d4c5b6a79881f2e3d4c5b6a7988/content/bin/cmake", "launcher_path": "selections/default/shells/default/bin/cmake"}
+    {"name": "cmake", "selection": "default", "kind": "binary", "package": "sha256:1f2e3d4c5b6a79881f2e3d4c5b6a79881f2e3d4c5b6a79881f2e3d4c5b6a7988", "environment": "selection:default", "target_path": "p/1f2e3d4c5b6a7988/c/bin/cmake", "launcher_path": "l/cmake", "record_path": "l/cmake.launch"},
+    {"name": "node", "selection": "default", "kind": "binary", "package": "sha256:5a0c1e9d2b7f3a4c5a0c1e9d2b7f3a4c5a0c1e9d2b7f3a4c5a0c1e9d2b7f3a4c", "environment": "selection:default", "target_path": "p/5a0c1e9d2b7f3a4c/c/bin/node", "launcher_path": "l/node", "record_path": "l/node.launch"},
+    {"name": "npm", "selection": "default", "kind": "entrypoint", "package": "sha256:5a0c1e9d2b7f3a4c5a0c1e9d2b7f3a4c5a0c1e9d2b7f3a4c5a0c1e9d2b7f3a4c", "environment": "selection:default", "target_path": "p/5a0c1e9d2b7f3a4c/e/npm", "launcher_path": "l/npm", "record_path": "l/npm.launch"}
   ]
 }

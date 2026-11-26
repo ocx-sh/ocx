@@ -31,7 +31,7 @@ pub use temp_store::{StaleEntry, TempAcquireResult, TempDir, TempEntry, TempStor
 pub use toolchain_store::{
     DEFAULT_SHELL, TREE_OWN_DEPTH1_NAMES, ToolchainHome, ToolchainPathComponent, ToolchainPathError, ToolchainStore,
 };
-pub use vendor_layout::{PathViolation, StagedTree, VendorLayout, normalise_written_file};
+pub use vendor_layout::{PackageKey, PackageKeyClash, PathViolation, StagedTree, VendorLayout, normalise_written_file};
 
 /// Root layout of the local OCX data directory; the index lives in `IndexStore`, above this crate.
 #[derive(Debug, Clone)]

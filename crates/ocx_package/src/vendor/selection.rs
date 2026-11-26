@@ -17,7 +17,7 @@ pub struct Selection {
     pub roots: Vec<String>,
     /// Id of the composed environment.
     pub environment: String,
-    /// `selections/<id>/shells/default/bin`.
+    /// `l`.
     pub launcher_dir: String,
 }
 
@@ -36,10 +36,14 @@ pub struct Tool {
     pub environment: String,
     /// The binary file, or the package's entry-point launcher.
     pub target_path: String,
-    /// `<launcher_dir>/<name>[.exe]`; omitted when no launcher blob exists for the platform.
+    /// `l/<name>[.exe]`; omitted when no launcher blob exists for the platform.
     #[schemars(extend("x-ocx-absent-when-none" = true))]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub launcher_path: Option<String>,
+    /// `l/<name>.launch`, the record the launcher reads; present exactly when `launcher_path` is.
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub record_path: Option<String>,
 }
 
 /// Origin of a [`Tool`].

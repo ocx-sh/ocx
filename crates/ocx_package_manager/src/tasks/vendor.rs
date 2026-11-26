@@ -495,6 +495,7 @@ async fn build_manifest(
                 entrypoints.push(EntryPoint {
                     name: name.to_owned(),
                     launcher_path,
+                    record_path: None,
                     environment: id.clone(),
                 });
                 entrypoint_environments.push(Environment {
@@ -511,6 +512,7 @@ async fn build_manifest(
         packages.push(Package {
             identifier: node.identifier.to_string(),
             digest: digest.clone(),
+            index_digest: None,
             package_dir,
             content_dir,
             dependencies,
@@ -568,6 +570,7 @@ async fn build_manifest(
             launcher_path: launchers
                 .then(|| checked_path(format!("{launcher_dir}/{name}{}", exe_suffix(windows)), windows))
                 .transpose()?,
+            record_path: None,
         });
     }
 
@@ -610,6 +613,7 @@ async fn build_manifest(
             launcher_dir,
         }],
         tools,
+        index_lookups: None,
     })
 }
 
@@ -1563,6 +1567,7 @@ mod tests {
             environment: SELECTION_ENVIRONMENT.to_owned(),
             target_path: target_path.to_owned(),
             launcher_path: None,
+            record_path: None,
         }
     }
 

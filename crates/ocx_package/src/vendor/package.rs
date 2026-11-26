@@ -11,9 +11,14 @@ pub struct Package {
     pub identifier: String,
     /// Platform-manifest digest.
     pub digest: String,
-    /// `packages/<registry>/<algorithm>/<2 hex>/<30 hex>`.
+    /// Roots only: the image index digest the root was selected from; omitted for a platform-manifest identifier and
+    /// for every dependency.
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub index_digest: Option<String>,
+    /// `p/<HEX16>`.
     pub package_dir: String,
-    /// `<package_dir>/content`.
+    /// `<package_dir>/c`.
     pub content_dir: String,
     /// Digests of direct dependencies; sorted.
     pub dependencies: Vec<String>,
@@ -27,13 +32,17 @@ pub struct Package {
     pub tree: Option<Tree>,
 }
 
-/// A launcher of the package under `<package_dir>/entrypoints/`.
+/// A launcher of the package under `<package_dir>/e/`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct EntryPoint {
     /// The entry point's name.
     pub name: String,
     /// Ends in `.exe` for a Windows platform.
     pub launcher_path: String,
+    /// `<package_dir>/e/<name>.launch`, the record the launcher reads; present exactly when `launcher_path` is.
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub record_path: Option<String>,
     /// Id of the entry point's private environment.
     pub environment: String,
 }

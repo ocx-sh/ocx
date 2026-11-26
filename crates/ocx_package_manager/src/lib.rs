@@ -557,6 +557,11 @@ pub struct PackageManager {
 }
 
 impl PackageManager {
+    /// The index documents resolution read, when the index store records lookups; `None` without a recorder.
+    pub fn index_lookups(&self) -> Option<Vec<ocx_package::vendor::IndexLookup>> {
+        unimplemented!("index_lookups: filled by the index lookup step")
+    }
+
     /// Construct a new `PackageManager`.
     ///
     /// `patches` comes from `config_view.patches` — pass `None` when no

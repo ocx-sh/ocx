@@ -48,7 +48,7 @@ macro_rules! execution_record_version {
 }
 macro_rules! vendor_manifest_version {
     () => {
-        1
+        2
     };
 }
 
@@ -197,11 +197,11 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&schema).expect("schema parses");
         assert_eq!(
             value.pointer("/properties/schema_version/const"),
-            Some(&serde_json::json!(1))
+            Some(&serde_json::json!(2))
         );
         assert_eq!(
             value.get("$id").and_then(|v| v.as_str()),
-            Some("https://ocx.sh/schemas/vendor-manifest/v1.json")
+            Some("https://ocx.sh/schemas/vendor-manifest/v2.json")
         );
     }
 
