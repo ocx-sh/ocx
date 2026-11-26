@@ -24,13 +24,16 @@ from src.helpers import make_package
 from src.runner import OcxRunner, PackageInfo, current_platform
 from src.vendor_fixtures import (
     VENDOR_TOKEN,
+    assert_short_layout,
     cmake_with_ccache,
     env_template_package,
     host_bins,
+    launch_named_package,
     layer_digests,
     links_package,
     partial_platform_pair,
     record_requests,
+    reserved_segment_package,
     wasm_file_package,
     windows_only_package,
 )
@@ -132,12 +135,46 @@ def test_package_vendor_writes_manifest_content_and_launchers(
     assert report["content"] == "present"
     assert report["tool_count"] == 1
     manifest = _manifest(out)
-    assert manifest["schema_version"] == 1
+    assert manifest["schema_version"] == 2
     assert manifest["content"] == "present"
     assert manifest["dir_token"] == VENDOR_TOKEN
     tool = _tools(manifest)["hello"]
     assert (out / tool["launcher_path"]).is_file()
     assert (out / tool["target_path"]).is_file()
+    assert {p.name for p in out.iterdir()} == {"manifest.json", "l", "p"}
+    assert tool["record_path"] == "l/hello.launch"
+    assert (out / tool["record_path"]).is_file()
+    assert_short_layout(out, manifest)
+
+
+# ---------------------------------------------------------------------------
+# Names ocx never writes (V-L27 vendor half, V-L56)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("refusal", ["reserved_segment", "launch_name", "control"])
+def test_package_vendor_refuses_reserved_segment_and_launch_name_with_65(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, refusal: str
+) -> None:
+    if refusal == "reserved_segment":
+        pkg = reserved_segment_package(
+            ocx, unique_repo, tmp_path / "pkg", "_ocx_reserved"
+        )
+    elif refusal == "launch_name":
+        pkg = launch_named_package(ocx, unique_repo, tmp_path / "pkg", "x.launch")
+    else:
+        pkg = reserved_segment_package(ocx, unique_repo, tmp_path / "pkg", "reserved")
+    out = tmp_path / "out"
+
+    result = _pvendor(ocx, out, *HOST, pkg.fq, check=False)
+
+    if refusal == "control":
+        assert result.returncode == 0, result.stderr
+        assert_short_layout(out, _manifest(out))
+        return
+    assert result.returncode == EXIT_DATA, result.stderr
+    assert _detail(result) == "vendor_path_unrepresentable"
+    assert not out.exists(), "a refused run leaves no directory"
 
 
 # ---------------------------------------------------------------------------
@@ -397,7 +434,7 @@ def test_package_vendor_wasm_package_has_files_and_no_launcher(
     manifest = _manifest(out)
     assert manifest["platform"].startswith("wasip1/wasm")
     files = {f["path"] for p in manifest["packages"] for f in p["tree"]["files"]}
-    wasm_path = next(p for p in sorted(files) if p.endswith("/content/share/tool.wasm"))
+    wasm_path = next(p for p in sorted(files) if p.endswith("/c/share/tool.wasm"))
     assert (out / wasm_path).read_bytes() == b"\x00asm\x01\x00\x00\x00"
     tool = _tools(manifest)["tool"]
     assert "launcher_path" not in tool

@@ -101,6 +101,119 @@ def publish_tree(
     )
 
 
+def hex16(digest: str) -> str:
+    """The first 16 hex characters of a digest's hex part, without the algorithm (`p/<HEX16>`)."""
+    algorithm, _, hex_part = digest.partition(":")
+    assert algorithm and len(hex_part) >= 16, f"not a digest: {digest!r}"
+    return hex_part[:16]
+
+
+def _is_token_path(value: str, prefixes: list[str]) -> bool:
+    return any(value == p or value.startswith(f"{p}/") for p in prefixes)
+
+
+def assert_short_layout(out: Path, manifest: dict) -> None:
+    """The vendored tree is `manifest.json`, `l/` and `p/<HEX16>/{c,e}` only; every name comes from the manifest.
+
+    Reads the manifest the run wrote and the files on disk; derives each HEX16 from a
+    package digest, never from a hard-coded value. A run with `content: absent` holds
+    `manifest.json` alone, and the checks on files are skipped there.
+    """
+    present = manifest["content"] == "present"
+    exe = ".exe" if manifest["platform"].startswith("windows/") else ""
+    package_dirs: dict[str, str] = {}
+
+    for package in manifest["packages"]:
+        short = f"p/{hex16(package['digest'])}"
+        package_dirs[package["digest"]] = short
+        assert package["package_dir"] == short, package["package_dir"]
+        assert package["content_dir"] == f"{short}/c", package["content_dir"]
+        if present:
+            assert (out / package["content_dir"]).is_dir(), package["content_dir"]
+            for entry in package["tree"]["files"]:
+                assert entry["path"].startswith(f"{short}/c/"), entry["path"]
+            for entry in package["tree"]["links"]:
+                assert entry["path"].startswith(f"{short}/c/"), entry["path"]
+        for entry in package["entrypoints"]:
+            _assert_launcher(
+                out,
+                manifest,
+                entry,
+                f"{short}/e/{entry['name']}{exe}",
+                f"{short}/e/{entry['name']}.launch",
+                present,
+            )
+
+    for tool in manifest["tools"]:
+        if "launcher_path" not in tool:
+            assert "record_path" not in tool, tool
+            continue
+        _assert_launcher(
+            out,
+            manifest,
+            tool,
+            f"l/{tool['name']}{exe}",
+            f"l/{tool['name']}.launch",
+            present,
+        )
+
+    for selection in manifest["selections"]:
+        assert selection["launcher_dir"] == "l", selection["launcher_dir"]
+
+    # The selection environment names the same `p/<HEX16>/c` paths as `packages[]`.
+    token = manifest["dir_token"]
+    allowed = [
+        f"{token}/{prefix}"
+        for short in package_dirs.values()
+        for prefix in (f"{short}/c", f"{short}/e")
+    ]
+    for env in manifest["environments"]:
+        for item in env["items"]:
+            if item["value"].startswith(f"{token}/"):
+                assert _is_token_path(item["value"], allowed), item["value"]
+
+    if not present:
+        return
+    shorts = set(package_dirs.values())
+    on_disk = sorted(p.relative_to(out).as_posix() for p in out.rglob("*"))
+    assert "manifest.json" in on_disk
+    for rel in on_disk:
+        parts = rel.split("/")
+        if parts == ["manifest.json"]:
+            continue
+        assert parts[0] in ("l", "p"), f"unexpected top-level entry {rel}"
+        if parts[0] == "l":
+            assert len(parts) <= 2, f"nested entry under l/: {rel}"
+        elif len(parts) >= 2:
+            assert f"p/{parts[1]}" in shorts, f"unknown package directory {rel}"
+            if len(parts) >= 3:
+                assert parts[2] in ("c", "e"), f"unexpected entry {rel}"
+            if len(parts) >= 4 and parts[2] == "e":
+                raise AssertionError(f"nested entry under e/: {rel}")
+
+
+def _assert_launcher(
+    out: Path,
+    manifest: dict,
+    entry: dict,
+    launcher_path: str,
+    record_path: str,
+    present: bool,
+) -> None:
+    assert entry.get("launcher_path") == launcher_path, entry
+    assert entry.get("record_path") == record_path, entry
+    if not present:
+        return
+    assert (out / launcher_path).is_file(), launcher_path
+    record_file = out / record_path
+    assert record_file.is_file(), record_path
+    record = json.loads(record_file.read_text(encoding="utf-8"))
+    assert record["kind"] == "direct", record
+    assert record["schema_version"] == 1, record
+    assert record["vendor_id"] == manifest["vendor_id"], record
+    assert record["self"] == launcher_path.removesuffix(".exe"), record
+
+
 def multi_platform_package(
     ocx: OcxRunner,
     repo: str,
@@ -344,6 +457,28 @@ def setuid_package(ocx: OcxRunner, repo: str, tmp_path: Path) -> PackageInfo:
         (root / "bin" / "tool").chmod(0o4755)
 
     return publish_tree(ocx, repo, "1.0.0", tmp_path, build, {"env": [_PATH_ENV]})
+
+
+def reserved_segment_package(
+    ocx: OcxRunner, repo: str, tmp_path: Path, segment: str
+) -> PackageInfo:
+    """One tool plus a file at `<segment>/data`; vendoring refuses `_ocx_reserved` in any ASCII case."""
+
+    def build(root: Path) -> None:
+        _tool(root)
+        (root / segment).mkdir()
+        (root / segment / "data").write_text("payload\n", encoding="utf-8")
+
+    return publish_tree(ocx, repo, "1.0.0", tmp_path, build, {"env": [_PATH_ENV]})
+
+
+def launch_named_package(
+    ocx: OcxRunner, repo: str, tmp_path: Path, name: str
+) -> PackageInfo:
+    """A package exposing `name` as a binary (an entry-point name cannot hold a dot, so only a binary can end in `.launch`)."""
+    return make_package(
+        ocx, repo, "1.0.0", tmp_path, bins=host_bins([name]), binaries=[name]
+    )
 
 
 def partial_platform_pair(
