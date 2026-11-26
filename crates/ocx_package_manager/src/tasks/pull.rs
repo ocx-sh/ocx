@@ -452,10 +452,6 @@ pub struct VendorTarget {
     package_dir: std::path::PathBuf,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "`PackageManager::vendor` calls it once the full path is wired")
-)]
 impl VendorTarget {
     /// `pinned`'s package directory under `layout`.
     pub fn new(layout: &file_structure::VendorLayout, pinned: &ocx_oci::PinnedPackageRef) -> Self {
@@ -487,10 +483,6 @@ impl VendorTarget {
 /// # Errors
 ///
 /// As [`setup_owned`].
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "`PackageManager::vendor` calls it once the full path is wired")
-)]
 pub async fn setup_vendored(
     mgr: &PackageManager,
     pinned: &ocx_oci::PinnedPackageRef,

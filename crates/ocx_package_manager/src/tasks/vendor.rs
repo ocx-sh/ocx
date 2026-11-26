@@ -8,9 +8,14 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use futures::{StreamExt, TryStreamExt};
+use ocx_env_apply::ApplyKind;
+use ocx_env_apply::direct::{DirectSidecar, EnvRecord, SCHEMA_VERSION as SIDECAR_VERSION};
 use ocx_oci::{Digest, OperatingSystem, PackageRef, PinnedPackageRef, Platform};
 use ocx_package::install_info::InstallInfo;
-use ocx_package::metadata::env::modifier::Modifier;
+use ocx_package::metadata::Entrypoints;
+use ocx_package::metadata::env::modifier::{Modifier, ModifierKind};
+use ocx_package::metadata::template::{TemplateResolver, Usage};
 use ocx_package::vendor::{
     Content, DIR_TOKEN, EntryPoint, Environment, EnvironmentItem, EnvironmentScope, FileEntry, LinkEntry,
     MANIFEST_FILE, Package, SCHEMA_VERSION, Selection as ManifestSelection, Tool, ToolKind, Tree, VendorManifest,
@@ -22,8 +27,9 @@ use ocx_util::fs::{DirWalker, EmptyOrAbsentError, WalkDecision, ensure_empty_or_
 
 use super::common::ClosureNode;
 use super::inspect::{InspectOptions, InspectResult};
+use super::pull::{SetupGroups, VendorTarget, setup_vendored};
 use super::resolve::EnvScope;
-use super::toolchain_names::{NotEnumerablePolicy, exposed_names};
+use super::toolchain_names::{NotEnumerablePolicy, exposed_names, fold_case_insensitive};
 use crate::PackageManager;
 use crate::error::{PackageError, PackageErrorKind};
 
@@ -124,18 +130,22 @@ impl PackageManager {
     pub async fn vendor(&self, request: VendorRequest) -> Result<VendorOutcome, VendorError> {
         ensure_output_is_free(&request.output).await?;
         let selection = select(self, &request).await?;
-        let manifest = build_manifest(self, &request, &selection, &|platform| {
+        let mut manifest = build_manifest(self, &request, &selection, &|platform| {
             ocx_store::shim::blob_for(platform).is_some()
         })
         .await?;
-        if !request.manifest_only {
-            unimplemented!("PackageManager::vendor writes package content");
-        }
-        let written_size = publish_manifest(&request.output, &manifest).await?;
+        let staged = stage(&request.output).await?;
+        let content = if request.manifest_only {
+            VendorContent::Absent
+        } else {
+            write_content(self, &request, &selection, &mut manifest, staged.path()).await?;
+            VendorContent::Present
+        };
+        let written_size = publish(&request.output, staged, &manifest).await?;
         Ok(VendorOutcome {
             manifest_path: VendorLayout::new(&request.output).manifest_file(),
             output_dir: request.output,
-            content: VendorContent::Absent,
+            content,
             platform: request.platform,
             packages: manifest_packages(&selection),
             tool_count: manifest.tools.len(),
@@ -367,6 +377,16 @@ const SELECTION_ID: &str = "default";
 /// The id of the selection's composed environment.
 const SELECTION_ENVIRONMENT: &str = "selection:default";
 
+fn folds_case(platform: &Platform) -> bool {
+    matches!(
+        platform,
+        Platform::Specific {
+            os: OperatingSystem::Windows | OperatingSystem::Darwin,
+            ..
+        }
+    )
+}
+
 fn is_windows(platform: &Platform) -> bool {
     matches!(
         platform,
@@ -469,7 +489,8 @@ async fn build_manifest(
             package_dir,
             content_dir,
             dependencies,
-            names_declared: node.binaries.is_some() || !node.entrypoints.is_empty(),
+            names_declared: node.binaries.as_ref().is_some_and(|binaries| !binaries.is_empty())
+                || !node.entrypoints.is_empty(),
             entrypoints,
             tree: None,
         });
@@ -477,7 +498,11 @@ async fn build_manifest(
     entrypoint_environments.sort_by(|a, b| a.id.cmp(&b.id));
 
     let launcher_dir = VendorLayout::relative_launcher_dir(SELECTION_ID);
-    let exposed = exposed_names(&closures.surface, NotEnumerablePolicy::Skip).map_err(crate::Error::from)?;
+    let mut exposed = exposed_names(&closures.surface, NotEnumerablePolicy::Skip).map_err(crate::Error::from)?;
+    // Windows and macOS default to case-folding filesystems: two names differing by case would share one launcher file.
+    if folds_case(platform) {
+        exposed = fold_case_insensitive(exposed);
+    }
     let launchers = !exposed.is_empty() && has_launcher(platform);
     let mut tools = Vec::with_capacity(exposed.len());
     for (name, owner) in &exposed {
@@ -772,31 +797,359 @@ fn manifest_packages(selection: &Selection) -> Vec<VendoredPackage> {
     packages.into_values().collect()
 }
 
-/// Writes `manifest.json` into a staging directory and renames it onto `output` (C-009); returns the bytes written.
-async fn publish_manifest(output: &Path, manifest: &VendorManifest) -> Result<u64, VendorError> {
+/// A fresh staging directory beside `output`, removed on drop unless published.
+async fn stage(output: &Path) -> Result<StagedTree, VendorError> {
+    let target = output.to_path_buf();
+    tokio::task::spawn_blocking(move || StagedTree::create(&target))
+        .await
+        .map_err(|error| joined(output, error))?
+        .map_err(|error| VendorError::Package(crate::Error::from(error)))
+}
+
+fn joined(output: &Path, error: tokio::task::JoinError) -> VendorError {
+    VendorError::Package(crate::Error::InternalFile(
+        output.to_path_buf(),
+        std::io::Error::other(error),
+    ))
+}
+
+/// Writes `manifest.json` last into `staged`, renames it onto `output` and returns the bytes the tree holds.
+async fn publish(output: &Path, staged: StagedTree, manifest: &VendorManifest) -> Result<u64, VendorError> {
     let mut bytes = serde_json::to_vec_pretty(manifest).map_err(crate::Error::from)?;
     bytes.push(b'\n');
-    let joined = |error: tokio::task::JoinError| {
-        VendorError::Package(crate::Error::InternalFile(
-            output.to_path_buf(),
-            std::io::Error::other(error),
-        ))
-    };
-
-    let target = output.to_path_buf();
-    let staged = tokio::task::spawn_blocking(move || StagedTree::create(&target))
-        .await
-        .map_err(joined)?
-        .map_err(crate::Error::from)?;
     let manifest_path = staged.path().join(MANIFEST_FILE);
     tokio::fs::write(&manifest_path, &bytes)
         .await
         .map_err(|error| crate::error::file_error(&manifest_path, error))?;
+    let written_size = tree_size(staged.path()).await?;
     tokio::task::spawn_blocking(move || staged.publish())
         .await
-        .map_err(joined)?
+        .map_err(|error| joined(output, error))?
         .map_err(crate::Error::from)?;
-    Ok(bytes.len() as u64)
+    Ok(written_size)
+}
+
+/// The summed size of the regular files under `root`; a link counts for nothing.
+async fn tree_size(root: &Path) -> Result<u64, VendorError> {
+    let io = |path: &Path, error| VendorError::Package(crate::Error::InternalFile(path.to_path_buf(), error));
+    let mut total = 0;
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        let mut entries = tokio::fs::read_dir(&directory)
+            .await
+            .map_err(|error| io(&directory, error))?;
+        while let Some(entry) = entries.next_entry().await.map_err(|error| io(&directory, error))? {
+            let file_type = entry.file_type().await.map_err(|error| io(&entry.path(), error))?;
+            if file_type.is_dir() {
+                pending.push(entry.path());
+            } else if file_type.is_file() {
+                total += entry.metadata().await.map_err(|error| io(&entry.path(), error))?.len();
+            }
+        }
+    }
+    Ok(total)
+}
+
+// ── Content half: packages, launchers and sidecars ───────────────────────────
+
+/// Packages pulled at once; a closure is a handful of packages, and each pull bounds its own layers.
+const PULL_CONCURRENCY: usize = 8;
+
+/// One package placed in the staging tree.
+struct PlacedPackage {
+    digest: String,
+    tree: Tree,
+    /// What the package declared, for the entry-point launchers.
+    entrypoints: Option<Entrypoints>,
+}
+
+/// Copies every package of `manifest` into `staging`, then writes the launchers and sidecars the manifest names.
+///
+/// Fills `packages[].tree` and sets `content` to `present`; nothing else of the manifest changes (C-004).
+async fn write_content(
+    manager: &PackageManager,
+    request: &VendorRequest,
+    selection: &Selection,
+    manifest: &mut VendorManifest,
+    staging: &Path,
+) -> Result<(), VendorError> {
+    let platform = &request.platform;
+    let windows = is_windows(platform);
+    let layout = VendorLayout::new(staging);
+    let groups = SetupGroups::new();
+
+    let mut nodes: BTreeMap<String, &ClosureNode> = BTreeMap::new();
+    for node in &selection.closures.surface {
+        nodes.entry(node.identifier.digest().to_string()).or_insert(node);
+    }
+    let placed: Vec<PlacedPackage> = futures::stream::iter(nodes)
+        .map(|(digest, node)| place_package(manager, platform, &layout, groups.clone(), digest, node))
+        .buffer_unordered(PULL_CONCURRENCY)
+        .try_collect()
+        .await?;
+
+    let mut entrypoints: HashMap<String, Entrypoints> = HashMap::new();
+    for package in placed {
+        if let Some(listed) = manifest
+            .packages
+            .iter_mut()
+            .find(|listed| listed.digest == package.digest)
+        {
+            listed.tree = Some(package.tree);
+        }
+        if let Some(declared) = package.entrypoints {
+            entrypoints.insert(package.digest, declared);
+        }
+    }
+    manifest.content = Content::Present;
+
+    // C-019: no blob for the platform means no launcher and no sidecar; the manifest then lists no `launcher_path`.
+    if let Some(blob) = ocx_store::shim::blob_for(platform) {
+        write_entrypoint_launchers(&layout, manifest, &entrypoints, blob, windows).await?;
+        write_selection_launchers(&layout, manifest, blob, windows).await?;
+    }
+
+    // After the launchers: an entry point's command may resolve through a link.
+    if request.omit_links {
+        for link in manifest
+            .packages
+            .iter()
+            .filter_map(|package| package.tree.as_ref())
+            .flat_map(|tree| &tree.links)
+        {
+            let path = layout.resolve(&link.path);
+            tokio::fs::remove_file(&path)
+                .await
+                .map_err(|error| crate::error::file_error(&path, error))?;
+        }
+    }
+    Ok(())
+}
+
+/// Pulls one package into the staging tree and lists what landed.
+async fn place_package(
+    manager: &PackageManager,
+    platform: &Platform,
+    layout: &VendorLayout,
+    groups: SetupGroups,
+    digest: String,
+    node: &ClosureNode,
+) -> Result<PlacedPackage, VendorError> {
+    let requested: PackageRef = node.identifier.clone().into();
+    let pull_failed = |kind| {
+        VendorError::Package(crate::Error::InstallFailed(vec![PackageError::new(
+            requested.clone(),
+            kind,
+        )]))
+    };
+    let resolved = manager
+        .resolve(&requested, platform.clone())
+        .await
+        .map_err(&pull_failed)?;
+    let pinned = resolved.pinned.clone();
+    let target = VendorTarget::new(layout, &node.identifier);
+    let info = setup_vendored(manager, &pinned, resolved, platform.clone(), groups, &target, None)
+        .await
+        .map_err(&pull_failed)?;
+    let content_dir = VendorLayout::relative_content_dir(node.identifier.registry(), &node.identifier.digest());
+    let tree = list_tree(layout, &content_dir, is_windows(platform)).await?;
+    Ok(PlacedPackage {
+        digest,
+        tree,
+        entrypoints: info.metadata().entrypoints().cloned(),
+    })
+}
+
+/// Each package's own launchers under `<package_dir>/entrypoints/`, started with the package's private environment.
+async fn write_entrypoint_launchers(
+    layout: &VendorLayout,
+    manifest: &VendorManifest,
+    declared: &HashMap<String, Entrypoints>,
+    blob: &[u8],
+    windows: bool,
+) -> Result<(), VendorError> {
+    for package in manifest
+        .packages
+        .iter()
+        .filter(|package| !package.entrypoints.is_empty())
+    {
+        let Some(entries) = declared.get(&package.digest) else {
+            continue;
+        };
+        let dir = layout.resolve(&format!("{}/entrypoints", package.package_dir));
+        tokio::fs::create_dir_all(&dir)
+            .await
+            .map_err(|error| crate::error::file_error(&dir, error))?;
+        // Baked arguments name the content directory; `${deps.*}` is refused by the usage gate, as at launch.
+        let install_path = PathBuf::from(format!("{DIR_TOKEN}/{}", package.content_dir));
+        let no_dependencies = HashMap::new();
+        let resolver = TemplateResolver::new(&install_path, &no_dependencies).usage(Usage::EntryPointArgs);
+        for entry in &package.entrypoints {
+            let environment = environment_of(manifest, &entry.environment)?;
+            let program = resolve_program(
+                layout,
+                &environment.items,
+                entries.dispatch_command(&entry.name),
+                windows,
+            )
+            .await?;
+            let args = entries
+                .get(&entry.name)
+                .map(|declared| declared.args())
+                .unwrap_or_default()
+                .iter()
+                .map(|arg| {
+                    resolver
+                        .resolve(arg)
+                        .map_err(|error| VendorError::ValueUnrepresentable {
+                            reason: format!("entry point '{}' argument '{arg}': {error}", entry.name),
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let sidecar = sidecar_of(
+                &manifest.vendor_id,
+                &entry.launcher_path,
+                windows,
+                program,
+                args,
+                &environment.items,
+            );
+            crate::launcher::direct::write_direct_launcher(&dir, &entry.name, blob, &sidecar).await?;
+        }
+    }
+    Ok(())
+}
+
+/// One launcher per exposed name under the selection's launcher directory, started with the selection environment.
+async fn write_selection_launchers(
+    layout: &VendorLayout,
+    manifest: &VendorManifest,
+    blob: &[u8],
+    windows: bool,
+) -> Result<(), VendorError> {
+    for tool in &manifest.tools {
+        let Some(launcher_path) = &tool.launcher_path else {
+            continue;
+        };
+        let dir = layout.resolve(&VendorLayout::relative_launcher_dir(&tool.selection));
+        tokio::fs::create_dir_all(&dir)
+            .await
+            .map_err(|error| crate::error::file_error(&dir, error))?;
+        let environment = environment_of(manifest, &tool.environment)?;
+        let program = format!("{DIR_TOKEN}/{}", tool.target_path);
+        let sidecar = sidecar_of(
+            &manifest.vendor_id,
+            launcher_path,
+            windows,
+            program,
+            Vec::new(),
+            &environment.items,
+        );
+        crate::launcher::direct::write_direct_launcher(&dir, &tool.name, blob, &sidecar).await?;
+    }
+    Ok(())
+}
+
+fn environment_of<'a>(manifest: &'a VendorManifest, id: &str) -> Result<&'a Environment, VendorError> {
+    manifest
+        .environments
+        .iter()
+        .find(|environment| environment.id == id)
+        .ok_or_else(|| VendorError::ValueUnrepresentable {
+            reason: format!("the manifest has no environment '{id}'"),
+        })
+}
+
+/// `command` as the first match on the `PATH` entries of `items`, which an entry point's launcher resolves at run time.
+///
+/// A program must be one fixed path inside `DIR`, so the walk `ocx launcher exec` does against the package's own
+/// environment is done here against the staged tree.
+async fn resolve_program(
+    layout: &VendorLayout,
+    items: &[EnvironmentItem],
+    command: &str,
+    windows: bool,
+) -> Result<String, VendorError> {
+    let names: Vec<String> = if windows {
+        [".exe", ".cmd", ".bat", ""]
+            .iter()
+            .map(|extension| format!("{command}{extension}"))
+            .collect()
+    } else {
+        vec![command.to_owned()]
+    };
+    let on_path = |key: &str| {
+        if windows {
+            key.eq_ignore_ascii_case("PATH")
+        } else {
+            key == "PATH"
+        }
+    };
+    // Each `path` item moves to the front, so the last one applied is searched first.
+    for item in items
+        .iter()
+        .rev()
+        .filter(|item| item.kind == ModifierKind::Path && on_path(&item.key))
+    {
+        let Some(directory) = item
+            .value
+            .strip_prefix(DIR_TOKEN)
+            .and_then(|rest| rest.strip_prefix('/'))
+        else {
+            continue;
+        };
+        for name in &names {
+            let relative = format!("{directory}/{name}");
+            if VendorLayout::check_relative_path(&relative, windows).is_err() {
+                continue;
+            }
+            if tokio::fs::metadata(layout.resolve(&relative))
+                .await
+                .is_ok_and(|metadata| metadata.is_file())
+            {
+                return Ok(format!("{DIR_TOKEN}/{relative}"));
+            }
+        }
+    }
+    Err(VendorError::PathUnrepresentable {
+        path: format!("{command} (found on no PATH entry of the entry point's environment)"),
+    })
+}
+
+/// The sidecar of the launcher at `launcher_path`; `unset` is the writer's to fill.
+fn sidecar_of(
+    vendor_id: &str,
+    launcher_path: &str,
+    windows: bool,
+    program: String,
+    args: Vec<String>,
+    items: &[EnvironmentItem],
+) -> DirectSidecar {
+    let self_path = launcher_path
+        .strip_suffix(".exe")
+        .filter(|_| windows)
+        .unwrap_or(launcher_path);
+    DirectSidecar {
+        schema_version: SIDECAR_VERSION,
+        vendor_id: vendor_id.to_owned(),
+        self_path: self_path.to_owned(),
+        program,
+        args,
+        unset: Vec::new(),
+        env: items
+            .iter()
+            .map(|item| EnvRecord {
+                key: item.key.clone(),
+                value: item.value.clone(),
+                kind: match item.kind {
+                    ModifierKind::Path => ApplyKind::Path,
+                    ModifierKind::Constant => ApplyKind::Constant,
+                    ModifierKind::List => ApplyKind::List,
+                },
+                separator: item.separator.clone(),
+            })
+            .collect(),
+    }
 }
 
 /// The files, links and link-free directories under `content_dir`, every path relative to `layout`'s root.
@@ -809,10 +1162,6 @@ async fn publish_manifest(output: &Path, manifest: &VendorManifest) -> Result<u6
 ///
 /// [`VendorError::PathUnrepresentable`] for a link that is absolute or escapes, a path that breaks the manifest's
 /// rules, or an entry that is neither a file, a directory nor a link; I/O failures as [`VendorError::Package`].
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "`PackageManager::vendor` calls it once the full path is wired")
-)]
 pub(super) async fn list_tree(
     layout: &VendorLayout,
     content_dir: &str,
@@ -1613,6 +1962,24 @@ mod tests {
         assert_eq!(manifest.available_platforms, ["linux/amd64"]);
     }
 
+    /// A package declaring an empty `binaries` list claims no name, the same as one declaring nothing.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_empty_binaries_claim_is_not_a_declared_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (source, root) = register_package(
+            FakeManifestSource::default(),
+            serde_json::json!({"type": "bundle", "version": 1, "binaries": [], "env": []}),
+        );
+        let source = register_index(source, "1.0", &root, &[("linux", "amd64")]);
+        let manager = manager_over(dir.path(), source);
+        let request = packages_request(vec![package("tool", "1.0")], linux_amd64());
+
+        let (_, manifest) = manifest_of(&manager, &request).await;
+
+        assert!(!manifest.packages[0].names_declared);
+        assert!(manifest.tools.is_empty());
+    }
+
     /// A platform with no launcher blob lists its tools without a `launcher_path`.
     #[tokio::test(flavor = "multi_thread")]
     async fn no_launcher_blob_leaves_launcher_path_out() {
@@ -1689,7 +2056,9 @@ mod tests {
         for run in ["first", "second"] {
             let output = dir.path().join(run);
             request.output = output.clone();
-            publish_manifest(&output, &manifest).await.expect("publishes");
+            publish(&output, stage(&output).await.expect("stages"), &manifest)
+                .await
+                .expect("publishes");
             let entries: Vec<_> = std::fs::read_dir(&output)
                 .expect("dir")
                 .map(|e| e.expect("entry").file_name())
@@ -1719,5 +2088,157 @@ mod tests {
 
         assert!(matches!(error, VendorError::OutputNotEmpty { .. }), "{error:?}");
         assert!(output.join("keep").is_file(), "DIR is left as it was");
+    }
+    // ── Content half: launchers and sidecars over a staged tree ──────────────
+
+    use ocx_env_apply::direct::DirectSidecar as WrittenSidecar;
+
+    /// A staging tree holding `files` (paths relative to the root), and the manifest of the registered tool.
+    async fn staged_tool(files: &[String]) -> (tempfile::TempDir, VendorLayout, VendorManifest) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (source, _, _) = registered_tool();
+        let manager = manager_over(&dir.path().join("home"), source);
+        let request = packages_request(vec![package("tool", "1.0")], linux_amd64());
+        let (_, manifest) = manifest_of(&manager, &request).await;
+        let layout = VendorLayout::new(dunce::canonicalize(dir.path()).expect("canonical"));
+        for file in files {
+            let path = layout.resolve(file);
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("directory");
+            std::fs::write(path, file).expect("file");
+        }
+        (dir, layout, manifest)
+    }
+
+    fn root_package(manifest: &VendorManifest) -> &Package {
+        manifest
+            .packages
+            .iter()
+            .find(|package| !package.entrypoints.is_empty())
+            .expect("the package with the entry point")
+    }
+
+    fn sidecar_at(layout: &VendorLayout, launcher: &str) -> WrittenSidecar {
+        serde_json::from_slice(&std::fs::read(layout.resolve(&format!("{launcher}.direct"))).expect("sidecar"))
+            .expect("decodes")
+    }
+
+    /// The entry point's launcher runs the command found on its own environment's `PATH`, the last-applied entry first.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_entrypoint_launcher_starts_the_command_its_environment_finds_first() {
+        let (_dir, _, manifest) = staged_tool(&[]).await;
+        let package = root_package(&manifest);
+        let dependency = manifest
+            .packages
+            .iter()
+            .find(|p| p.digest != package.digest)
+            .expect("dependency");
+        let files = [
+            format!("{}/bin/hello", dependency.content_dir),
+            format!("{}/bin/hello", package.content_dir),
+        ];
+        let (_dir, layout, manifest) = staged_tool(&files).await;
+        let declared: Entrypoints =
+            serde_json::from_str(r#"{"hello":{"args":["--root","${installPath}/share"]}}"#).expect("entrypoints");
+        let declared = HashMap::from([(package.digest.clone(), declared)]);
+
+        write_entrypoint_launchers(&layout, &manifest, &declared, b"blob", false)
+            .await
+            .expect("the launchers write");
+
+        let launcher = &package.entrypoints[0].launcher_path;
+        assert_eq!(std::fs::read(layout.resolve(launcher)).expect("launcher"), b"blob");
+        let sidecar = sidecar_at(&layout, launcher);
+        assert_eq!(sidecar.self_path, *launcher);
+        assert_eq!(sidecar.vendor_id, manifest.vendor_id);
+        assert_eq!(
+            sidecar.program,
+            format!("{DIR_TOKEN}/{}/bin/hello", package.content_dir),
+            "the package's own PATH entry is applied last, so it is searched first"
+        );
+        assert_eq!(
+            sidecar.args,
+            [
+                "--root".to_owned(),
+                format!("{DIR_TOKEN}/{}/share", package.content_dir)
+            ]
+        );
+        let private = &manifest
+            .environments
+            .iter()
+            .find(|e| e.id == package.entrypoints[0].environment)
+            .expect("environment")
+            .items;
+        assert_eq!(sidecar.env.len(), private.len());
+        assert!(
+            sidecar
+                .env
+                .iter()
+                .zip(private)
+                .all(|(record, item)| record.key == item.key && record.value == item.value)
+        );
+        assert!(!sidecar.unset.is_empty(), "the writer fills the credential keys");
+    }
+
+    /// A command no `PATH` entry of the environment holds has no program to start.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_entrypoint_command_on_no_path_entry_is_unrepresentable() {
+        let (_dir, layout, manifest) = staged_tool(&[]).await;
+        let package = root_package(&manifest);
+        let declared: Entrypoints = serde_json::from_str(r#"{"hello":{}}"#).expect("entrypoints");
+        let declared = HashMap::from([(package.digest.clone(), declared)]);
+
+        let error = write_entrypoint_launchers(&layout, &manifest, &declared, b"blob", false)
+            .await
+            .expect_err("nothing to start");
+
+        assert!(matches!(error, VendorError::PathUnrepresentable { .. }), "{error:?}");
+        assert!(!layout.resolve(&package.entrypoints[0].launcher_path).exists());
+    }
+
+    /// Each exposed name gets a launcher under the selection's directory, starting its `target_path` in the selection's environment.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_selection_launcher_starts_the_tools_target_in_the_selection_environment() {
+        let (_dir, layout, manifest) = staged_tool(&[]).await;
+
+        write_selection_launchers(&layout, &manifest, b"blob", false)
+            .await
+            .expect("the launchers write");
+
+        for tool in &manifest.tools {
+            let launcher = tool.launcher_path.as_deref().expect("a launcher path");
+            assert_eq!(std::fs::read(layout.resolve(launcher)).expect("launcher"), b"blob");
+            let sidecar = sidecar_at(&layout, launcher);
+            assert_eq!(sidecar.program, format!("{DIR_TOKEN}/{}", tool.target_path));
+            assert_eq!(sidecar.self_path, launcher);
+            assert_eq!(sidecar.vendor_id, manifest.vendor_id);
+            assert_eq!(sidecar.env.len(), manifest.environments[0].items.len());
+        }
+        let written = std::fs::read_dir(layout.resolve("selections/default/shells/default/bin"))
+            .expect("dir")
+            .count();
+        assert_eq!(written, 2 * manifest.tools.len(), "a launcher and a sidecar per name");
+    }
+
+    /// A tool without a `launcher_path` (no blob for the platform) writes nothing, not even the directory.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_tool_without_a_launcher_path_writes_nothing() {
+        let (_dir, layout, mut manifest) = staged_tool(&[]).await;
+        for tool in &mut manifest.tools {
+            tool.launcher_path = None;
+        }
+
+        write_selection_launchers(&layout, &manifest, b"blob", false)
+            .await
+            .expect("nothing to write");
+
+        assert!(!layout.resolve("selections").exists());
+    }
+
+    #[test]
+    fn windows_and_macos_targets_fold_case_and_linux_does_not() {
+        let platform = |text: &str| text.parse::<Platform>().expect("platform");
+        assert!(folds_case(&platform("windows/amd64")));
+        assert!(folds_case(&platform("darwin/arm64")));
+        assert!(!folds_case(&platform("linux/amd64")));
     }
 }
