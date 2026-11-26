@@ -631,8 +631,8 @@ def test_launcher_signature_verifies_intact_and_fails_once_changed_or_removed(
 ) -> None:
     """The darwin/arm64 launcher's ad-hoc signature is what holds, not a kernel kill.
 
-    A changed byte fails `codesign --verify` without stopping the process on a
-    hosted runner, so the start of a changed copy is not asserted.
+    The hosted macOS arm64 image starts a changed and an unsigned copy alike, so
+    only `codesign --verify` is asserted on them; their runs are printed.
     """
     if platform.machine() != "arm64":
         pytest.skip("only the aarch64-apple-darwin launcher blob carries a signature")
@@ -662,11 +662,14 @@ def test_launcher_signature_verifies_intact_and_fails_once_changed_or_removed(
         check=True,
         capture_output=True,
     )
-    started = _run([str(stripped)], cwd=tmp_path, env={"PATH": CLEAN_PATH})
-    assert started.returncode != clean.returncode, (
-        f"an unsigned launcher must not start the tool; it exited {started.returncode}: "
-        f"{started.stderr}"
+    unsigned = _codesign_verify(stripped)
+    assert unsigned.returncode != 0, (
+        "a copy without its signature must fail codesign --verify"
     )
+
+    for name, copy in (("changed", changed), ("unsigned", stripped)):
+        run = _run([str(copy)], cwd=tmp_path, env={"PATH": CLEAN_PATH})
+        print(f"{name} copy exited {run.returncode}: {run.stderr.strip()}")
 
 
 @darwin_only
