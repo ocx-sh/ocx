@@ -98,27 +98,27 @@ mod tests {
     const RECORDED_SHA256: [(&str, &str); 6] = [
         (
             "x86_64-unknown-linux-musl",
-            "d1eecbf745498caca6d990c08813d9aeb9dd9eaa417994af563398293d5698d9",
+            "50f174abad7a1ba718db1975a77ca679ccfc583fcefea4fb02c6a70afc8a6d2a",
         ),
         (
             "aarch64-unknown-linux-musl",
-            "8d3207b40ba13399b3bf3a39a5dbf25efbdc142ccde1295bb2500081d4b4122a",
+            "b0d4906fdd46de3a9c434fdba18822ae1bdb28d51acd7e6d503660a7fe48d670",
         ),
         (
             "x86_64-apple-darwin",
-            "f6898cff169d82184805a0e87f17e14028bbbf2d77ad2d6d320607fea7d2f02a",
+            "7bea4ff14322e8a06aa770c2b02333c3bda4c000498ef76ad47b82c2601dea82",
         ),
         (
             "aarch64-apple-darwin",
-            "b00c8b111943f1821e25bfec8e798f28c97c0f140fe4409b09ebac1b1836befe",
+            "5d4d819b1b2dcacfe413e93f819c0b9f5e4ac30d2b9e9a9a64856d1fc97363a3",
         ),
         (
             "x86_64-pc-windows-gnullvm",
-            "5fba089be7264c15870d52032d63eb77a5237560354140f8bf6e93990eeac6ce",
+            "beaea56960819372166a51813d54db09e82ea621c98e2a2528c7cec545de48a2",
         ),
         (
             "aarch64-pc-windows-gnullvm",
-            "9a62fde055f49a0aa4e28dbb405fc9c1d6ff3e393a02f34203c5ac3f3cae65be",
+            "7bb230596a88c3ff7745efe650862620b7644c15dc143a9d4154dfb3aa2137dd",
         ),
     ];
 
