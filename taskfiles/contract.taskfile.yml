@@ -36,10 +36,13 @@ tasks:
             echo "contract:rotate: $TAG has no {{.GOLDEN}}/$name; nothing written" >&2; exit 1; }
         done
         mkdir -p '{{.BASELINE}}'
-        for name in cli.json errors.json reports.json; do
-          git cat-file blob "refs/tags/$TAG:{{.GOLDEN}}/$name" > "{{.BASELINE}}/$name"
-        done
-        printf '%s\n' "$TAG" > '{{.BASELINE}}/RELEASE'
+        # A tag cut before the vendor manifest shipped has no such golden: rotate the three it has
+        # and write no baseline for it, so the next release carries it in.
+        for name in cli.json errors.json reports.json vendor-manifest.json; do
+          if git cat-file -e "refs/tags/$TAG:{{.GOLDEN}}/$name" 2>/dev/null; then
+            git cat-file blob "refs/tags/$TAG:{{.GOLDEN}}/$name" > "{{.BASELINE}}/$name"
+          fi
+        done        printf '%s\n' "$TAG" > '{{.BASELINE}}/RELEASE'
         # Drop the acknowledged breaks, keep the header that documents the format.
         sed '/^\[\[break\]\]/,$d' '{{.CONTRACT}}/ledger.toml' > '{{.CONTRACT}}/ledger.toml.tmp'
         mv '{{.CONTRACT}}/ledger.toml.tmp' '{{.CONTRACT}}/ledger.toml'
