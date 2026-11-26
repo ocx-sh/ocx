@@ -1,20 +1,21 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! The vendored (`.launch`) launcher: decoding its sidecar and finding the vendor root it ships in.
+//! The `NAME.launch` launcher: reading its record, dispatching on the record's kind, and for kind `direct` finding the
+//! vendor root it ships in.
 //!
 //! Every filesystem question goes through [`LookupFs`], so the lookup rules run in unit tests without a disk.
 
 use super::ShimError;
 use super::core;
-use ocx_env_apply::launch::{DirectRecord, EnvRecord, VENDOR_DIR_TOKEN};
+use ocx_env_apply::launch::{
+    DirectRecord, EnvRecord, LaunchRecord, MAX_RECORD_BYTES, RECORD_EXTENSION, VENDOR_DIR_TOKEN, is_absolute_any_host,
+    record_path_for,
+};
 use ocx_env_apply::{ApplyKind, KeyFold, apply_one};
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
-
-/// A sidecar is at most this large; a larger file is refused unread past the bound.
-pub(super) const MAX_SIDECAR_BYTES: u64 = 1024 * 1024;
 
 /// At most this many directory entries of a runfiles tree are examined, in name order.
 const MAX_RUNFILES_ENTRIES: usize = 4096;
@@ -27,7 +28,7 @@ const NAMED_CANDIDATES: usize = 8;
 pub(super) enum ReadError {
     /// The path is not a regular file (a FIFO, a directory, a device).
     NotRegular,
-    /// The file holds more than [`MAX_SIDECAR_BYTES`].
+    /// The file holds more than [`MAX_RECORD_BYTES`].
     TooLarge,
     /// Any other I/O failure, `NotFound` excepted.
     Io(std::io::Error),
@@ -37,7 +38,7 @@ impl std::fmt::Display for ReadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ReadError::NotRegular => f.write_str("not a regular file"),
-            ReadError::TooLarge => write!(f, "larger than {MAX_SIDECAR_BYTES} bytes"),
+            ReadError::TooLarge => write!(f, "larger than {MAX_RECORD_BYTES} bytes"),
             ReadError::Io(err) => write!(f, "{err}"),
         }
     }
@@ -47,8 +48,6 @@ impl std::fmt::Display for ReadError {
 pub(super) trait LookupFs {
     /// The bytes of the sidecar at `path`; `Ok(None)` when nothing is there.
     fn read_sidecar(&self, path: &str) -> Result<Option<Vec<u8>>, ReadError>;
-    /// Whether anything exists at `path`.
-    fn exists(&self, path: &str) -> bool;
     /// The entry names of directory `dir`; empty when it is missing or unreadable.
     fn list_dir(&self, dir: &str) -> Vec<String>;
     /// Whether `path` is a regular executable file.
@@ -69,13 +68,13 @@ pub(super) struct LookupContext<'a> {
     pub windows: bool,
 }
 
-/// The sidecar kind the probe found.
+/// What the record beside the launcher asks it to run.
 #[derive(Debug)]
 pub(super) enum Probed {
-    /// An existing kind; only a Windows launcher can see one, and its own path handles it.
-    Legacy(&'static str),
-    /// A decoded `.launch` sidecar and the root it was found for.
+    /// A decoded `direct` record and the root it was found for.
     Direct(Located),
+    /// A `package`, `deferred` or `toolchain` record.
+    Home(core::HomeLaunch),
 }
 
 /// A decoded `.launch` sidecar bound to its vendor root.
@@ -90,7 +89,7 @@ fn refuse(reason: String) -> ShimError {
     ShimError::DirectRefused { reason }
 }
 
-/// Reads the file at `path`: opened non-blocking, required to be a regular file, at most [`MAX_SIDECAR_BYTES`].
+/// Reads the file at `path`: opened non-blocking, required to be a regular file, at most [`MAX_RECORD_BYTES`].
 pub(super) fn read_regular_bounded(path: &Path) -> Result<Option<Vec<u8>>, ReadError> {
     use std::io::Read;
 
@@ -127,50 +126,23 @@ pub(super) fn read_regular_bounded(path: &Path) -> Result<Option<Vec<u8>>, ReadE
     if !metadata.is_file() {
         return Err(ReadError::NotRegular);
     }
-    if metadata.len() > MAX_SIDECAR_BYTES {
+    if metadata.len() > MAX_RECORD_BYTES {
         return Err(ReadError::TooLarge);
     }
     let mut bytes = Vec::new();
     // One byte past the bound: a file that grew after the `metadata` call still trips the size check.
-    file.take(MAX_SIDECAR_BYTES + 1)
+    file.take(MAX_RECORD_BYTES + 1)
         .read_to_end(&mut bytes)
         .map_err(ReadError::Io)?;
-    if bytes.len() as u64 > MAX_SIDECAR_BYTES {
+    if bytes.len() as u64 > MAX_RECORD_BYTES {
         return Err(ReadError::TooLarge);
     }
     Ok(Some(bytes))
 }
 
-/// Decodes and validates a sidecar read from `path`.
-pub(super) fn decode_sidecar(raw: &[u8], path: &str, windows: bool) -> Result<DirectRecord, ShimError> {
-    if raw.len() as u64 > MAX_SIDECAR_BYTES {
-        return Err(refuse(format!(
-            "sidecar {path} is larger than {MAX_SIDECAR_BYTES} bytes"
-        )));
-    }
-    let sidecar: DirectRecord =
-        serde_json::from_slice(raw).map_err(|err| refuse(format!("malformed sidecar {path}: {err}")))?;
-    sidecar
-        .validate(windows)
-        .map_err(|err| refuse(format!("malformed sidecar {path}: {err}")))?;
-    // A NUL ends a Windows environment-block entry early, so the rest of the value would become a variable of its own.
-    let mut texts = sidecar.args.iter().chain(
-        sidecar
-            .env
-            .iter()
-            .flat_map(|record| std::iter::once(&record.value).chain(record.separator.as_ref())),
-    );
-    if texts.any(|text| text.contains('\0')) {
-        return Err(refuse(format!(
-            "malformed sidecar {path}: an argument or environment value contains NUL"
-        )));
-    }
-    Ok(sidecar)
-}
-
 fn is_absolute(path: &str, windows: bool) -> bool {
     if windows {
-        core::is_absolute_path(path)
+        is_absolute_any_host(path)
     } else {
         path.starts_with('/')
     }
@@ -272,7 +244,7 @@ fn accepts(root: &str, self_path: &str, raw: &[u8], windows: bool, fs: &dyn Look
     let path = format!(
         "{}/{self_path}.{}",
         root.trim_end_matches(separators(windows)),
-        core::RECORD_EXTENSION
+        RECORD_EXTENSION
     );
     match fs.read_sidecar(&path) {
         Ok(found) => Ok(found.is_some_and(|bytes| bytes == raw)),
@@ -306,46 +278,34 @@ pub(super) fn started_path_unix(
     Ok(started)
 }
 
-/// Finds the sidecar beside `started` and the vendor root it belongs to.
+/// Reads the record beside `started` and dispatches on its kind; for kind `direct`, also finds the vendor root.
 ///
-/// The root is the first candidate, in candidate order, whose own `<self>.launch` is byte-identical to the sidecar
+/// The root is the first candidate, in candidate order, whose own `<self>.launch` is byte-identical to the record
 /// beside the started path, so a stale tree holding another `vendor_id` is never taken.
 pub(super) fn locate(started: &str, context: &LookupContext<'_>, fs: &dyn LookupFs) -> Result<Probed, ShimError> {
     let windows = context.windows;
-    let (directory, file_name) = split_file_name(started, windows);
-    let stem = strip_exe(file_name);
-    if stem.is_empty() {
+    let (_, file_name) = split_file_name(started, windows);
+    if (if windows { strip_exe(file_name) } else { file_name }).is_empty() {
         return Err(ShimError::SelfPathFailure);
     }
 
-    let mut probed_paths = Vec::new();
-    let mut found = None;
-    for extension in core::probe_extensions(windows) {
-        let path = format!("{directory}{stem}.{extension}");
-        if extension != core::RECORD_EXTENSION {
-            if fs.exists(&path) {
-                return Ok(Probed::Legacy(extension));
-            }
-        } else {
-            match fs.read_sidecar(&path) {
-                Ok(Some(raw)) => {
-                    found = Some((path, raw));
-                    break;
-                }
-                Ok(None) => {}
-                Err(err) => return Err(refuse(format!("cannot read sidecar {path}: {err}"))),
-            }
+    let record_path = record_path_for(started, windows);
+    let raw = match fs.read_sidecar(&record_path) {
+        Ok(Some(raw)) => raw,
+        Ok(None) => {
+            return Err(refuse(format!(
+                "sidecar not found: none of {record_path}; keep the launcher beside its .launch sidecar"
+            )));
         }
-        probed_paths.push(path);
-    }
-    let Some((sidecar_path, raw)) = found else {
-        return Err(refuse(format!(
-            "sidecar not found: none of {}; keep the launcher beside its .launch sidecar",
-            probed_paths.join(", ")
-        )));
+        Err(err) => return Err(refuse(format!("cannot read sidecar {record_path}: {err}"))),
     };
-    let sidecar = decode_sidecar(&raw, &sidecar_path, windows)?;
-
+    let record =
+        LaunchRecord::decode(&raw, windows).map_err(|err| refuse(format!("malformed sidecar {record_path}: {err}")))?;
+    let LaunchRecord::Direct(sidecar) = record else {
+        return core::HomeLaunch::from_record(record)
+            .map(Probed::Home)
+            .ok_or_else(|| refuse(format!("malformed sidecar {record_path}: not a runnable record")));
+    };
     let mut rejected: Vec<String> = Vec::new();
     for stage in 0..3 {
         let roots = match stage {
@@ -498,10 +458,6 @@ impl LookupFs for RealFs {
         read_regular_bounded(Path::new(path))
     }
 
-    fn exists(&self, path: &str) -> bool {
-        std::fs::symlink_metadata(path).is_ok()
-    }
-
     fn list_dir(&self, dir: &str) -> Vec<String> {
         std::fs::read_dir(dir)
             .map(|entries| {
@@ -527,19 +483,6 @@ impl LookupFs for RealFs {
         };
         std::fs::metadata(path).is_ok_and(|started| started.dev() == image.dev() && started.ino() == image.ino())
     }
-}
-
-/// Whether `program` is a batch file, which `CreateProcessW` would hand to `cmd.exe`.
-///
-/// Windows ignores trailing dots and spaces in a file name, so `tool.cmd. ` still runs as `tool.cmd`.
-pub(super) fn is_batch_target(program: &str) -> bool {
-    let name = program.trim_end_matches(['.', ' ']);
-    [".bat", ".cmd"].iter().any(|extension| {
-        name.len()
-            .checked_sub(extension.len())
-            .and_then(|cut| name.get(cut..))
-            .is_some_and(|tail| tail.eq_ignore_ascii_case(extension))
-    })
 }
 
 /// The refusal for a batch target whose path holds `%`: `cmd.exe` expands `%NAME%` inside the quoted script path,
@@ -569,7 +512,8 @@ fn exec_program(program: &str, args: &[OsString], env: Vec<(OsString, OsString)>
         .exec()
 }
 
-/// The `.launch` launcher on Unix: finds the vendor root, builds the environment and argv, and `exec`s the tool.
+/// The `.launch` launcher on Unix: reads the record, finds the vendor root, builds the environment and argv, and
+/// `exec`s the tool.
 ///
 /// Writes nothing to disk and sets no environment of its own, so it runs from a read-only directory.
 #[cfg(unix)]
@@ -596,7 +540,11 @@ pub(super) fn run() -> Result<i32, ShimError> {
     };
     let located = match locate(&started, &context, &RealFs)? {
         Probed::Direct(located) => located,
-        Probed::Legacy(kind) => return Err(refuse(format!("unexpected .{kind} sidecar on this platform"))),
+        Probed::Home(_) => {
+            return Err(refuse(format!(
+                "the sidecar beside {started} is a home record, which the Unix launcher does not run"
+            )));
+        }
     };
 
     #[expect(clippy::disallowed_methods, reason = "no ocx_env edge: the shim's size budget")]
@@ -610,12 +558,13 @@ pub(super) fn run() -> Result<i32, ShimError> {
     })
 }
 
-/// The `.launch` launcher on Windows: finds the vendor root, then starts the tool.
+/// The `.launch` launcher on Windows: reads the record, then starts a home kind's `ocx` or, for kind `direct`, finds the
+/// vendor root and starts the tool.
 ///
 /// A batch target goes through `std::process::Command`, whose batch-file escaping refuses what it cannot quote
 /// safely (BatBadBut, CVE-2024-24576), and anything else through the existing `CreateProcessW` path.
 #[cfg(windows)]
-pub(super) fn run_windows(started: &str) -> Result<i32, ShimError> {
+pub(super) fn run_windows(started: &str, stem: &str) -> Result<i32, ShimError> {
     #[expect(clippy::disallowed_methods, reason = "no ocx_env edge: the shim's size budget")]
     let runfiles_dir = std::env::var_os("RUNFILES_DIR").map(|value| value.to_string_lossy().into_owned());
     let cwd = std::env::current_dir()
@@ -629,13 +578,13 @@ pub(super) fn run_windows(started: &str) -> Result<i32, ShimError> {
     };
     let located = match locate(started, &context, &RealFs)? {
         Probed::Direct(located) => located,
-        Probed::Legacy(kind) => return Err(refuse(format!("unexpected .{kind} sidecar beside the direct launcher"))),
+        Probed::Home(home) => return super::run_home(&home, stem),
     };
 
     #[expect(clippy::disallowed_methods, reason = "no ocx_env edge: the shim's size budget")]
     let inherited: Vec<(OsString, OsString)> = std::env::vars_os().collect();
     let launch = plan_launch(&located, inherited, std::env::args_os().skip(1).collect(), true);
-    if is_batch_target(&launch.program) {
+    if ocx_env_apply::launch::is_batch_target(&launch.program) {
         if let Some(refusal) = batch_program_refusal(&launch.program) {
             return Err(refusal);
         }
@@ -774,6 +723,7 @@ fn spawn_batch(launch: &Launch) -> Result<i32, ShimError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ocx_env_apply::launch::is_batch_target;
     use std::collections::{HashMap, HashSet};
 
     const SELF_PATH: &str = "selections/default/shells/default/bin/cmake";
@@ -817,9 +767,6 @@ mod tests {
             }
             Ok(self.files.get(path).cloned())
         }
-        fn exists(&self, path: &str) -> bool {
-            self.files.contains_key(path)
-        }
         fn list_dir(&self, dir: &str) -> Vec<String> {
             self.dirs.get(dir).cloned().unwrap_or_default()
         }
@@ -844,7 +791,7 @@ mod tests {
     fn direct(probed: Probed) -> Located {
         match probed {
             Probed::Direct(located) => located,
-            Probed::Legacy(extension) => panic!("expected a direct sidecar, found legacy {extension}"),
+            Probed::Home(home) => panic!("expected a direct record, found {home:?}"),
         }
     }
 
@@ -852,18 +799,6 @@ mod tests {
         let err = result.expect_err("the lookup must refuse");
         assert_eq!(err.exit_code(), 78, "{}", err.stderr_message());
         err.stderr_message()
-    }
-
-    // ── Kinds per platform ────────────────────────────────────────────
-
-    #[test]
-    fn v52_unix_probes_the_launch_record_alone() {
-        assert_eq!(core::probe_extensions(false), ["launch"]);
-    }
-
-    #[test]
-    fn v52_windows_probes_the_launch_record_after_the_three_existing_ones() {
-        assert_eq!(core::probe_extensions(true), ["shim", "shimref", "exec", "launch"]);
     }
 
     #[test]
@@ -876,33 +811,60 @@ mod tests {
         assert_eq!(located.sidecar.vendor_id, VENDOR_A);
     }
 
-    #[test]
-    fn v52_other_kinds_are_refused_on_unix() {
-        let started = format!("/vendor/{SELF_PATH}");
-        let mut fs = FakeFs::default();
-        for extension in ["shim", "shimref", "exec"] {
-            fs = fs.with_file(&format!("{started}.{extension}"), b"/some/root\n");
-        }
-        let message = refusal(locate(&started, &unix(None), &fs));
-        assert!(message.contains("cmake.launch"), "{message}");
-    }
+    // ── V-L08: the launcher reads only NAME.launch ─────────────────────────
 
-    #[test]
-    fn v52_an_existing_kind_wins_over_direct_on_windows() {
-        let started = format!("C:\\vendor\\{}.exe", SELF_PATH.replace('/', "\\"));
-        let stem_path = started.strip_suffix(".exe").unwrap();
-        let fs = FakeFs::default()
-            .with_file(&format!("{stem_path}.shim"), b"C:\\root\n")
-            .with_file(&format!("{stem_path}.launch"), &sidecar_json(VENDOR_A, SELF_PATH));
-        let context = LookupContext {
+    fn windows_context() -> LookupContext<'static> {
+        LookupContext {
             cwd: "C:\\work",
             runfiles_dir: None,
             windows: true,
-        };
-        assert!(matches!(
-            locate(&started, &context, &fs).unwrap(),
-            Probed::Legacy("shim")
-        ));
+        }
+    }
+
+    /// The started path, its stem path (no `.exe` on Windows) and the context of each platform.
+    fn platforms() -> [(String, String, LookupContext<'static>); 2] {
+        let windows_stem = format!("C:\\vendor\\{}", SELF_PATH.replace('/', "\\"));
+        [
+            (
+                format!("/vendor/{SELF_PATH}"),
+                format!("/vendor/{SELF_PATH}"),
+                unix(None),
+            ),
+            (format!("{windows_stem}.exe"), windows_stem, windows_context()),
+        ]
+    }
+
+    #[test]
+    fn vl08_a_launcher_beside_only_an_old_sidecar_exits_78_naming_the_record() {
+        for (started, stem_path, context) in platforms() {
+            for extension in ["shim", "shimref", "exec", "direct"] {
+                let fs = FakeFs::default().with_file(&format!("{stem_path}.{extension}"), b"/some/root\n");
+                let message = refusal(locate(&started, &context, &fs));
+                assert!(
+                    message.contains("cmake.launch"),
+                    "{extension} on windows={}: {message}",
+                    context.windows
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn vl08_control_a_record_beside_an_old_sidecar_is_the_one_read() {
+        let bytes = sidecar_json(VENDOR_A, SELF_PATH);
+        for (started, stem_path, context) in platforms() {
+            // The root candidate spells its record path with `/`, so the Windows fake needs that spelling too.
+            let root_record = format!(
+                "{}/{SELF_PATH}.launch",
+                if context.windows { "C:\\vendor" } else { "/vendor" }
+            );
+            let fs = FakeFs::default()
+                .with_file(&format!("{stem_path}.shim"), b"/some/root\n")
+                .with_file(&format!("{stem_path}.launch"), &bytes)
+                .with_file(&root_record, &bytes);
+            let located = direct(locate(&started, &context, &fs).unwrap());
+            assert_eq!(located.sidecar.vendor_id, VENDOR_A, "windows={}", context.windows);
+        }
     }
 
     // ── Root candidates ────────────────────────────────────────────────────
@@ -1165,71 +1127,84 @@ mod tests {
         assert_eq!(err.exit_code(), 74);
     }
 
-    // ── sidecar decoding ────────────────────────────────────────────────────
+    // ── record decoding and dispatch ────────────────────────────────────────
 
-    #[test]
-    fn a_sidecar_with_an_unknown_field_exits_78() {
-        let raw = br#"{"kind":"direct","schema_version":1,"vendor_id":"v","self":"a","program":"@VENDOR_DIR@/a","args":[],"unset":[],"env":[],"extra":1}"#;
-        assert_eq!(decode_sidecar(raw, "/s.launch", false).unwrap_err().exit_code(), 78);
+    /// What `locate` says of `raw` as the record beside `/vendor/bin/cmake`.
+    fn locate_record(raw: &[u8], context: &LookupContext<'_>) -> Result<Probed, ShimError> {
+        let started = if context.windows {
+            "C:\\vendor\\bin\\cmake.exe"
+        } else {
+            "/vendor/bin/cmake"
+        };
+        let record_path = if context.windows {
+            "C:\\vendor\\bin\\cmake.launch"
+        } else {
+            "/vendor/bin/cmake.launch"
+        };
+        locate(started, context, &FakeFs::default().with_file(record_path, raw))
     }
 
     #[test]
-    fn a_sidecar_with_another_schema_version_exits_78() {
-        let raw = String::from_utf8(sidecar_json(VENDOR_A, SELF_PATH))
-            .unwrap()
-            .replace("\"schema_version\":1", "\"schema_version\":2");
-        assert_eq!(
-            decode_sidecar(raw.as_bytes(), "/s.launch", false)
-                .unwrap_err()
-                .exit_code(),
-            78
+    fn a_record_that_does_not_decode_exits_78_naming_its_path() {
+        let unknown_field = br#"{"kind":"direct","schema_version":1,"vendor_id":"v","self":"a","program":"@VENDOR_DIR@/a","args":[],"unset":[],"env":[],"extra":1}"#;
+        let mut over_a_mebibyte = sidecar_json(VENDOR_A, SELF_PATH);
+        over_a_mebibyte.resize(MAX_RECORD_BYTES as usize + 1, b' ');
+        let nul = sidecar_with(r#"["a\u0000b"]"#, "[]", "[]");
+        for (label, raw) in [
+            ("an unknown field", unknown_field.to_vec()),
+            ("over one mebibyte", over_a_mebibyte),
+            ("a NUL in an argument", nul.into_bytes()),
+        ] {
+            let message = refusal(locate_record(&raw, &unix(None)));
+            assert!(message.contains("cmake.launch"), "{label}: {message}");
+        }
+    }
+
+    #[test]
+    fn the_home_kinds_dispatch_to_their_own_verbs() {
+        use super::core::{HomeLaunch, ToolchainHome};
+        let pinned = "ocx.sh/tool/cmake:3.28@sha256:0000000000000000000000000000000000000000000000000000000000000001";
+        let home = |json: String| match locate_record(json.as_bytes(), &unix(None)).unwrap() {
+            Probed::Home(home) => home,
+            Probed::Direct(_) => panic!("a home record located as direct"),
+        };
+
+        let package = home(r#"{"kind":"package","schema_version":1,"package_root":"/o/packages/p"}"#.to_string());
+        assert!(
+            matches!(&package, HomeLaunch::PackageRoot(root) if root == "/o/packages/p"),
+            "{package:?}"
         );
-    }
 
-    #[test]
-    fn a_sidecar_that_breaks_a_validation_rule_exits_78() {
-        let raw = String::from_utf8(sidecar_json(VENDOR_A, SELF_PATH))
-            .unwrap()
-            .replace("@VENDOR_DIR@/packages", "/packages");
-        assert_eq!(
-            decode_sidecar(raw.as_bytes(), "/s.launch", false)
-                .unwrap_err()
-                .exit_code(),
-            78
+        let deferred = home(format!(
+            r#"{{"kind":"deferred","schema_version":1,"identifier":"{pinned}"}}"#
+        ));
+        assert!(
+            matches!(&deferred, HomeLaunch::PinnedIdentifier(id) if id == pinned),
+            "{deferred:?}"
         );
-    }
 
-    #[test]
-    fn a_well_formed_sidecar_decodes() {
-        let raw = sidecar_json(VENDOR_A, SELF_PATH);
-        assert_eq!(decode_sidecar(&raw, "/s.launch", false).unwrap().self_path, SELF_PATH);
-    }
+        let project = home(
+            r#"{"kind":"toolchain","schema_version":1,"tier":"project","project_root":"/w/proj","ocx":"/o/ocx"}"#
+                .to_string(),
+        );
+        assert!(
+            matches!(&project, HomeLaunch::ToolchainHome(ToolchainHome::Project(root), Some(ocx)) if root == "/w/proj" && ocx == "/o/ocx"),
+            "{project:?}"
+        );
 
-    #[test]
-    fn a_sidecar_over_one_mebibyte_exits_78_even_when_well_formed() {
-        let mut raw = sidecar_json(VENDOR_A, SELF_PATH);
-        raw.resize(MAX_SIDECAR_BYTES as usize + 1, b' ');
-        assert_eq!(decode_sidecar(&raw, "/s.launch", false).unwrap_err().exit_code(), 78);
+        let global = home(r#"{"kind":"toolchain","schema_version":1,"tier":"global"}"#.to_string());
+        assert!(
+            matches!(&global, HomeLaunch::ToolchainHome(ToolchainHome::Global, None)),
+            "{global:?}"
+        );
     }
 
     /// A NUL in a value ends its `KEY=VALUE` entry in a Windows environment block, so the rest would be a new entry.
     #[test]
-    fn a_nul_in_an_env_value_or_baked_argument_exits_78() {
+    fn a_nul_in_an_env_value_exits_78() {
         let value = r#"[{"key":"K","value":"x\u0000OCX_SIGNING_KEY=s","kind":"constant"}]"#;
         let raw = sidecar_with("[]", r#"["OCX_SIGNING_KEY"]"#, value);
-        assert_eq!(
-            decode_sidecar(raw.as_bytes(), "/s.launch", true)
-                .unwrap_err()
-                .exit_code(),
-            78
-        );
-        let raw = sidecar_with(r#"["a\u0000b"]"#, "[]", "[]");
-        assert_eq!(
-            decode_sidecar(raw.as_bytes(), "/s.launch", false)
-                .unwrap_err()
-                .exit_code(),
-            78
-        );
+        refusal(locate_record(raw.as_bytes(), &windows_context()));
     }
 
     #[test]
@@ -1254,7 +1229,10 @@ mod tests {
 
     fn located(json: &str, root: &str) -> Located {
         Located {
-            sidecar: decode_sidecar(json.as_bytes(), "/s.launch", false).unwrap(),
+            sidecar: match LaunchRecord::decode(json.as_bytes(), false).unwrap() {
+                LaunchRecord::Direct(record) => record,
+                other => panic!("a fixture of kind {:?}", other.kind()),
+            },
             root: root.to_string(),
         }
     }
@@ -1448,12 +1426,12 @@ mod tests {
     fn a_file_over_the_bound_is_refused() {
         let dir = scratch_dir("big");
         let file = dir.join("big.launch");
-        std::fs::write(&file, vec![b' '; MAX_SIDECAR_BYTES as usize + 1]).unwrap();
+        std::fs::write(&file, vec![b' '; MAX_RECORD_BYTES as usize + 1]).unwrap();
         assert!(matches!(read_regular_bounded(&file), Err(ReadError::TooLarge)));
-        std::fs::write(&file, vec![b' '; MAX_SIDECAR_BYTES as usize]).unwrap();
+        std::fs::write(&file, vec![b' '; MAX_RECORD_BYTES as usize]).unwrap();
         assert_eq!(
             read_regular_bounded(&file).unwrap().map(|b| b.len()),
-            Some(MAX_SIDECAR_BYTES as usize)
+            Some(MAX_RECORD_BYTES as usize)
         );
         std::fs::remove_dir_all(&dir).unwrap();
     }

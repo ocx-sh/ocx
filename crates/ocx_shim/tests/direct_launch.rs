@@ -291,6 +291,24 @@ fn a_launcher_without_its_sidecar_exits_78_naming_the_path() {
     assert!(stderr_of(&output).contains("tool.launch"), "{}", stderr_of(&output));
 }
 
+/// V-L08 end to end: a launcher beside only a sidecar of an older kind never reads it.
+#[test]
+fn a_launcher_beside_only_an_old_sidecar_exits_78_naming_the_record() {
+    for extension in ["shim", "shimref", "exec", "direct"] {
+        let vendor = Vendor::new("old-sidecar");
+        vendor.install("[]", "[]", "[]");
+        std::fs::remove_file(vendor.root().join(format!("{SELF_PATH}.launch"))).unwrap();
+        vendor.write(&format!("{SELF_PATH}.{extension}"), b"/some/root\n", 0o644);
+        let output = vendor.run(&[], &[]);
+        assert_eq!(output.status.code(), Some(78), ".{extension}: {}", stderr_of(&output));
+        assert!(
+            stderr_of(&output).contains("tool.launch"),
+            ".{extension}: {}",
+            stderr_of(&output)
+        );
+    }
+}
+
 #[test]
 fn a_program_without_the_execute_bit_exits_77() {
     let vendor = Vendor::new("not-executable");

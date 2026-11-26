@@ -327,7 +327,8 @@ fn check_no_token(field: &str, text: &str) -> Result<(), RecordError> {
 }
 
 /// `C:\`, `C:/`, `\\server\share`, `\\?\` or a leading `/`, judged the same on every host.
-fn is_absolute_any_host(path: &str) -> bool {
+#[must_use]
+pub fn is_absolute_any_host(path: &str) -> bool {
     let bytes = path.as_bytes();
     path.starts_with("\\\\")
         || path.starts_with('/')
@@ -356,7 +357,8 @@ fn is_pinned_identifier(value: &str) -> bool {
 /// Whether `program` is a batch file, which `CreateProcessW` would hand to `cmd.exe`.
 ///
 /// Windows ignores trailing dots and spaces in a file name, so `tool.cmd. ` still runs as `tool.cmd`.
-fn is_batch_target(program: &str) -> bool {
+#[must_use]
+pub fn is_batch_target(program: &str) -> bool {
     let name = program.trim_end_matches(['.', ' ']);
     [".bat", ".cmd"].iter().any(|extension| {
         name.len()

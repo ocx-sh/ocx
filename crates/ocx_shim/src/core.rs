@@ -4,6 +4,7 @@
 //! Pure shim logic, split from the Win32 calls in [`crate::run`] so the Linux CI host can unit-test it.
 
 use super::ShimError;
+use ocx_env_apply::launch::{LaunchRecord, ToolchainTier};
 use std::ffi::OsStr;
 
 /// Derives the entrypoint stem: the module path's file name with exactly one trailing `.exe` stripped
@@ -26,20 +27,21 @@ pub(super) fn derive_stem(module_path: &OsStr) -> Result<String, ShimError> {
     Ok(stem.to_string())
 }
 
-/// A parsed sidecar; the variant decides the wire verb, so no payload can be emitted under another sidecar's verb.
+/// What a home-kind record starts; the variant decides the wire verb, so no payload can be emitted under another
+/// kind's verb.
 #[derive(Debug)]
-pub(super) enum Sidecar {
-    /// `<stem>.shim`: an installed package's absolute root. Dispatches [`WIRE_SUBCOMMAND`].
+pub(super) enum HomeLaunch {
+    /// Kind `package`: an installed package's absolute root. Dispatches [`WIRE_SUBCOMMAND`].
     PackageRoot(String),
-    /// `<stem>.shimref`: a deferred tool's pinned identifier. Dispatches [`WIRE_SUBCOMMAND_SHIM`], which
-    /// materializes the package first.
+    /// Kind `deferred`: a deferred tool's pinned identifier. Dispatches [`WIRE_SUBCOMMAND_SHIM`], which materializes
+    /// the package first.
     PinnedIdentifier(String),
-    /// `<stem>.exec`: a trampoline's toolchain home plus the baked absolute `ocx` (`None` for the one-line form).
-    /// Dispatches [`WIRE_SUBCOMMAND_EXEC`] behind a root flag.
+    /// Kind `toolchain`: a toolchain home plus the baked absolute `ocx` (`None` when the renderer could not resolve
+    /// its own path). Dispatches [`WIRE_SUBCOMMAND_EXEC`] behind a root flag.
     ToolchainHome(ToolchainHome, Option<String>),
 }
 
-/// The home a `.exec` sidecar names; typed because `--global` takes no value token.
+/// The home a `toolchain` record names; typed because `--global` takes no value token.
 #[derive(Debug)]
 pub(super) enum ToolchainHome {
     /// An absolute project root, emitted as `--project "<root>"`.
@@ -48,294 +50,78 @@ pub(super) enum ToolchainHome {
     Global,
 }
 
-impl ToolchainHome {
-    /// The `.exec` literal for the global home, matched by byte equality.
-    ///
-    /// Must equal `EXEC_SIDECAR_GLOBAL` in `ocx_package_manager`'s `launcher::body`, which writes it; only a paired
-    /// golden binds the two.
-    pub(super) const GLOBAL: &'static str = "global";
-
-    /// The sidecar line this home was parsed from.
-    pub(super) fn as_line(&self) -> &str {
-        match self {
-            ToolchainHome::Project(root) => root,
-            ToolchainHome::Global => Self::GLOBAL,
+impl HomeLaunch {
+    /// The home launch a decoded record names; `None` for kind `direct`, which has its own lookup, and for a
+    /// toolchain tier and `project_root` that disagree (decoding refuses that already).
+    pub(super) fn from_record(record: LaunchRecord) -> Option<Self> {
+        match record {
+            LaunchRecord::Direct(_) => None,
+            LaunchRecord::Package(record) => Some(Self::PackageRoot(record.package_root)),
+            LaunchRecord::Deferred(record) => Some(Self::PinnedIdentifier(record.identifier)),
+            LaunchRecord::Toolchain(record) => {
+                let home = match (record.tier, record.project_root) {
+                    (ToolchainTier::Project, Some(root)) => ToolchainHome::Project(root),
+                    (ToolchainTier::Global, None) => ToolchainHome::Global,
+                    _ => return None,
+                };
+                Some(Self::ToolchainHome(home, record.ocx))
+            }
         }
     }
-}
 
-impl Sidecar {
-    /// The wire subcommand this sidecar's value is passed to.
+    /// The wire subcommand this record's value is passed to.
     pub(super) fn wire_subcommand(&self) -> &'static str {
         match self {
-            Sidecar::PackageRoot(_) => WIRE_SUBCOMMAND,
-            Sidecar::PinnedIdentifier(_) => WIRE_SUBCOMMAND_SHIM,
-            Sidecar::ToolchainHome(..) => WIRE_SUBCOMMAND_EXEC,
+            HomeLaunch::PackageRoot(_) => WIRE_SUBCOMMAND,
+            HomeLaunch::PinnedIdentifier(_) => WIRE_SUBCOMMAND_SHIM,
+            HomeLaunch::ToolchainHome(..) => WIRE_SUBCOMMAND_EXEC,
         }
     }
 
-    /// The absolute `ocx` a `.exec` sidecar baked; `None` otherwise, and the caller falls back to the literal `ocx`.
+    /// The absolute `ocx` a `toolchain` record baked; `None` otherwise, and the caller falls back to the literal `ocx`.
     pub(super) fn baked_ocx(&self) -> Option<&str> {
         match self {
-            Sidecar::ToolchainHome(_, ocx) => ocx.as_deref(),
-            Sidecar::PackageRoot(_) | Sidecar::PinnedIdentifier(_) => None,
+            HomeLaunch::ToolchainHome(_, ocx) => ocx.as_deref(),
+            HomeLaunch::PackageRoot(_) | HomeLaunch::PinnedIdentifier(_) => None,
         }
     }
 
-    /// The single value the sidecar carries; for `.exec`, the home line, which [`build_child_command_line`] places
-    /// before the verb.
+    /// The value the record carries; for `toolchain`, the project root, which [`build_child_command_line`] places
+    /// before the verb, and empty for the global home, which has none.
     pub(super) fn value(&self) -> &str {
         match self {
-            Sidecar::PackageRoot(value) | Sidecar::PinnedIdentifier(value) => value,
-            Sidecar::ToolchainHome(home, _) => home.as_line(),
+            HomeLaunch::PackageRoot(value) | HomeLaunch::PinnedIdentifier(value) => value,
+            HomeLaunch::ToolchainHome(ToolchainHome::Project(root), _) => root,
+            HomeLaunch::ToolchainHome(ToolchainHome::Global, _) => "",
         }
     }
 
-    /// The path subject to the containment check, or `None` when the sidecar names no package root.
+    /// The path subject to the containment check, or `None` when the record names no package root.
     ///
-    /// `.shimref` gets no containment check: it names a registry identifier, whose fetch is digest-verified instead.
+    /// Kind `deferred` gets no containment check: it names a registry identifier, whose fetch is digest-verified instead.
     pub(super) fn containment_path(&self) -> Option<&str> {
         match self {
-            Sidecar::PackageRoot(root) => Some(root),
-            // `.exec` names a project directory, which `pkg_root_allowed`'s roots exclude, so a check would refuse
+            HomeLaunch::PackageRoot(root) => Some(root),
+            // `toolchain` names a project directory, which `pkg_root_allowed`'s roots exclude, so a check would refuse
             // every trampoline.
-            Sidecar::PinnedIdentifier(_) | Sidecar::ToolchainHome(..) => None,
+            HomeLaunch::PinnedIdentifier(_) | HomeLaunch::ToolchainHome(..) => None,
         }
     }
 }
 
-/// Whether dispatching `sidecar` must clear `OCX_GLOBAL` and `OCX_PROJECT` from the child's environment.
+/// Whether dispatching `home` must clear `OCX_GLOBAL` and `OCX_PROJECT` from the child's environment.
 ///
-/// Only `.exec`: its baked selector is the only selector, so an exported `OCX_GLOBAL` would make every trampoline
-/// exit 64 from `check_global_project_exclusivity`. Stripping for the positional grammars would change what
+/// Only kind `toolchain`: its baked selector is the only selector, so an exported `OCX_GLOBAL` would make every
+/// trampoline exit 64 from `check_global_project_exclusivity`. Stripping for the positional grammars would change what
 /// `launcher exec` / `launcher shim` resolve for a caller who deliberately exported a tier.
-pub(super) fn strips_tier_selectors(sidecar: &Sidecar) -> bool {
-    matches!(sidecar, Sidecar::ToolchainHome(..))
-}
-
-/// The sidecars a shim probes, in precedence order (installed, deferred, trampoline), each with its grammar's parser.
-pub(super) const SIDECAR_PROBE_ORDER: [(&str, SidecarParser); 3] = [
-    ("shim", parse_shim_sidecar),
-    ("shimref", parse_shimref_sidecar),
-    ("exec", parse_exec_sidecar),
-];
-
-/// The vendored launcher's sidecar extension; a vendor set writes nothing else.
-pub(super) const RECORD_EXTENSION: &str = ocx_env_apply::launch::RECORD_EXTENSION;
-
-/// The sidecar extensions a launcher probes, in precedence order.
-///
-/// Unix probes `.launch` alone, so a `.shim`, `.shimref` or `.exec` there is never read and the launcher exits 78;
-/// Windows probes the three existing kinds first, so a `.launch` never shadows one.
-pub(super) fn probe_extensions(windows: bool) -> Vec<&'static str> {
-    let mut order: Vec<&'static str> = Vec::new();
-    if windows {
-        order.extend(SIDECAR_PROBE_ORDER.iter().map(|(extension, _)| *extension));
-    }
-    order.push(RECORD_EXTENSION);
-    order
-}
-
-/// Raw sidecar bytes in, a [`Sidecar`] or [`ShimError::MalformedSidecar`] (exit 78) out.
-type SidecarParser = fn(&[u8]) -> Result<Sidecar, ShimError>;
-
-/// Upper bound on a sidecar file, checked by all three grammars; the write side caps nothing, so the reader must not
-/// borrow its rules.
-const MAX_LEN: usize = 32 * 1024;
-
-/// The read-side rules every sidecar grammar shares: at most [`MAX_LEN`] bytes, one trailing `\r\n` or `\n`
-/// stripped, non-empty, no NUL/CR/LF left, valid UTF-8. A BOM is not stripped, so the per-grammar clause refuses it.
-fn parse_one_line(raw: &[u8]) -> Result<&str, ShimError> {
-    if raw.len() > MAX_LEN {
-        return Err(ShimError::MalformedSidecar {
-            reason: format!("sidecar larger than {MAX_LEN} bytes"),
-        });
-    }
-
-    // Only one terminator: a second trailing newline stays and is refused as interior.
-    let body = if let Some(stripped) = raw.strip_suffix(b"\r\n") {
-        stripped
-    } else if let Some(stripped) = raw.strip_suffix(b"\n") {
-        stripped
-    } else {
-        raw
-    };
-
-    if body.is_empty() {
-        return Err(ShimError::MalformedSidecar {
-            reason: "empty after stripping the terminator".to_string(),
-        });
-    }
-
-    for &byte in body {
-        match byte {
-            0x00 => {
-                return Err(ShimError::MalformedSidecar {
-                    reason: "embedded NUL byte".to_string(),
-                });
-            }
-            b'\n' => {
-                return Err(ShimError::MalformedSidecar {
-                    reason: "embedded newline".to_string(),
-                });
-            }
-            b'\r' => {
-                return Err(ShimError::MalformedSidecar {
-                    reason: "embedded carriage return".to_string(),
-                });
-            }
-            _ => {}
-        }
-    }
-
-    std::str::from_utf8(body).map_err(|_| ShimError::MalformedSidecar {
-        reason: "not valid UTF-8".to_string(),
-    })
-}
-
-/// Parses a `<stem>.shim` sidecar: [`parse_one_line`]'s rules, then an absolute package root
-/// ([`is_absolute_path`]), else [`ShimError::MalformedSidecar`].
-pub(super) fn parse_shim_sidecar(raw: &[u8]) -> Result<Sidecar, ShimError> {
-    let pkg_root = parse_one_line(raw)?;
-
-    if !is_absolute_path(pkg_root) {
-        return Err(ShimError::MalformedSidecar {
-            reason: format!("pkg_root is not absolute: {pkg_root}"),
-        });
-    }
-
-    Ok(Sidecar::PackageRoot(pkg_root.to_string()))
-}
-
-/// Parses a `<stem>.shimref` sidecar: [`parse_one_line`]'s rules, then [`is_pinned_identifier`], else
-/// [`ShimError::MalformedSidecar`].
-///
-/// Refuses a space although the shared writer (`LauncherSafeString`) permits one: a pinned identifier never holds one.
-pub(super) fn parse_shimref_sidecar(raw: &[u8]) -> Result<Sidecar, ShimError> {
-    let identifier = parse_one_line(raw)?;
-
-    if !is_pinned_identifier(identifier) {
-        return Err(ShimError::MalformedSidecar {
-            reason: format!("not a pinned identifier: {identifier}"),
-        });
-    }
-
-    Ok(Sidecar::PinnedIdentifier(identifier.to_string()))
-}
-
-/// Parses a `<stem>.exec` sidecar: line one is [`ToolchainHome::GLOBAL`] or an absolute path, the optional line two
-/// an absolute baked `ocx`, and a third line is refused; anything rejected is [`ShimError::MalformedSidecar`].
-///
-/// Each line passes [`parse_one_line`], but [`MAX_LEN`] caps the whole file, so two lines cannot buy more than one.
-/// Line two stays optional: an ocx that cannot resolve its own path must still render.
-pub(super) fn parse_exec_sidecar(raw: &[u8]) -> Result<Sidecar, ShimError> {
-    if raw.len() > MAX_LEN {
-        return Err(ShimError::MalformedSidecar {
-            reason: format!("sidecar larger than {MAX_LEN} bytes"),
-        });
-    }
-
-    // One terminator off the file, so a second trailing newline stays an empty line two and is refused.
-    let body = raw
-        .strip_suffix(b"\r\n")
-        .or_else(|| raw.strip_suffix(b"\n"))
-        .unwrap_or(raw);
-
-    // Split at the FIRST newline only: everything after it is line two, so a third line fails as an interior newline there.
-    let (home_line, baked_line) = match body.iter().position(|&byte| byte == b'\n') {
-        // Strip line one's CRLF `\r` only on a split, so a lone trailing CR on a one-line sidecar stays refused.
-        Some(at) => (
-            body[..at].strip_suffix(b"\r").unwrap_or(&body[..at]),
-            Some(&body[at + 1..]),
-        ),
-        None => (body, None),
-    };
-
-    let home = parse_one_line(home_line)?;
-    // Byte equality, never trimmed or case-folded: the writer emits one spelling.
-    let home = if home == ToolchainHome::GLOBAL {
-        ToolchainHome::Global
-    } else if is_absolute_path(home) {
-        ToolchainHome::Project(home.to_string())
-    } else {
-        return Err(ShimError::MalformedSidecar {
-            reason: format!(
-                "toolchain home is neither an absolute path nor `{}`: {home}",
-                ToolchainHome::GLOBAL
-            ),
-        });
-    };
-
-    // Line two spares the literal-`ocx` search, which starts in `<home>/toolchain/active/bin`, where a package may ship
-    // its own `ocx.exe` and capture every trampoline's spawn.
-    let baked = match baked_line {
-        Some(line) => {
-            let ocx = parse_one_line(line)?;
-            if !is_absolute_path(ocx) {
-                return Err(ShimError::MalformedSidecar {
-                    reason: format!("baked ocx is not absolute: {ocx}"),
-                });
-            }
-            // Not containment-checked: bounded by write access to `<home>/toolchain/active/bin`, owner-only at create.
-            Some(ocx.to_string())
-        }
-        None => None,
-    };
-
-    Ok(Sidecar::ToolchainHome(home, baked))
-}
-
-/// Structural admissibility check for a `.shimref` value, deliberately not an OCI reference parser: printable ASCII,
-/// no leading `-`, and `<algorithm>:<hex>` after the last `@`.
-///
-/// Everything else is left to `ocx_oci::PinnedIdentifier`, which re-parses the value on the receiving end and exits 64.
-fn is_pinned_identifier(value: &str) -> bool {
-    if !value.bytes().all(|byte| matches!(byte, 0x21..=0x7E)) {
-        return false;
-    }
-
-    // A leading `-` would parse as an `ocx` flag and exit 64 instead of 78 naming the file.
-    if value.starts_with('-') {
-        return false;
-    }
-
-    // Split at the last `@`; the first would measure the digest from the wrong place.
-    // Requiring a digest stops a tampered sidecar downgrading the fetch to a registry-controlled tag.
-    // No algorithm allow-list: a hard-coded `sha256` would reject a `sha384`/`sha512` pin.
-    let Some(at) = value.rfind('@') else {
-        return false;
-    };
-    if at == 0 {
-        return false;
-    }
-    let Some((algorithm, hex)) = value[at + 1..].split_once(':') else {
-        return false;
-    };
-    // `split_once` splits at the first colon, so a second one lands in `hex` and fails the hex class.
-    !algorithm.is_empty()
-        && algorithm.bytes().all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9'))
-        && !hex.is_empty()
-        && hex.bytes().all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
-}
-
-/// Host-independent absolute-path check (`C:\`, `C:/`, `\\server\share`, `\\?\`, or a leading `/`) for a `.shim`
-/// root or `.exec` home; `Path::is_absolute` would reject `C:\` on the Linux CI host.
-pub(super) fn is_absolute_path(p: &str) -> bool {
-    let bytes = p.as_bytes();
-    if p.starts_with("\\\\") {
-        return true;
-    }
-    if bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && (bytes[2] == b'\\' || bytes[2] == b'/')
-    {
-        return true;
-    }
-    p.starts_with('/')
+pub(super) fn strips_tier_selectors(home: &HomeLaunch) -> bool {
+    matches!(home, HomeLaunch::ToolchainHome(..))
 }
 
 /// Whether a canonicalized package root lies inside the containment roots, given the canonicalized `OCX_HOME`.
 ///
 /// Must mirror `validate_launcher_pkg_root`'s allow-list in `ocx_cli`: `packages`, `temp/test`, `temp/patch-test`.
-/// Keep the scratch roots enumerated: admitting all of `temp/` lets a tampered sidecar aim at mid-download content.
+/// Keep the scratch roots enumerated: admitting all of `temp/` lets a tampered record aim at mid-download content.
 /// Comparison is `Path::starts_with`, never a string prefix, or `packages-old` would match.
 pub(crate) fn pkg_root_allowed(canon_home: &std::path::Path, canon_root: &std::path::Path) -> bool {
     let temp = canon_home.join("temp");
@@ -366,7 +152,7 @@ impl ResolvedProgram {
     }
 }
 
-/// Resolves the spawned program: `OCX_BINARY_PIN`, then the `.exec` baked `ocx` ([`Sidecar::baked_ocx`]), then the
+/// Resolves the spawned program: `OCX_BINARY_PIN`, then the `toolchain` record's baked `ocx` ([`HomeLaunch::baked_ocx`]), then the
 /// literal `ocx`, the only rung with a NULL `lpApplicationName`. `pin`: `None` = unset, `Some` = defined (maybe empty).
 pub(super) fn resolve_program(pin: Option<&str>, baked: Option<&str>) -> ResolvedProgram {
     // A defined pin wins even when empty (`IF DEFINED`): collapsing it to `ocx` would PATH-search instead of failing.
@@ -401,20 +187,20 @@ pub(super) const WIRE_SUBCOMMAND_SHIM: &str = "launcher shim";
 /// [`super::tests::trampoline_wire_tokens_match_the_sh_trampoline_body`].
 pub(super) const WIRE_SUBCOMMAND_EXEC: &str = "exec";
 
-/// Assembles the child command line of the frozen wire ABI; the shape follows the [`Sidecar`] variant, never a value.
+/// Assembles the child command line of the frozen wire ABI; the shape follows the [`HomeLaunch`] variant, never a value.
 ///
 /// Every token passes through [`append_quoted_arg`], which quotes only what needs it.
-pub(super) fn build_child_command_line(program: &str, sidecar: &Sidecar, stem: &str, argv: &[String]) -> String {
-    // Every token goes through the `CommandLineToArgvW` quoter, never a hand-written `"…"`: the sidecar is no trust
+pub(super) fn build_child_command_line(program: &str, launch: &HomeLaunch, stem: &str, argv: &[String]) -> String {
+    // Every token goes through the `CommandLineToArgvW` quoter, never a hand-written `"…"`: the record is no trust
     // boundary, and a trailing `\` before a hand-written quote escapes it and collapses the argv boundary (CWE-88).
-    let (subcommand, value) = (sidecar.wire_subcommand(), sidecar.value());
+    let (subcommand, value) = (launch.wire_subcommand(), launch.value());
     let argv_estimate: usize = argv.iter().map(|a| a.len() + 3).sum();
     let mut line =
         String::with_capacity(program.len() + subcommand.len() + value.len() + stem.len() + 22 + argv_estimate);
     append_quoted_arg(&mut line, program);
-    match sidecar {
+    match launch {
         // `--global` emits no value token; a `""` there would make `ocx` read the verb as the flag's argument.
-        Sidecar::ToolchainHome(home, _) => {
+        HomeLaunch::ToolchainHome(home, _) => {
             match home {
                 ToolchainHome::Project(root) => {
                     line.push_str(" --project ");
@@ -425,7 +211,7 @@ pub(super) fn build_child_command_line(program: &str, sidecar: &Sidecar, stem: &
             line.push(' ');
             line.push_str(subcommand);
         }
-        Sidecar::PackageRoot(_) | Sidecar::PinnedIdentifier(_) => {
+        HomeLaunch::PackageRoot(_) | HomeLaunch::PinnedIdentifier(_) => {
             line.push(' ');
             line.push_str(subcommand);
             line.push(' ');
