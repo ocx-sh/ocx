@@ -392,68 +392,12 @@ Exact expected OIDC issuer URL (byte-equal).
 - Default: unset
 - See: [Trust signers with a policy](../guides/pin-signer-identity.mdx)
 
-## `trust.sigstore` {#project-trust-sigstore}
+## `trust.policy.signers.sigstore` {#project-trust-policy-signers-sigstore}
 
-Sigstore trust material for a self-hosted stack (`[trust.sigstore]`).
+The Sigstore instance this signer trusts, named by the authority of its Fulcio (`host[:port]`).
 
-Read from the operator `config.toml` tiers only. The project `ocx.toml`
-also accepts a `[trust]` table, but its `sigstore` sub-table is never
-consulted.
-
-- Type: `table`
-- Default: unset
-- See: [Trust signers with a policy](../guides/pin-signer-identity.mdx)
-
-## `trust.sigstore.fulcio_url` {#project-trust-sigstore-fulcio-url}
-
-Default Fulcio base URL for `ocx package sign` when `--fulcio-url` is
-omitted.
+Absent means the public instance, `fulcio.sigstore.dev`. The matching `[sigstore."<authority>"]` table
+supplies the trust root.
 
 - Type: `string`
-- Default: unset
-- See: [Trust signers with a policy](../guides/pin-signer-identity.mdx)
-
-## `trust.sigstore.rekor_upload` {#project-trust-sigstore-rekor-upload}
-
-Fleet-wide default for uploading a key-mode signature to the transparency log, when neither
-`--rekor-upload` nor `--no-rekor-upload` is given.
-
-Absent means off; keyless signing always uploads and ignores this field.
-
-- Type: `boolean`
-- Default: unset
-- See: [Trust signers with a policy](../guides/pin-signer-identity.mdx)
-
-## `trust.sigstore.rekor_url` {#project-trust-sigstore-rekor-url}
-
-Default Rekor base URL for `ocx package sign` / `verify` when
-`--rekor-url` is omitted.
-
-- Type: `string`
-- Default: unset
-- See: [Trust signers with a policy](../guides/pin-signer-identity.mdx)
-
-## `trust.sigstore.trusted_root` {#project-trust-sigstore-trusted-root}
-
-Path to a Sigstore trusted-root JSON, or a directory holding
-`trusted_root.json`.
-
-A relative path resolves against the directory of the `config.toml` that declared it. It is rewritten to absolute at load time, so the same value names the same file whatever the working directory.
-
-Mutually exclusive with `trusted_root_json`.
-
-- Type: `string`
-- Default: unset
-- See: [Trust signers with a policy](../guides/pin-signer-identity.mdx)
-
-## `trust.sigstore.trusted_root_json` {#project-trust-sigstore-trusted-root-json}
-
-The trusted-root document inlined verbatim.
-
-This is the form a fleet receives: `ocx config push` reads a path-form
-`trusted_root` at publish time and inlines it here. Mutually exclusive
-with `trusted_root`.
-
-- Type: `string`
-- Default: unset
 - See: [Trust signers with a policy](../guides/pin-signer-identity.mdx)

@@ -554,6 +554,7 @@ mod tests {
             scope: Some(ocx_trust::ScopeSpec::Prefix(format!("{REGISTRY}/{REPO}"))),
             builder: None,
             signers: vec![ocx_trust::SignerSpec::Keyless(ocx_trust::KeylessMatcher {
+                sigstore: None,
                 identity: Some("ops@example.com".into()),
                 identity_regexp: None,
                 oidc_issuer: issuer.map(str::to_owned),
@@ -845,5 +846,33 @@ mod tests {
             }
             other => panic!("expected Verify(TrustPolicyInvalid), got {other:?}"),
         }
+    }
+
+    /// A declared entry's `sigstore` authority is carried onto the compiled round: absent means the public
+    /// instance, and `localhost:5555` is kept as written.
+    #[tokio::test]
+    async fn a_declared_entrys_sigstore_instance_reaches_the_round() {
+        let on_private = json!({
+            "kind": "keyless",
+            "identity": "release@example.com",
+            "oidc_issuer": "https://example.com",
+            "sigstore": "localhost:5555",
+        });
+        let rounds = covered(
+            decide_with(Some(json!([keyless_publisher(), on_private])), "if_declared", &[])
+                .await
+                .unwrap(),
+        );
+        let instances: Vec<String> = rounds
+            .publishers
+            .expect("a publisher round")
+            .backends
+            .iter()
+            .filter_map(|backend| match backend {
+                ocx_trust::PolicyBackend::Keyless(keyless) => Some(keyless.instance.to_string()),
+                ocx_trust::PolicyBackend::Key(_) => None,
+            })
+            .collect();
+        assert_eq!(instances, ["fulcio.sigstore.dev", "localhost:5555"]);
     }
 }

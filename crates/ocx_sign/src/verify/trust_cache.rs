@@ -13,6 +13,7 @@ use url::Url;
 
 use super::trust_root::TrustRoot;
 use crate::sign::state::SigningStatePaths;
+use ocx_trust::SigstoreAuthority;
 
 /// Offline freshness bound; TUF metadata expiry is a separate limit, enforced only online.
 const TTL_SECS: u64 = 24 * 3600;
@@ -60,7 +61,10 @@ impl TrustRootCache {
 
     /// Persist the record atomically to [`SigningStatePaths::trust_root_file`].
     pub async fn write_cache(&self, state: &SigningStatePaths) -> io::Result<()> {
-        let target = state.trust_root_file(&self.rekor_authority);
+        self.write_to(state.trust_root_file(&self.rekor_authority)).await
+    }
+
+    async fn write_to(&self, target: std::path::PathBuf) -> io::Result<()> {
         let dir = target
             .parent()
             .ok_or_else(|| io::Error::other("cache path has no parent"))?
@@ -79,8 +83,11 @@ impl TrustRootCache {
     ///
     /// `Ok(None)` when the file is missing, expired, corrupt, or belongs to another authority.
     pub async fn from_cache(rekor_authority: &str, state: &SigningStatePaths) -> io::Result<Option<Self>> {
-        let path = state.trust_root_file(rekor_authority);
-        let bytes = match tokio::fs::read(&path).await {
+        Self::read_from(&state.trust_root_file(rekor_authority), rekor_authority).await
+    }
+
+    async fn read_from(path: &std::path::Path, rekor_authority: &str) -> io::Result<Option<Self>> {
+        let bytes = match tokio::fs::read(path).await {
             Ok(bytes) => bytes,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e),
@@ -117,6 +124,88 @@ impl TrustRootCache {
             Some(pem) => root.clone().with_rekor_key_pem(&pem).unwrap_or(root),
             None => root,
         }
+    }
+}
+
+impl TrustRootCache {
+    /// Cache the material of `root` after a successful online use, skipping the write when a fresh entry already
+    /// holds identical bytes.
+    ///
+    /// A private instance is keyed by the instance, the public one by `public_key`. Best-effort: a write failure is
+    /// logged, never returned.
+    pub async fn store_material(root: &TrustRoot, rekor_key_pem: String, public_key: &str, state: &SigningStatePaths) {
+        let instance = root.instance();
+        let private = instance != SigstoreAuthority::public();
+        let cache_key = if private {
+            instance.as_str().to_owned()
+        } else {
+            public_key.to_owned()
+        };
+        let der_certs = root.der_certs().to_vec();
+        // Without the CT log keys, an offline verify off this entry cannot check the SCT.
+        let ctfe_keys = root.ctfe_key_map().clone();
+
+        let existing = if private {
+            Self::from_instance_cache(&instance, state).await
+        } else {
+            Self::from_cache(&cache_key, state).await
+        };
+        // Skip a content-equal rewrite, or every use slides the 24h TTL and a batch stampedes the file.
+        if let Ok(Some(existing)) = existing
+            && existing.fulcio_der_certs == der_certs
+            && existing.ctfe_keys == ctfe_keys
+            && existing.rekor_public_key_pem.as_deref() == Some(rekor_key_pem.as_str())
+        {
+            return;
+        }
+
+        let entry = Self::new(cache_key, der_certs, ctfe_keys, rekor_key_pem);
+        let written = if private {
+            entry.write_instance_cache(&instance, state).await
+        } else {
+            entry.write_cache(state).await
+        };
+        if let Err(e) = written {
+            tracing::debug!("trust-root cache write skipped: {e}");
+        }
+    }
+}
+
+impl TrustRootCache {
+    /// Persist the record in the slot of `instance`: the public instance keeps its Rekor-keyed file, any other goes
+    /// to a hash-named file under `trust_root/instances/`.
+    pub async fn write_instance_cache(
+        &self,
+        instance: &SigstoreAuthority,
+        state: &SigningStatePaths,
+    ) -> io::Result<()> {
+        let (_, file) = instance_slot(instance, state);
+        self.write_to(file).await
+    }
+
+    /// Read the fresh entry of `instance` without any network; `Ok(None)` for a miss.
+    pub async fn from_instance_cache(
+        instance: &SigstoreAuthority,
+        state: &SigningStatePaths,
+    ) -> io::Result<Option<Self>> {
+        let (key, file) = instance_slot(instance, state);
+        Self::read_from(&file, &key).await
+    }
+}
+
+/// The key an entry carries and the file it lives in, for one instance.
+fn instance_slot(instance: &SigstoreAuthority, state: &SigningStatePaths) -> (String, std::path::PathBuf) {
+    if *instance == SigstoreAuthority::public() {
+        let key = Url::parse(ocx_trust::instance::PUBLIC_REKOR_URL)
+            .map(|url| cache_key_for_rekor(&url))
+            .unwrap_or_else(|_| ocx_trust::instance::PUBLIC_REKOR_URL.to_owned());
+        let file = state.trust_root_file(&key);
+        (key, file)
+    } else {
+        (
+            instance.as_str().to_owned(),
+            state.trust_root_instance_file(instance.as_str()),
+        )
     }
 }
 
@@ -344,5 +433,67 @@ mod tests {
             ttl_seconds: 3600,
         };
         assert!(!entry.is_fresh(), "future-dated entry must be stale");
+    }
+
+    fn corp(key: &str) -> SigstoreAuthority {
+        SigstoreAuthority::parse(key).expect("a valid authority")
+    }
+
+    fn entry_for(authority: &str, marker: u8) -> TrustRootCache {
+        TrustRootCache::new(authority.into(), vec![vec![0x30, marker]], ctfe(), "PEM".into())
+    }
+
+    /// The public instance's entry stays at the file the Rekor-keyed cache always used, byte-for-byte the name.
+    #[tokio::test]
+    async fn the_public_instance_keeps_its_rekor_keyed_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_in(&tmp);
+        entry_for("rekor.sigstore.dev", 1)
+            .write_instance_cache(&SigstoreAuthority::public(), &state)
+            .await
+            .unwrap();
+        assert!(tmp.path().join("state/trust_root/rekor.sigstore.dev.json").is_file());
+        let read = TrustRootCache::from_cache("rekor.sigstore.dev", &state).await.unwrap();
+        assert!(read.is_some(), "the public slot is the legacy slot");
+    }
+
+    /// Another instance goes under `instances/<sha256 hex of the authority>.json`, and `a:5555` / `a_5555` and the
+    /// public Rekor host never share a file.
+    #[tokio::test]
+    async fn private_instances_get_their_own_hash_named_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_in(&tmp);
+        for (key, marker) in [("a:5555", 1), ("a_5555", 2), ("rekor.sigstore.dev", 3)] {
+            entry_for(key, marker)
+                .write_instance_cache(&corp(key), &state)
+                .await
+                .unwrap();
+        }
+        let dir = tmp.path().join("state/trust_root/instances");
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            3,
+            "three authorities, three files"
+        );
+        assert!(!tmp.path().join("state/trust_root/rekor.sigstore.dev.json").exists());
+        for (key, marker) in [("a:5555", 1), ("a_5555", 2), ("rekor.sigstore.dev", 3)] {
+            let read = TrustRootCache::from_instance_cache(&corp(key), &state)
+                .await
+                .unwrap()
+                .unwrap_or_else(|| panic!("{key} must hit its own entry"));
+            assert_eq!(read.fulcio_der_certs, vec![vec![0x30, marker]], "{key}");
+        }
+    }
+
+    /// A table keyed like the public Rekor host reads a miss from the public slot's entry.
+    #[tokio::test]
+    async fn a_table_keyed_like_the_public_rekor_host_does_not_read_the_public_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_in(&tmp);
+        entry_for("rekor.sigstore.dev", 1).write_cache(&state).await.unwrap();
+        let read = TrustRootCache::from_instance_cache(&corp("rekor.sigstore.dev"), &state)
+            .await
+            .unwrap();
+        assert!(read.is_none());
     }
 }

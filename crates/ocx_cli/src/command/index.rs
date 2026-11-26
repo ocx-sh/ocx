@@ -89,7 +89,9 @@ pub enum Index {
         Docker Hub disables it, and GHCR allows it only with an authenticated, correctly scoped \
         token. A registry that refuses it fails that registry's snapshot. A catalog that \
         cannot be read fails the command (exit 80 for an auth refusal, 69 for a published \
-        source serving no `c/index.json`).\n\n\
+        source serving no `c/index.json`). With `index_signature` set to `enforce`, that \
+        absent catalog exits 79 instead. A catalog that could not be fetched keeps the \
+        transport's exit, 75 for a transient failure.\n\n\
         A catalog listing zero packages exits 0 with a warning, since a token without catalog \
         scope often answers with an empty list. A catalog carrying a yanked tag is refused \
         with exit 65 unless the operator sets `OCX_ALLOW_YANKED`.\n\n\
@@ -124,6 +126,17 @@ pub enum Index {
         layout drops every package reached through a link. A symlinked directory takes \
         everything beneath it in one step.")]
     Regenerate(super::index_regenerate::IndexRegenerate),
+    /// Sign a local index catalog
+    #[command(long_about = "\
+        Sign a local index catalog\n\n\
+        Sets the catalog's expiry, then writes `c/index.json` and its detached signature \
+        `c/index.json.sigstore.json` under `<DIR>`. The signature is keyless (Sigstore) \
+        unless `--key` names a signing key. The signature records `--registry`, so it \
+        cannot be replayed for another registry's catalog.\n\n\
+        Nothing is written unless signing succeeds. Re-running replaces both files with a \
+        new expiry. `--offline` rejects this command.\n\n\
+        Details: <https://ocx.sh/docs/explanation/signing#index-signatures>")]
+    Sign(super::index_sign::IndexSign),
 }
 
 impl Index {
@@ -134,6 +147,7 @@ impl Index {
             Index::Update(update) => boxed(move || update.execute(context)).await,
             Index::Sync(sync) => boxed(move || sync.execute(context)).await,
             Index::Regenerate(regenerate) => boxed(move || regenerate.execute(context)).await,
+            Index::Sign(sign) => boxed(move || sign.execute(context)).await,
         }
     }
 }

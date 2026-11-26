@@ -293,6 +293,42 @@ and `OCX_MIRRORS` cannot.
 - Type: `string`
 - See: [Public index](../explanation/public-index.mdx), [Serve an index](../guides/serve-an-index.mdx)
 
+## `registries.<name>.index_expiry` {#keys-registries-index-expiry}
+
+Whether an expired index catalog is refused: `check` or `ignore`. Defaults to `check`.
+
+- Type: `string`
+- Values:
+  - `check`: Refuse a catalog past its `expires`.
+  - `ignore`: Accept a catalog past its `expires`.
+
+## `registries.<name>.index_publishers` {#keys-registries-index-publishers}
+
+The signers allowed to sign this registry's index, in the shape of an index `publishers` array.
+
+Replaces the built-in list for the registry. Entries are kept raw here and compiled where the index is
+checked, so a malformed entry fails at that point.
+
+- Type: `array`
+- Default: unset
+
+## `registries.<name>.index_signature` {#keys-registries-index-signature}
+
+Whether this registry's index must carry a valid signature: `off`, `warn` or `enforce`.
+
+Defaults to `warn` for `ocx.sh`, which has a built-in signer list, and for any registry that sets
+`index_publishers`; every other registry defaults to `off`. `enforce` needs a signer list.
+
+`enforce` cannot hold for a namespace a local registry-role `[mirrors."<namespace>"]` entry pulls
+off its index: that combination is refused with exit 78. The table key must be spelled as clients
+spell the registry (lowercase, port as typed), or the entry is never applied.
+
+- Type: `string`
+- Values:
+  - `off`: Do not check the index signature.
+  - `warn`: Check it and log one warning per source on any failure, then continue.
+  - `enforce`: Check it and refuse on any failure.
+
 ## `registries.<name>.insecure` {#keys-registries-insecure}
 
 Contact this registry over plain HTTP instead of HTTPS.
@@ -459,6 +495,63 @@ no profile blocks at all.
 - Type: `array`
 - Default: unset (detected on every run)
 - See: [Shell integration](../explanation/shell-integration.mdx)
+
+## `sigstore.<name>` {#keys-sigstore}
+
+Sigstore instances (`[sigstore."<authority>"]`): the trust material and endpoints of each Fulcio and Rekor
+stack a keyless signer can name.
+
+Read from `config.toml` tiers only: a repository that could name its own Fulcio CA would verify its own
+signatures. Tables merge per table and per field, last tier wins; a table under `fulcio.sigstore.dev`
+overrides the built-in public instance field by field.
+
+- Type: `table`
+- See: [Self-hosted Sigstore](../guides/self-hosted-sigstore.mdx)
+
+## `sigstore.<name>.fulcio_url` {#keys-sigstore-fulcio-url}
+
+Fulcio base URL. Its authority must equal the table key; absent, it defaults to `https://<key>`.
+
+- Type: `string`
+- Default: unset
+- See: [Self-hosted Sigstore](../guides/self-hosted-sigstore.mdx)
+
+## `sigstore.<name>.rekor_upload` {#keys-sigstore-rekor-upload}
+
+Whether a key-mode signature is uploaded to the transparency log when neither `--rekor-upload` nor
+`--no-rekor-upload` is given. Keyless signing always uploads and ignores this field.
+
+- Type: `boolean`
+- Default: unset
+- See: [Self-hosted Sigstore](../guides/self-hosted-sigstore.mdx)
+
+## `sigstore.<name>.rekor_url` {#keys-sigstore-rekor-url}
+
+Rekor base URL, needed only to sign with a Rekor upload.
+
+- Type: `string`
+- Default: unset
+- See: [Self-hosted Sigstore](../guides/self-hosted-sigstore.mdx)
+
+## `sigstore.<name>.trusted_root` {#keys-sigstore-trusted-root}
+
+Path to a Sigstore trusted-root JSON, or a directory holding `trusted_root.json`.
+
+A relative path resolves against the directory of the `config.toml` that declared it.
+Mutually exclusive with `trusted_root_json`.
+
+- Type: `string`
+- Default: unset
+- See: [Self-hosted Sigstore](../guides/self-hosted-sigstore.mdx)
+
+## `sigstore.<name>.trusted_root_json` {#keys-sigstore-trusted-root-json}
+
+The trusted-root document inlined verbatim; the form a fleet receives from `ocx config push`.
+Mutually exclusive with `trusted_root`.
+
+- Type: `string`
+- Default: unset
+- See: [Self-hosted Sigstore](../guides/self-hosted-sigstore.mdx)
 
 ## `telemetry` {#keys-telemetry}
 
@@ -681,71 +774,15 @@ Exact expected OIDC issuer URL (byte-equal).
 - Default: unset
 - See: [Trust signers with a policy](../guides/pin-signer-identity.mdx)
 
-## `trust.sigstore` {#keys-trust-sigstore}
+## `trust.policy.signers.sigstore` {#keys-trust-policy-signers-sigstore}
 
-Sigstore trust material for a self-hosted stack (`[trust.sigstore]`).
+The Sigstore instance this signer trusts, named by the authority of its Fulcio (`host[:port]`).
 
-Read from the operator `config.toml` tiers only. The project `ocx.toml`
-also accepts a `[trust]` table, but its `sigstore` sub-table is never
-consulted.
-
-- Type: `table`
-- Default: unset
-- See: [Self-hosted Sigstore](../guides/self-hosted-sigstore.mdx)
-
-## `trust.sigstore.fulcio_url` {#keys-trust-sigstore-fulcio-url}
-
-Default Fulcio base URL for `ocx package sign` when `--fulcio-url` is
-omitted.
+Absent means the public instance, `fulcio.sigstore.dev`. The matching `[sigstore."<authority>"]` table
+supplies the trust root.
 
 - Type: `string`
-- Default: unset
-- See: [Self-hosted Sigstore](../guides/self-hosted-sigstore.mdx)
-
-## `trust.sigstore.rekor_upload` {#keys-trust-sigstore-rekor-upload}
-
-Fleet-wide default for uploading a key-mode signature to the transparency log, when neither
-`--rekor-upload` nor `--no-rekor-upload` is given.
-
-Absent means off; keyless signing always uploads and ignores this field.
-
-- Type: `boolean`
-- Default: unset
-- See: [Self-hosted Sigstore](../guides/self-hosted-sigstore.mdx)
-
-## `trust.sigstore.rekor_url` {#keys-trust-sigstore-rekor-url}
-
-Default Rekor base URL for `ocx package sign` / `verify` when
-`--rekor-url` is omitted.
-
-- Type: `string`
-- Default: unset
-- See: [Self-hosted Sigstore](../guides/self-hosted-sigstore.mdx)
-
-## `trust.sigstore.trusted_root` {#keys-trust-sigstore-trusted-root}
-
-Path to a Sigstore trusted-root JSON, or a directory holding
-`trusted_root.json`.
-
-A relative path resolves against the directory of the `config.toml` that declared it. It is rewritten to absolute at load time, so the same value names the same file whatever the working directory.
-
-Mutually exclusive with `trusted_root_json`.
-
-- Type: `string`
-- Default: unset
-- See: [Self-hosted Sigstore](../guides/self-hosted-sigstore.mdx)
-
-## `trust.sigstore.trusted_root_json` {#keys-trust-sigstore-trusted-root-json}
-
-The trusted-root document inlined verbatim.
-
-This is the form a fleet receives: `ocx config push` reads a path-form
-`trusted_root` at publish time and inlines it here. Mutually exclusive
-with `trusted_root`.
-
-- Type: `string`
-- Default: unset
-- See: [Self-hosted Sigstore](../guides/self-hosted-sigstore.mdx)
+- See: [Trust signers with a policy](../guides/pin-signer-identity.mdx)
 
 ## `update` {#keys-update}
 

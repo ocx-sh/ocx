@@ -11,7 +11,7 @@ use x509_cert::ext::pkix::SubjectAltName;
 use x509_cert::ext::pkix::name::GeneralName;
 
 use super::error::VerifyErrorKind;
-use ocx_trust::PolicyBackend;
+use ocx_trust::{PolicyBackend, SigstoreAuthority};
 
 /// Fulcio OIDC-issuer extension OID, "Issuer (V2)".
 // Not v1's `.1.1`: Fulcio writes that one without a DER header, so the issuer would silently read as absent.
@@ -76,7 +76,8 @@ pub(crate) fn claims_match(cert: &Certificate, claims: &[ocx_trust::CompiledClai
     })
 }
 
-/// Every policy in the ANY-of set whose identity and issuer the leaf certificate satisfies.
+/// Every policy in the ANY-of set whose identity and issuer the leaf certificate satisfies, counting only the keyless
+/// entries that trust `instance`: the instance whose trust root verified the certificate chain.
 ///
 /// Returns the matched subset, not a boolean, because the `builder` pin is ORed across it.
 ///
@@ -87,6 +88,7 @@ pub(crate) fn claims_match(cert: &Certificate, claims: &[ocx_trust::CompiledClai
 pub fn matching_policies<'a>(
     cert_der: &[u8],
     policies: &'a [ocx_trust::CompiledPolicy],
+    instance: &SigstoreAuthority,
 ) -> Result<Vec<&'a ocx_trust::CompiledPolicy>, VerifyErrorKind> {
     let cert = parse_certificate(cert_der)?;
     let san = subject_identity(&cert);
@@ -104,8 +106,9 @@ pub fn matching_policies<'a>(
         let mut policy_matched = false;
         for backend in &policy.backends {
             let keyless = match backend {
-                PolicyBackend::Keyless(keyless) => keyless,
-                PolicyBackend::Key(_) => continue,
+                PolicyBackend::Keyless(keyless) if keyless.instance == *instance => keyless,
+                // Another instance's entry is judged against that instance's trust root, never this one.
+                PolicyBackend::Keyless(_) | PolicyBackend::Key(_) => continue,
             };
             let identity_ok = match keyless.identity.as_ref() {
                 Some(rule) => san.as_deref().is_some_and(|san| rule.matches(san)),
@@ -185,6 +188,10 @@ mod tests {
     //! (`test/tests/test_verify.py`: identity/issuer mismatch → exit 77).
     use super::*;
 
+    fn public() -> SigstoreAuthority {
+        SigstoreAuthority::public()
+    }
+
     #[test]
     fn parse_rejects_non_certificate_bytes() {
         assert!(matches!(
@@ -201,7 +208,7 @@ mod tests {
             "test@example.com".to_string(),
             "https://issuer.example".to_string(),
         )];
-        assert!(matching_policies(b"garbage", &policies).is_err());
+        assert!(matching_policies(b"garbage", &policies, &public()).is_err());
     }
 
     #[test]
@@ -209,7 +216,7 @@ mod tests {
         // An empty policy set never matches — the pipeline guards against this
         // upstream (NoIdentityProvided), but the primitive must still fail closed.
         assert!(matches!(
-            matching_policies(b"garbage", &[]),
+            matching_policies(b"garbage", &[], &public()),
             Err(VerifyErrorKind::CertChainInvalid) | Err(VerifyErrorKind::IdentityMismatch)
         ));
     }
@@ -278,10 +285,64 @@ mod tests {
 
     fn keyless_backend(identity: &str, issuer: &str) -> ocx_trust::PolicyBackend {
         ocx_trust::PolicyBackend::Keyless(ocx_trust::CompiledKeyless {
+            instance: ocx_trust::SigstoreAuthority::public(),
             identity: Some(ocx_trust::IdentityRule::Exact(identity.to_string())),
             issuer: issuer.to_string(),
             claims: Vec::new(),
         })
+    }
+
+    fn keyless_backend_on(instance: &str, identity: &str, issuer: &str) -> ocx_trust::PolicyBackend {
+        ocx_trust::PolicyBackend::Keyless(ocx_trust::CompiledKeyless {
+            instance: SigstoreAuthority::parse(instance).expect("a valid authority"),
+            identity: Some(ocx_trust::IdentityRule::Exact(identity.to_string())),
+            issuer: issuer.to_string(),
+            claims: Vec::new(),
+        })
+    }
+
+    /// A certificate checked against instance A's roots is matched only by the entries naming A: the same
+    /// identity and issuer under instance B admits nobody, and is the plain identity mismatch (exit 77).
+    #[test]
+    fn an_entry_naming_another_instance_never_admits_the_certificate() {
+        let policies = [ocx_trust::CompiledPolicy {
+            builder: None,
+            backends: vec![keyless_backend_on(
+                "fulcio.corp.example",
+                GOLDEN_IDENTITY,
+                GOLDEN_ISSUER,
+            )],
+        }];
+        let against_public = matching_policies(&golden_leaf_der(), &policies, &public());
+        assert!(
+            matches!(against_public, Err(VerifyErrorKind::IdentityMismatch)),
+            "got {against_public:?}"
+        );
+        let corp = SigstoreAuthority::parse("fulcio.corp.example").unwrap();
+        let against_corp =
+            matching_policies(&golden_leaf_der(), &policies, &corp).expect("the entry's own instance matches");
+        assert_eq!(against_corp.len(), 1);
+    }
+
+    /// Two entries of one policy on two instances: each instance's pass sees only its own.
+    #[test]
+    fn each_instance_pass_sees_only_its_own_entries() {
+        let policies = [ocx_trust::CompiledPolicy {
+            builder: None,
+            backends: vec![
+                keyless_backend("nobody@example.com", GOLDEN_ISSUER),
+                keyless_backend_on("fulcio.corp.example", GOLDEN_IDENTITY, GOLDEN_ISSUER),
+            ],
+        }];
+        let corp = SigstoreAuthority::parse("fulcio.corp.example").unwrap();
+        assert!(matches!(
+            matching_policies(&golden_leaf_der(), &policies, &public()),
+            Err(VerifyErrorKind::IdentityMismatch)
+        ));
+        assert_eq!(
+            matching_policies(&golden_leaf_der(), &policies, &corp).unwrap().len(),
+            1
+        );
     }
 
     /// **Spec D5, falling out of the type rather than being restated.** A policy
@@ -294,7 +355,7 @@ mod tests {
             builder: None,
             backends: vec![key_backend()],
         }];
-        let error = matching_policies(&golden_leaf_der(), &policies)
+        let error = matching_policies(&golden_leaf_der(), &policies, &public())
             .expect_err("a key signer cannot admit a keyless signature");
         assert!(matches!(error, VerifyErrorKind::IdentityMismatch), "got {error:?}");
     }
@@ -308,7 +369,7 @@ mod tests {
             builder: None,
             backends: vec![key_backend(), keyless_backend(GOLDEN_IDENTITY, GOLDEN_ISSUER)],
         }];
-        let matched = matching_policies(&golden_leaf_der(), &policies).expect("the keyless signer matches");
+        let matched = matching_policies(&golden_leaf_der(), &policies, &public()).expect("the keyless signer matches");
         assert_eq!(matched.len(), 1);
     }
 
@@ -325,7 +386,7 @@ mod tests {
             ],
         }];
         assert_eq!(
-            matching_policies(&golden_leaf_der(), &policies)
+            matching_policies(&golden_leaf_der(), &policies, &public())
                 .expect("the second signer matches")
                 .len(),
             1
@@ -346,7 +407,7 @@ mod tests {
             ],
         }];
         assert!(matches!(
-            matching_policies(&golden_leaf_der(), &wrong_issuer),
+            matching_policies(&golden_leaf_der(), &wrong_issuer, &public()),
             Err(VerifyErrorKind::IssuerMismatch)
         ));
 
@@ -355,7 +416,7 @@ mod tests {
             backends: vec![keyless_backend("nobody@example.com", GOLDEN_ISSUER)],
         }];
         assert!(matches!(
-            matching_policies(&golden_leaf_der(), &wrong_identity),
+            matching_policies(&golden_leaf_der(), &wrong_identity, &public()),
             Err(VerifyErrorKind::IdentityMismatch)
         ));
     }
@@ -655,7 +716,7 @@ mod tests {
             "https://issuer.example".to_owned(),
         )];
         assert!(matches!(
-            matching_policies(&der, &policies),
+            matching_policies(&der, &policies, &public()),
             Err(VerifyErrorKind::IssuerMismatch)
         ));
     }
@@ -738,6 +799,7 @@ mod tests {
         let policy = |owner_id: &str| ocx_trust::CompiledPolicy {
             builder: None,
             backends: vec![ocx_trust::PolicyBackend::Keyless(ocx_trust::CompiledKeyless {
+                instance: ocx_trust::SigstoreAuthority::public(),
                 identity: None,
                 issuer: recorded[&8].clone(),
                 claims: vec![
@@ -747,11 +809,11 @@ mod tests {
             })],
         };
         assert_eq!(
-            matching_policies(&der, &[policy(&recorded[&17])])
+            matching_policies(&der, &[policy(&recorded[&17])], &public())
                 .expect("owner id matches")
                 .len(),
             1
         );
-        assert!(matching_policies(&der, &[policy("1")]).is_err());
+        assert!(matching_policies(&der, &[policy("1")], &public()).is_err());
     }
 }

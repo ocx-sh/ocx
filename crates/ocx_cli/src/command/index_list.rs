@@ -29,6 +29,9 @@ pub struct IndexList {
     /// Package identifiers to list the available versions for.
     #[arg(required = true, num_args = 1.., value_name = "PACKAGE")]
     packages: Vec<options::Identifier>,
+
+    #[clap(flatten)]
+    verify: options::CatalogVerify,
 }
 
 type ResolvedTags = Vec<(String, ocx_oci::PackageRef, Vec<String>)>;
@@ -46,12 +49,13 @@ impl IndexList {
             }
         }
 
-        let resolved = self.resolve_tags(&context, identifiers).await?;
+        let index = context.default_index_for_run(self.verify.explicit());
+        let resolved = self.resolve_tags(&index, identifiers).await?;
 
         if self.variants {
             Self::report_variants(&context, resolved)?;
         } else if self.platforms {
-            Self::report_platforms(&context, resolved).await?;
+            Self::report_platforms(&context, &index, resolved).await?;
         } else {
             Self::report_tags(&context, resolved)?;
         }
@@ -61,18 +65,17 @@ impl IndexList {
 
     async fn resolve_tags(
         &self,
-        context: &crate::app::Context,
+        index: &ocx_index::Index,
         identifiers: Vec<ocx_oci::PackageRef>,
     ) -> anyhow::Result<ResolvedTags> {
         let futures = self.packages.iter().zip(identifiers).map(|(package, identifier)| {
-            let context = context.clone();
             async move {
                 // Skipped for a digest under `--platforms`, or it warns "not found" for a lookup that
                 // was never a tag lookup.
                 let tags = if identifier.digest().is_some() && self.platforms {
                     Vec::new()
                 } else {
-                    let mut tags = match context.default_index().list_tags(&identifier).await? {
+                    let mut tags = match index.list_tags(&identifier).await? {
                         Some(tags) => tags,
                         None => {
                             log::warn!("Package '{}' not found in the index.", identifier);
@@ -125,7 +128,11 @@ impl IndexList {
     }
 
     /// Fetch platforms for a single tag per package (the requested tag, or `latest`).
-    async fn report_platforms(context: &crate::app::Context, resolved: ResolvedTags) -> anyhow::Result<()> {
+    async fn report_platforms(
+        context: &crate::app::Context,
+        index: &ocx_index::Index,
+        resolved: ResolvedTags,
+    ) -> anyhow::Result<()> {
         let mut platforms_report = HashMap::new();
         for (package, identifier, tags) in resolved {
             // A digest pin bypasses tag filtering and the yank check.
@@ -144,11 +151,7 @@ impl IndexList {
                 identifier.clone_with_tag(&tag)
             };
 
-            let platforms = match context
-                .default_index()
-                .fetch_manifest(&target, IndexOperation::Query)
-                .await?
-            {
+            let platforms = match index.fetch_manifest(&target, IndexOperation::Query).await? {
                 Some((_, manifest)) => ocx_oci::Platform::from_manifest(&manifest),
                 None => {
                     log::warn!("Manifest not found for '{}' - skipping.", target);

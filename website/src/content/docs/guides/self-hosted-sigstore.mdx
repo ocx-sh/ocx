@@ -66,29 +66,35 @@ cosign trusted-root create \
 
 Regenerate it when the CA rotates or a CT log is added. It is public material with no secret in it. You can commit it, publish it to a registry, or serve it over plain HTTP inside your network without care.
 
-### The `[trust.sigstore]` fields \{#trusted-root-fields\}
+### The `[sigstore."<fulcio host>"]` tables \{#trusted-root-fields\}
 
-One sub-table of `config.toml` sets the trusted root and the endpoints `ocx package sign` talks to by default. Every field is optional, and the whole sub-table may be absent. Omitting it reproduces public-good behaviour exactly.
+One `config.toml` table per Sigstore instance sets its trusted root and endpoints. The key is the host of the instance's Fulcio, with a port when it is not 443: `[sigstore."fulcio.corp.example"]`. The public instance is built in, so a config with no table behaves as public-good.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `trusted_root` | string | A bare path, or a `file://` one, naming a trusted-root JSON or a directory holding `trusted_root.json`. A relative path resolves against the directory of the `config.toml` that declared it, rewritten to absolute at load time, so it means the same file whatever the working directory. Mutually exclusive with `trusted_root_json` |
+| `trusted_root` | string | A bare path, or a `file://` one, naming a trusted-root JSON or a directory holding `trusted_root.json`. A relative path resolves against the directory of the `config.toml` that declared it, rewritten to absolute at load time. Mutually exclusive with `trusted_root_json` |
 | `trusted_root_json` | string | The trusted-root document inlined verbatim. This is the form a fleet receives. Mutually exclusive with `trusted_root` |
-| `fulcio_url` | string | Default [Fulcio][fulcio] base URL for `ocx package sign` and `attest` when `--fulcio-url` is omitted: an explicit flag wins, then this field, then the public-good builtin. `ocx package push` takes the same `--fulcio-url`, so this field is its default too |
-| `rekor_url` | string | Default [Rekor][rekor] base URL for `sign`, `verify`, `attest` and `sbom` when `--rekor-url` is omitted, with the same precedence. `ocx package push` takes the same `--rekor-url`. Auto-verify exposes no such flag, so this field is its only override |
-| `rekor_upload` | boolean | The fleet-wide default for uploading a **key-mode** signature to the transparency log. Absent means off |
+| `fulcio_url` | string | The [Fulcio][fulcio] base URL. Its host must equal the table key, and it defaults to `https://<key>` |
+| `rekor_url` | string | The [Rekor][rekor] base URL. Verification needs no URL, because the trusted root carries the log keys. Signing with a Rekor upload fails with exit 78 (`sigstore_rekor_url_missing`) when it is absent. The public table defaults to public Rekor |
+| `rekor_upload` | boolean | The default for uploading a **key-mode** signature to the transparency log. Absent means off |
 
-Setting both `trusted_root` and `trusted_root_json` is a configuration error: exit 78, `trust_root_load`. One trust root, one spelling.
+Setting both `trusted_root` and `trusted_root_json` is a configuration error: exit 78, `trust_root_load`. A key that is not a bare host, or a `fulcio_url` whose host differs from the key, is exit 78 too (`sigstore_authority_invalid`, `sigstore_table_key_mismatch`).
 
-`rekor_upload` governs key mode only. Under keyless signing the upload is a requirement. A Fulcio certificate is valid for about ten minutes, and the Rekor timestamp is the only proof the signature happened inside that window. The field is silently ignored for a keyless signer, deliberately without a warning. `rekor_url` defaults to the public Rekor, so enabling `rekor_upload` there publishes the artifact's digest and signer to a world-readable log.
+A signing command picks the table by the host of its `--fulcio-url`. A private-instance signer therefore passes `--fulcio-url` on every run. Without the flag the command uses the public instance.
 
-OCX reads the sub-table from the `config.toml` tiers only. The project `ocx.toml` parses a `[trust]` section for `[[trust.policy]]`, but its `sigstore` sub-table is never consulted. A repository that could name its own Fulcio CA would be verifying its own signatures, which is the entire trust decision.
+A keyless signer entry names its instance with `sigstore = "<fulcio host>"`. Without the field the entry means the public instance, so a policy for a private CA must carry it. See [Worked policies](#issuers-policies).
 
-**Locking.** Declared in the system tier, the whole sub-table is non-overridable. The user, `$OCX_HOME` and managed tiers cannot replace any field. The lock is per table rather than per field, so a lower tier cannot supply a `rekor_url` alongside a system `trusted_root`.
+`rekor_upload` governs key mode only. Under keyless signing the upload is a requirement. A Fulcio certificate is valid for about ten minutes, and the Rekor timestamp is the only proof the signature happened inside that window. The field is silently ignored for a keyless signer, deliberately without a warning. Enabling `rekor_upload` against public Rekor publishes the artifact's digest and signer to a world-readable log.
+
+OCX reads the tables from the `config.toml` tiers only. The project `ocx.toml` parses a `[trust]` section for `[[trust.policy]]`, but never consults a `[sigstore]` table. A repository that could name its own Fulcio CA would be verifying its own signatures, which is the entire trust decision.
+
+**Locking.** Declared in the system tier, a table is non-overridable. The user, `$OCX_HOME` and managed tiers cannot replace any field of it. The lock is per table rather than per field, so a lower tier cannot supply a `rekor_url` alongside a system `trusted_root`.
 
 A scalar trust root cannot pool, because two Fulcio CAs are an ambiguity and not a merge. That is why this follows the `[registry]` lock rather than the `[[trust.policy]]` one.
 
-Where the table is *not* locked, higher tiers replace field by field, with the two trust-root spellings coupled. A tier switching from a path to an inline document drops the path rather than leaving both set.
+Where a table is *not* locked, higher tiers replace it field by field, with the two trust-root spellings coupled. A tier switching from a path to an inline document drops the path rather than leaving both set.
+
+A `config.toml` that still carries `[trust.sigstore]` is refused with exit 78 (`trust_sigstore_retired`).
 
 ## Getting it onto every machine \{#distribution\}
 
@@ -96,11 +102,11 @@ OCX resolves the trust root through [six rungs](../explanation/signing.mdx#trust
 
 ### 1. Ship one `config.toml` to the fleet \{#distribution-managed\}
 
-This is the one that scales. OCX reads `[trust.sigstore]` from the operator `config.toml` tiers, and the [`[managed]`][config-managed] tier makes one published `config.toml` the fleet's configuration. Put the trusted root in the payload:
+This is the one that scales. OCX reads `[sigstore.*]` tables from the operator `config.toml` tiers, and the [`[managed]`][config-managed] tier makes one published `config.toml` the fleet's configuration. Put the trusted root in the payload:
 
 ```toml
 # the config.toml you publish
-[trust.sigstore]
+[sigstore."fulcio.corp.example"]
 trusted_root = "trusted_root.json"   # path, relative to THIS file
 ```
 
@@ -132,11 +138,11 @@ Rotation from there is [`ocx config update`][cmd-config-update] against a new di
 
 ### 2. Write it into `/etc/ocx/config.toml` \{#distribution-system\}
 
-If you already own the machine image or run a configuration-management tool, the system-tier config is the shortest path. It is also the **strongest** one. A `[trust.sigstore]` declared in the system tier is locked, and no user, home, or managed tier can replace it.
+If you already own the machine image or run a configuration-management tool, the system-tier config is the shortest path. It is also the **strongest** one. A `[sigstore."<host>"]` table declared in the system tier is locked, and no user, home, or managed tier can replace it.
 
 ```toml
 # /etc/ocx/config.toml
-[trust.sigstore]
+[sigstore."fulcio.corp.example"]
 trusted_root = "sigstore/trusted-root.json"   # relative to /etc/ocx/
 ```
 
@@ -158,13 +164,13 @@ Absent, it falls through to the next rung. Present but unreadable, it fails. Tha
 
 ### 4. `--sigstore-trusted-root` / `OCX_SIGSTORE_TRUSTED_ROOT` \{#distribution-flag\}
 
-The flag and its environment variable are for one-off overrides. Examples are a debugging session, a CI job pinning a specific root, or a machine that is not part of the fleet. Reaching for them as the *deployment* mechanism is how you end up setting an environment variable in every shell profile on every host.
+The flag and its environment variable are for one-off runs of `ocx package verify` and `ocx package sbom`. Examples are a debugging session, a CI job pinning a specific root, or a machine that is not part of the fleet. No other command reads them: install-time verification and the index catalog check take each instance's root from its table (rung 1), the convention file (rung 3), the cache, then TUF. Reaching for the variable as the *deployment* mechanism leaves installs unserved, so deploy through a table or the convention file.
 
-OCX reads the override as-is. It bypasses the TUF fetch that runs when no override, no configured trust root and no cache exist. Keeping the supplied document current is therefore the operator's job. The override affects only the local verify operation and is not forwarded to subprocess children.
+OCX reads the override as-is. It replaces the root of the one instance the run selected, and bypasses the TUF fetch that runs when no override, no configured trust root and no cache exist. Keeping the supplied document current is therefore the operator's job. The override is not forwarded to subprocess children.
 
 ## Custom endpoints \{#endpoints\}
 
-`--fulcio-url` and `--rekor-url` point the CLI at a private or self-hosted Sigstore deployment instead of the public Fulcio and Rekor. They are **flags only**. Neither has an environment variable. Config defaults for both are the `fulcio_url` and `rekor_url` fields above.
+`--fulcio-url` and `--rekor-url` point the CLI at a private or self-hosted Sigstore deployment instead of the public Fulcio and Rekor. They are **flags only**. Neither has an environment variable. The flag selects the instance table by the host of `--fulcio-url`, and the table's `fulcio_url` and `rekor_url` fields supply the rest.
 
 `validate_sigstore_url` accepts `http://` only for loopback hosts: `127.0.0.0/8`, `::1` and `localhost`. Any non-loopback target must be `https://`.
 
@@ -270,7 +276,7 @@ ocx package sign -p linux/amd64 \
 scope = "registry.corp.example/acme"
 
 signers = [
-  { kind = "keyless", identity = "https://github.com/acme/mytool/.github/workflows/release.yml@refs/tags/v1.0.0",
+  { kind = "keyless", sigstore = "fulcio.corp.example", identity = "https://github.com/acme/mytool/.github/workflows/release.yml@refs/tags/v1.0.0",
                       oidc_issuer = "https://token.actions.githubusercontent.com" },
 ]
 ```
@@ -282,7 +288,7 @@ Pinning an exact tag ref means every release needs a policy edit. The usual shap
 scope = "registry.corp.example/acme"
 
 signers = [
-  { kind = "keyless", identity_regexp = "https://github\\.com/acme/mytool/\\.github/workflows/release\\.yml@refs/tags/v.*",
+  { kind = "keyless", sigstore = "fulcio.corp.example", identity_regexp = "https://github\\.com/acme/mytool/\\.github/workflows/release\\.yml@refs/tags/v.*",
                       oidc_issuer = "https://token.actions.githubusercontent.com" },
 ]
 ```
@@ -298,7 +304,7 @@ signers = [
 scope = "registry.corp.example/acme"
 
 signers = [
-  { kind = "keyless", identity_regexp = "https://gitlab\\.corp\\.example/acme/mytool//\\.gitlab-ci\\.yml@refs/tags/v.*",
+  { kind = "keyless", sigstore = "fulcio.corp.example", identity_regexp = "https://gitlab\\.corp\\.example/acme/mytool//\\.gitlab-ci\\.yml@refs/tags/v.*",
                       oidc_issuer = "https://gitlab.corp.example" },
 ]
 ```
@@ -314,7 +320,7 @@ signers = [
 scope = "registry.corp.example/acme"
 
 signers = [
-  { kind = "keyless", identity = "release-bot@corp.example",
+  { kind = "keyless", sigstore = "fulcio.corp.example", identity = "release-bot@corp.example",
                       oidc_issuer = "https://sso.corp.example" },
 ]
 ```
@@ -335,7 +341,7 @@ A regexp that matches more than you meant is not a slightly loose config. It is 
 
 ```toml
 # Every project on the instance. Anyone who can create one can sign your packages.
-{ kind = "keyless", identity_regexp = "https://gitlab\\.corp\\.example/.*", oidc_issuer = "..." }
+{ kind = "keyless", sigstore = "fulcio.corp.example", identity_regexp = "https://gitlab\\.corp\\.example/.*", oidc_issuer = "..." }
 ```
 
 Under that policy, an engineer who creates `gitlab.corp.example/anyone/scratch` and pushes a `.gitlab-ci.yml` gets a certificate that satisfies it. The signature is genuine, Rekor logged it, and OCX accepts it, because you said that identity was trusted.
@@ -411,7 +417,7 @@ The generic-OIDC path is tested end to end. The GitHub and GitLab issuer paths a
 
 - [Signing][in-depth-signing]: the sign and verify pipeline, bundle format, and trust-root ladder
 - [cosign parity][in-depth-cosign-parity]: cosign interoperability in both directions
-- [`[[trust.policy]]`][config-trust] and [`[trust.sigstore]`][config-trust-sigstore]: the configuration reference for both tables
+- [`[[trust.policy]]`][config-trust] and [`[sigstore.*]`][config-sigstore]: the configuration reference for both tables
 - [`[managed]`][config-managed]: the fleet configuration tier
 - [`ocx package verify`][cmd-package-verify]: flags, exit codes, JSON output
 - [CI Integration][guide-ci]: toolchain installs and environment export in a pipeline
@@ -430,7 +436,7 @@ The generic-OIDC path is tested end to end. The GitHub and GitLab issuer paths a
 [guide-auto-verify]: verify-installs.mdx
 [env-external-proxies]: ../integration/proxy-and-ca.mdx#proxy
 [config-trust]: ../reference/configuration.md#keys-trust
-[config-trust-sigstore]: ../reference/configuration.md#keys-trust-sigstore
+[config-sigstore]: ../reference/configuration.md#keys-sigstore
 [config-managed]: ../reference/configuration.md#keys-managed
 [cmd-package-sign]: ../reference/command-line/package-publishing.md#package-sign
 [cmd-package-verify]: ../reference/command-line/package-consuming.md#package-verify

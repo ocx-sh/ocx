@@ -137,7 +137,7 @@ A section declared at the system tier (`/etc/ocx/config.toml`) is locked. No low
 | `[records]` | The whole block, `dir`, `name` and `required` together, because a collector depends on the sink location and the filename pattern as a pair. See [execution records](../reference/execution-records.md#execution-records-configuration). |
 | `[managed]` | A declaration with `required = true` (the default) is itself non-overridable by a lower tier. |
 | `[[trust.policy]]` | Each entry **governs alone** for the scopes it matches. Policies otherwise pool across tiers, see [tier precedence](./signing.mdx#identity-matching-tiers). |
-| `[trust.sigstore]` | The whole sub-table, per table and not per field. A scalar trust root cannot pool, because two Fulcio CAs are an ambiguity, not a merge. |
+| `[sigstore."<host>"]` | Each instance table whole, not per field. A scalar trust root cannot pool, because two Fulcio CAs are an ambiguity, not a merge. |
 | `extra_ca_certs`, `extra_ca_certs_pem` | The pair, once the system file sets either one. See [proxy and CA](../integration/proxy-and-ca.mdx#ca-system-lock). |
 
 ## Publishing to a fleet {#managed-publish}
@@ -169,11 +169,16 @@ interval = "1d"
 
 | Payload key | Unpinned `source` | Digest-pinned `source` |
 |---|---|---|
-| `trusted_root` as a path | Ignored with a warning: a remote payload cannot name a path on this machine | Ignored with a warning |
+| `trusted_root` as a path, in a `[sigstore."<host>"]` table | Ignored with a warning: a remote payload cannot name a path on this machine | Ignored with a warning |
 | `trusted_root_json` | Ignored with a warning: the trust root would arrive over the channel it exists to verify | Honored |
 | `fulcio_url`, `rekor_url` | Ignored with a warning. `fulcio_url` names where the OIDC identity token is sent, and `ocx package push --sbom` has no flag to oppose a config value | Honored |
+| `rekor_upload` | Honored only as `true`, because a movable tag must not turn transparency off for a fleet | Honored |
+| `index_publishers` | Ignored with a warning naming the registry: a movable tag must not choose who may sign an index | Honored |
+| `index` | Ignored with a warning for a registry whose index check is armed: it has a signer list and an `index_signature` other than `off`. Honored otherwise | Honored |
+| `[mirrors."<host>"]` `index` role | Ignored with a warning when `<host>` serves the index of an armed registry. Honored otherwise | Honored |
+| `index_signature`, `index_expiry` | A tightening value is kept (`off` to `warn` to `enforce`, `ignore` to `check`). A loosening value is dropped with a warning | Honored |
 | `extra_ca_certs` as a path | Ignored with a warning | Ignored with a warning |
-| `extra_ca_certs_pem` | Honored for registry, index and forge traffic, because a CA alone grants no signature bypass. The `[trust.sigstore]` client still requires a pinned source | Honored |
+| `extra_ca_certs_pem` | Honored for registry, index and forge traffic, because a CA alone grants no signature bypass. The Sigstore client still requires a pinned source | Honored |
 | `[shell.consent]` | Table stripped with a warning. An `exclude` carve-out inside it survives, since a withdrawal can only narrow | Honored |
 | `[update]` | Dropped before the merge | Dropped |
 

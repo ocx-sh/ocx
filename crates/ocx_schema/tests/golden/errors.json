@@ -1059,6 +1059,21 @@
           "exit_code": 77
         },
         {
+          "value": "index_catalog_expired",
+          "description": "The index catalog's validity window has ended",
+          "exit_code": 81
+        },
+        {
+          "value": "index_catalog_rollback",
+          "description": "The index catalog is older than one already verified",
+          "exit_code": 65
+        },
+        {
+          "value": "index_catalog_through_mirror",
+          "description": "The signed index catalog cannot be checked through a registry mirror, so index_signature enforce has nothing to check",
+          "exit_code": 78
+        },
+        {
           "value": "index_dispatch_digest_mismatch",
           "description": "A dispatch object does not hash to the digest its root claims",
           "exit_code": 65
@@ -1084,9 +1099,34 @@
           "exit_code": 64
         },
         {
+          "value": "index_package_not_in_catalog",
+          "description": "The signed catalog lists no entry for the package",
+          "exit_code": 79
+        },
+        {
           "value": "index_path_invalid",
           "description": "A local index path is invalid",
           "exit_code": 1
+        },
+        {
+          "value": "index_publisher_mismatch",
+          "description": "The index catalog is signed by a signer that is not trusted",
+          "exit_code": 77
+        },
+        {
+          "value": "index_publishers_invalid",
+          "description": "An index_publishers entry is malformed",
+          "exit_code": 78
+        },
+        {
+          "value": "index_publishers_missing",
+          "description": "Index signature enforcement is on with no publishers to check against",
+          "exit_code": 78
+        },
+        {
+          "value": "index_publishers_unrecognized",
+          "description": "No index publisher entry is of a kind this build understands",
+          "exit_code": 82
         },
         {
           "value": "index_resolution_blocked",
@@ -1094,9 +1134,19 @@
           "exit_code": 81
         },
         {
+          "value": "index_root_digest_mismatch",
+          "description": "A package root differs from the digest its signed catalog lists",
+          "exit_code": 65
+        },
+        {
           "value": "index_root_missing_field",
           "description": "The committed root document lacks a required field",
           "exit_code": 1
+        },
+        {
+          "value": "index_root_not_found",
+          "description": "A package the signed catalog lists is not served",
+          "exit_code": 79
         },
         {
           "value": "index_root_not_object",
@@ -1112,6 +1162,16 @@
           "value": "index_serialization",
           "description": "An index document could not be serialized",
           "exit_code": 65
+        },
+        {
+          "value": "index_signature_invalid",
+          "description": "The index catalog's signature does not verify",
+          "exit_code": 65
+        },
+        {
+          "value": "index_signature_not_found",
+          "description": "The index serves no signature for its catalog",
+          "exit_code": 79
         },
         {
           "value": "index_singleflight_failed",
@@ -2419,6 +2479,26 @@
           "exit_code": 65
         },
         {
+          "value": "sigstore_authority_invalid",
+          "description": "A Sigstore authority is not a valid host and port",
+          "exit_code": 78
+        },
+        {
+          "value": "sigstore_rekor_url_missing",
+          "description": "A Sigstore table has no rekor_url to upload a signature to",
+          "exit_code": 78
+        },
+        {
+          "value": "sigstore_table_key_mismatch",
+          "description": "A Sigstore table's fulcio_url names another authority than its key",
+          "exit_code": 78
+        },
+        {
+          "value": "sigstore_trusted_root_missing",
+          "description": "A private Sigstore instance has no trusted root configured",
+          "exit_code": 78
+        },
+        {
           "value": "simple_signing_claim_unsupported",
           "description": "The simple signing payload declares an unsupported claim type",
           "exit_code": 65
@@ -2742,6 +2822,11 @@
           "value": "trust_root_unreadable",
           "description": "A trust root file named by the operator could not be read",
           "exit_code": 74
+        },
+        {
+          "value": "trust_sigstore_retired",
+          "description": "A config file declares the retired [trust.sigstore] table",
+          "exit_code": 78
         },
         {
           "value": "trusted_root_invalid",

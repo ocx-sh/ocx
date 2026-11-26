@@ -14,13 +14,17 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use key_ref::MAX_KEY_PEM_BYTES;
-use ocx_util::fs::path::FileReference;
 
 pub mod claims;
+pub mod instance;
 pub mod key_ref;
 pub mod publishers;
 
 pub use claims::{ClaimEncoding, ClaimKeyError, ClaimSelector, CompiledClaim};
+pub use instance::{
+    PUBLIC_AUTHORITY, PUBLIC_FULCIO_URL, PUBLIC_REKOR_URL, SigstoreAuthority, SigstoreAuthorityError, SigstoreInstance,
+    SigstoreInstances,
+};
 pub use publishers::{PublisherEntry, PublisherSet, PublishersRefusal, parse_publishers};
 
 /// Container for the `[trust]` config section (`[[trust.policy]]` entries).
@@ -29,19 +33,10 @@ pub struct TrustConfig {
     /// The declared policies. Empty when `[trust]` is present but lists none.
     #[serde(default)]
     pub policy: Vec<TrustPolicy>,
-
-    /// Sigstore trust material for a self-hosted stack (`[trust.sigstore]`).
-    ///
-    /// Read from the operator `config.toml` tiers only. The project `ocx.toml`
-    /// also accepts a `[trust]` table, but its `sigstore` sub-table is never
-    /// consulted.
-    // A repository that could name its own Fulcio CA would verify its own signatures.
-    #[serde(default)]
-    pub sigstore: Option<SigstoreTrust>,
 }
 
 impl TrustConfig {
-    /// Mark every declared policy, and the sigstore sub-table, as system-scope; unconditional, like
+    /// Mark every declared policy as system-scope; unconditional, like
     /// `config::RegistryDefaults::lock_as_system`.
     ///
     /// The flag rides on each entry, not the section: policies array-append across tiers and only entries survive.
@@ -49,117 +44,12 @@ impl TrustConfig {
         for policy in &mut self.policy {
             policy.system_locked = true;
         }
-        if let Some(sigstore) = self.sigstore.as_mut() {
-            sigstore.lock_as_system();
-        }
     }
 
     /// Merge `other` (the higher-precedence tier) into `self`: `[[trust.policy]]` array-appends and is masked at
-    /// resolution ([`resolve`]); scalar `[trust.sigstore]` replaces field by field, honouring the system lock.
+    /// resolution ([`resolve`]).
     pub fn merge(&mut self, other: TrustConfig) {
         self.policy.extend(other.policy);
-        if let Some(other_sigstore) = other.sigstore {
-            match self.sigstore.as_mut() {
-                Some(sigstore) => sigstore.merge(other_sigstore),
-                None => self.sigstore = Some(other_sigstore),
-            }
-        }
-    }
-}
-
-/// The `[trust.sigstore]` sub-table: where verification gets its trust root
-/// when the stack is self-hosted rather than the Sigstore public good.
-///
-/// Every field is optional and the whole sub-table may be absent — omitting it
-/// reproduces the public-good behaviour exactly.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize, schemars::JsonSchema)]
-pub struct SigstoreTrust {
-    /// Path to a Sigstore trusted-root JSON, or a directory holding
-    /// `trusted_root.json`.
-    ///
-    /// A relative path resolves against the directory of the `config.toml`
-    /// that declared it. It is rewritten to absolute at load time, so the same
-    /// value names the same file whatever the working directory.
-    /// Mutually exclusive with `trusted_root_json`.
-    #[serde(default)]
-    pub trusted_root: Option<PathBuf>,
-
-    /// The trusted-root document inlined verbatim.
-    ///
-    /// This is the form a fleet receives: `ocx config push` reads a path-form
-    /// `trusted_root` at publish time and inlines it here. Mutually exclusive
-    /// with `trusted_root`.
-    #[serde(default)]
-    pub trusted_root_json: Option<String>,
-
-    /// Default Fulcio base URL for `ocx package sign` when `--fulcio-url` is
-    /// omitted.
-    #[serde(default)]
-    pub fulcio_url: Option<String>,
-
-    /// Default Rekor base URL for `ocx package sign` / `verify` when
-    /// `--rekor-url` is omitted.
-    #[serde(default)]
-    pub rekor_url: Option<String>,
-
-    // Off by default, unlike cosign: on, it would irreversibly publish a private artifact's digest and signer to the
-    // public Rekor on first run.
-    /// Fleet-wide default for uploading a key-mode signature to the transparency log, when neither
-    /// `--rekor-upload` nor `--no-rekor-upload` is given.
-    ///
-    /// Absent means off; keyless signing always uploads and ignores this field.
-    // Keyless must upload: a Fulcio cert lives ~ten minutes and the Rekor timestamp proves signing inside it.
-    // Ignored under keyless without a warning, or a fleet-wide `false` would break the default signing path.
-    #[serde(default)]
-    pub rekor_upload: Option<bool>,
-
-    /// Declared in the system config (`/etc/ocx/config.toml`), so lower tiers cannot override the sub-table; set by
-    /// `lock_as_system`, never serialized.
-    // The skip is the security boundary: a managed payload writing `system_locked = true` is dropped as an unknown key.
-    #[serde(skip)]
-    #[schemars(skip)]
-    pub system_locked: bool,
-}
-
-impl SigstoreTrust {
-    /// Mark this sub-table as system-scope, non-overridable by lower tiers.
-    pub fn lock_as_system(&mut self) {
-        self.system_locked = true;
-    }
-
-    /// Merge `other` (higher precedence) into `self`, field by field; a system-locked `self` ignores it whole.
-    ///
-    /// The lock is adopted from `other`: the system tier folds in as `other` on the first merge, so without the
-    /// adoption the lock never applies.
-    pub fn merge(&mut self, other: SigstoreTrust) {
-        if self.system_locked {
-            return;
-        }
-        self.system_locked = other.system_locked;
-        // Take both trust-root fields together, or switching from path to inline leaves both set and trips the XOR.
-        if other.trusted_root.is_some() || other.trusted_root_json.is_some() {
-            self.trusted_root = other.trusted_root;
-            self.trusted_root_json = other.trusted_root_json;
-        }
-        if other.fulcio_url.is_some() {
-            self.fulcio_url = other.fulcio_url;
-        }
-        if other.rekor_url.is_some() {
-            self.rekor_url = other.rekor_url;
-        }
-        if other.rekor_upload.is_some() {
-            self.rekor_upload = other.rekor_upload;
-        }
-    }
-
-    /// Resolve [`Self::trusted_root`] (bare or `file://`) against `config_dir`, the declaring `config.toml`'s
-    /// directory, via [`FileReference::anchored_at`]; called once per file tier, so the working directory never counts.
-    pub fn anchor_relative_root(&mut self, config_dir: &std::path::Path) {
-        if let Some(path) = self.trusted_root.as_ref() {
-            // `to_string_lossy` is exact: the value came from a TOML string.
-            let written = path.to_string_lossy().into_owned();
-            self.trusted_root = Some(FileReference::parse(&written).anchored_at(config_dir));
-        }
     }
 }
 
@@ -447,6 +337,13 @@ pub struct KeylessMatcher {
     /// Alone or beside `identity` / `identity_regexp`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub claims: BTreeMap<String, String>,
+
+    /// The Sigstore instance this signer trusts, named by the authority of its Fulcio (`host[:port]`).
+    ///
+    /// Absent means the public instance, `fulcio.sigstore.dev`. The matching `[sigstore."<authority>"]` table
+    /// supplies the trust root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sigstore: Option<SigstoreAuthority>,
 }
 
 /// One entry of a policy's `signers = [...]` array, tagged on `kind` with the
@@ -504,6 +401,12 @@ pub struct KeyMatcher {
     /// Mutually exclusive with `key`.
     #[serde(default)]
     pub key_pem: Option<String>,
+
+    // Read only to be refused: a key signer names no Sigstore instance, and silently ignoring the field would hide
+    // a signer that was meant to be keyless.
+    #[serde(default, skip_serializing)]
+    #[schemars(skip)]
+    pub sigstore: Option<String>,
 }
 
 /// Validate a `signers` array's shape without reading key material; `scope` is the policy's rendered scope.
@@ -512,7 +415,8 @@ pub struct KeyMatcher {
 ///
 /// # Errors
 /// [`TrustPolicyError::NoSigners`] for an empty array (fail closed, never a catch-all);
-/// [`TrustPolicyError::KeyConflict`] / [`TrustPolicyError::KeyUnset`] for a key entry with both or neither form;
+/// [`TrustPolicyError::KeyConflict`] / [`TrustPolicyError::KeyUnset`] for a key entry with both or neither form, and
+/// [`TrustPolicyError::KeySigstoreUnsupported`] for one that sets `sigstore`;
 /// from a keyless entry, [`TrustPolicyError::IdentityConflict`], [`TrustPolicyError::IdentityUnset`],
 /// [`TrustPolicyError::IssuerUnset`] or [`TrustPolicyError::InvalidRegex`].
 pub fn validate_signers(signers: &[SignerSpec], scope: &str) -> Result<(), TrustPolicyError> {
@@ -531,6 +435,11 @@ pub fn validate_signers(signers: &[SignerSpec], scope: &str) -> Result<(), Trust
             // Nothing to validate; it yields no backend at compile time.
             SignerSpec::Unknown => continue,
         };
+        if key.sigstore.is_some() {
+            return Err(TrustPolicyError::KeySigstoreUnsupported {
+                scope: scope.to_owned(),
+            });
+        }
         match (&key.key, &key.key_pem) {
             (Some(_), Some(_)) => {
                 return Err(TrustPolicyError::KeyConflict {
@@ -600,7 +509,7 @@ impl TrustPolicy {
     }
 
     /// Anchor each relative path-form signer `key` at `config_dir`, the declaring config's directory; the twin of
-    /// [`SigstoreTrust::anchor_relative_root`], and not a containment check.
+    /// [`SigstoreInstance::anchor_relative_root`], and not a containment check.
     ///
     /// Non-path and unparseable references stay untouched, so [`Self::compile`] reports them as written.
     pub fn anchor_relative_keys(&mut self, config_dir: &std::path::Path) {
@@ -681,6 +590,7 @@ fn compile_keyless_matcher(keyless: &KeylessMatcher, scope: &str) -> Result<Comp
         identity,
         issuer,
         claims,
+        instance: keyless.sigstore.clone().unwrap_or_else(SigstoreAuthority::public),
     })
 }
 
@@ -716,6 +626,8 @@ pub struct CompiledKeyless {
     pub issuer: String,
     /// Fulcio certificate claims every one of which must match.
     pub claims: Vec<CompiledClaim>,
+    /// The Sigstore instance whose trust root verifies this signer's certificate.
+    pub instance: SigstoreAuthority,
 }
 
 impl CompiledPolicy {
@@ -723,12 +635,19 @@ impl CompiledPolicy {
     /// `--certificate-oidc-issuer` override.
     #[must_use]
     pub fn exact(identity: String, issuer: String) -> Self {
+        Self::exact_on(identity, issuer, SigstoreAuthority::public())
+    }
+
+    /// [`Self::exact`] for a signer of the Sigstore instance `instance`.
+    #[must_use]
+    pub fn exact_on(identity: String, issuer: String, instance: SigstoreAuthority) -> Self {
         Self {
             builder: None,
             backends: vec![PolicyBackend::Keyless(CompiledKeyless {
                 identity: Some(IdentityRule::Exact(identity)),
                 issuer,
                 claims: Vec::new(),
+                instance,
             })],
         }
     }
@@ -1053,6 +972,14 @@ pub enum TrustPolicyError {
         /// The offending policy's scope.
         scope: String,
     },
+    /// A `kind = "key"` signer carries `sigstore`, a field only a keyless signer has.
+    #[error(
+        "signer for scope `{scope}` is a `key` signer but sets `sigstore`; only a `keyless` signer names a Sigstore instance"
+    )]
+    KeySigstoreUnsupported {
+        /// The offending policy's scope.
+        scope: String,
+    },
     /// A `key` reference this build cannot resolve, typically an unimplemented KMS scheme; kept distinct from
     /// [`Self::KeyUnreadable`] so it is never reported as a missing file.
     #[error("signer for scope `{scope}` names a key reference this build cannot resolve")]
@@ -1135,6 +1062,7 @@ mod tests {
             scope: Some(ScopeSpec::Prefix(scope.to_string())),
             builder: None,
             signers: vec![SignerSpec::Keyless(KeylessMatcher {
+                sigstore: None,
                 identity: identity.map(str::to_string),
                 identity_regexp: regexp.map(str::to_string),
                 oidc_issuer: Some(issuer.to_string()),
@@ -1745,7 +1673,6 @@ signers = [{ kind = "keyless", identity = "attacker@example.test", oidc_issuer =
                 policy("ghcr.io/acme/*", Some("a"), None, "iss"),
                 policy("ghcr.io/other/*", Some("b"), None, "iss"),
             ],
-            sigstore: None,
         };
         config.lock_as_system();
         assert!(config.policy.iter().all(|policy| policy.system_locked));
@@ -1845,6 +1772,7 @@ oidc_issuer = "https://token.actions.githubusercontent.com"
             scope: Some(ScopeSpec::Prefix("ghcr.io/acme/*".to_string())),
             builder: None,
             signers: vec![SignerSpec::Keyless(KeylessMatcher {
+                sigstore: None,
                 identity: Some("release@acme.example".to_string()),
                 identity_regexp: None,
                 oidc_issuer: None,
@@ -1906,6 +1834,7 @@ signers = [
             scope: None,
             builder: None,
             signers: vec![SignerSpec::Keyless(KeylessMatcher {
+                sigstore: None,
                 identity: Some("release@acme.example".to_string()),
                 identity_regexp: None,
                 oidc_issuer: Some("https://token.actions.githubusercontent.com".to_string()),
@@ -2188,189 +2117,12 @@ signers = [
         );
     }
 
-    #[test]
-    fn sigstore_trust_tolerates_unknown_fields_from_newer_ocx() {
-        // Third fleet forward-compat guard, one nesting level below the two
-        // above: the unknown key sits inside `[trust.sigstore]`. Neither
-        // sibling test can catch a `deny_unknown_fields` restored on
-        // `SigstoreTrust` — one exercises `TrustPolicy`, the other
-        // `TrustConfig` itself.
-        let toml = r#"
-[trust.sigstore]
-trusted_root = "sigstore/trusted-root.json"
-future_field = "added by a newer ocx"
-"#;
-        #[derive(Deserialize)]
-        struct Root {
-            trust: TrustConfig,
-        }
-        let root: Root = toml::from_str(toml).expect("unknown field inside [trust.sigstore] is tolerated");
-        let sigstore = root.trust.sigstore.expect("sub-table parses");
-        assert_eq!(
-            sigstore.trusted_root.as_deref(),
-            Some(Path::new("sigstore/trusted-root.json"))
-        );
-    }
-
-    #[test]
-    fn system_scope_sigstore_survives_a_lower_tier_override() {
-        // `[[trust.policy]]` pools across tiers; a scalar trust root cannot —
-        // two Fulcio CAs is an ambiguity, not a merge. Follows the
-        // `[registry]` precedent: system scope replaces AND locks.
-        let mut system = TrustConfig {
-            sigstore: Some(SigstoreTrust {
-                fulcio_url: Some("https://fulcio.corp.example".to_string()),
-                ..SigstoreTrust::default()
-            }),
-            ..TrustConfig::default()
-        };
-        system.lock_as_system();
-
-        let home = TrustConfig {
-            sigstore: Some(SigstoreTrust {
-                fulcio_url: Some("https://fulcio.attacker.example".to_string()),
-                ..SigstoreTrust::default()
-            }),
-            ..TrustConfig::default()
-        };
-
-        let mut merged = system;
-        merged.merge(home);
-        assert_eq!(
-            merged.sigstore.expect("sigstore survives").fulcio_url.as_deref(),
-            Some("https://fulcio.corp.example"),
-            "a system-locked [trust.sigstore] is not overridable by a lower tier"
-        );
-    }
-
-    #[test]
-    fn a_higher_tier_switching_trust_root_spelling_clears_the_other() {
-        // The trust root is ONE decision in two spellings. A tier that moves
-        // from a path to an inline document must not leave both fields set —
-        // that is exactly the ambiguity the resolver refuses with exit 78, and
-        // it would be reached through a merge nobody wrote by hand.
-        let user = TrustConfig {
-            sigstore: Some(SigstoreTrust {
-                trusted_root: Some(PathBuf::from("/etc/ocx/sigstore/trusted-root.json")),
-                rekor_url: Some("https://rekor.corp.example".to_string()),
-                ..SigstoreTrust::default()
-            }),
-            ..TrustConfig::default()
-        };
-        let home = TrustConfig {
-            sigstore: Some(SigstoreTrust {
-                trusted_root_json: Some("{}".to_string()),
-                ..SigstoreTrust::default()
-            }),
-            ..TrustConfig::default()
-        };
-
-        let mut merged = user;
-        merged.merge(home);
-        let sigstore = merged.sigstore.expect("sigstore survives");
-        assert_eq!(
-            sigstore.trusted_root, None,
-            "the path spelling is dropped, not left alongside"
-        );
-        assert_eq!(sigstore.trusted_root_json.as_deref(), Some("{}"));
-        assert_eq!(
-            sigstore.rekor_url.as_deref(),
-            Some("https://rekor.corp.example"),
-            "an unrelated field the higher tier said nothing about survives"
-        );
-    }
-
-    #[test]
-    fn absent_sigstore_in_a_higher_tier_leaves_the_lower_one_standing() {
-        let user = TrustConfig {
-            sigstore: Some(SigstoreTrust {
-                fulcio_url: Some("https://fulcio.corp.example".to_string()),
-                ..SigstoreTrust::default()
-            }),
-            ..TrustConfig::default()
-        };
-        let mut merged = user;
-        merged.merge(TrustConfig::default());
-        assert_eq!(
-            merged.sigstore.expect("sigstore survives").fulcio_url.as_deref(),
-            Some("https://fulcio.corp.example"),
-            "a tier that says nothing about sigstore must not clear it"
-        );
-    }
-
-    #[test]
-    fn anchor_relative_root_resolves_against_the_declaring_config_dir() {
-        // The whole point of the relative form: `/etc/ocx/config.toml` naming
-        // `sigstore/trusted-root.json` means `/etc/ocx/sigstore/...`, never
-        // a path relative to whatever directory the process happens to be in.
-        let mut sigstore = SigstoreTrust {
-            trusted_root: Some(PathBuf::from("sigstore/trusted-root.json")),
-            ..SigstoreTrust::default()
-        };
-        sigstore.anchor_relative_root(Path::new("/etc/ocx"));
-        assert_eq!(
-            sigstore.trusted_root.as_deref(),
-            Some(Path::new("/etc/ocx/sigstore/trusted-root.json"))
-        );
-    }
-
-    /// S-015 / C-083 — `[trust.sigstore] trusted_root` takes the `file://`
-    /// spelling, the one it sat three lines from `signers[].key` accepting
-    /// without it, for no stated reason (#379).
-    ///
-    /// The spelling is consumed at this seam, so no reader below the loader
-    /// learns about it: the stored value is always a plain resolved path.
-    #[test]
-    fn anchor_relative_root_takes_the_file_url_spelling() {
-        #[derive(Deserialize)]
-        struct Root {
-            trust: TrustConfig,
-        }
-
-        let parsed: Root =
-            toml::from_str("[trust.sigstore]\ntrusted_root = \"file:///opt/sigstore/trusted-root.json\"\n")
-                .expect("the file:// spelling parses");
-        let mut sigstore = parsed.trust.sigstore.expect("sigstore table");
-        sigstore.anchor_relative_root(Path::new("/etc/ocx"));
-        assert_eq!(
-            sigstore.trusted_root.as_deref(),
-            Some(Path::new("/opt/sigstore/trusted-root.json")),
-            "an absolute file:// root resolves to the path it names"
-        );
-
-        // The relative half takes the same rule a bare path does — one
-        // grammar, one anchoring seam.
-        let mut relative = SigstoreTrust {
-            trusted_root: Some(PathBuf::from("file://sigstore/trusted-root.json")),
-            ..SigstoreTrust::default()
-        };
-        relative.anchor_relative_root(Path::new("/etc/ocx"));
-        assert_eq!(
-            relative.trusted_root.as_deref(),
-            Some(Path::new("/etc/ocx").join("sigstore/trusted-root.json").as_path())
-        );
-    }
-
-    #[test]
-    fn anchor_relative_root_leaves_an_absolute_path_alone() {
-        let absolute = if cfg!(windows) {
-            PathBuf::from("C:/opt/sigstore/trusted-root.json")
-        } else {
-            PathBuf::from("/opt/sigstore/trusted-root.json")
-        };
-        let mut sigstore = SigstoreTrust {
-            trusted_root: Some(absolute.clone()),
-            ..SigstoreTrust::default()
-        };
-        sigstore.anchor_relative_root(Path::new("/etc/ocx"));
-        assert_eq!(sigstore.trusted_root.as_deref(), Some(absolute.as_path()));
-    }
-
     /// A `kind = "key"` signer with the two forms set as given.
     fn key_signer(key: Option<&str>, key_pem: Option<&str>) -> [SignerSpec; 1] {
         [SignerSpec::Key(KeyMatcher {
             key: key.map(str::to_string),
             key_pem: key_pem.map(str::to_string),
+            sigstore: None,
         })]
     }
 
@@ -2392,6 +2144,7 @@ future_field = "added by a newer ocx"
         // validator that rejected *every* array would pass the assertion above
         // while accepting nothing at all.
         let one = [SignerSpec::Keyless(KeylessMatcher {
+            sigstore: None,
             identity: Some("release@acme.example".to_string()),
             identity_regexp: None,
             oidc_issuer: Some("https://accounts.google.com".to_string()),
@@ -2438,6 +2191,7 @@ future_field = "added by a newer ocx"
     /// A `kind = "keyless"` signer that names nobody.
     fn keyless_signer(identity: Option<&str>, regexp: Option<&str>, issuer: Option<&str>) -> [SignerSpec; 1] {
         [SignerSpec::Keyless(KeylessMatcher {
+            sigstore: None,
             identity: identity.map(str::to_string),
             identity_regexp: regexp.map(str::to_string),
             oidc_issuer: issuer.map(str::to_string),
@@ -2612,6 +2366,7 @@ signers = [
             KeyMatcher {
                 key: None,
                 key_pem: Some(GOLDEN_PUBLIC_KEY_PEM.to_string()),
+                sigstore: None,
             },
         )
         .compile()
@@ -2638,6 +2393,7 @@ signers = [
             KeyMatcher {
                 key: Some(key_path.display().to_string()),
                 key_pem: None,
+                sigstore: None,
             },
         )
         .compile()
@@ -2659,6 +2415,7 @@ signers = [
             KeyMatcher {
                 key: Some("/dev/zero".to_string()),
                 key_pem: None,
+                sigstore: None,
             },
         )
         .compile()
@@ -2727,6 +2484,7 @@ signers = [
             KeyMatcher {
                 key: Some(key_path.display().to_string()),
                 key_pem: None,
+                sigstore: None,
             },
         )
         .compile()
@@ -2744,6 +2502,7 @@ signers = [
             builder: None,
             signers: vec![
                 SignerSpec::Keyless(KeylessMatcher {
+                    sigstore: None,
                     identity: Some("release@acme.example".to_string()),
                     identity_regexp: None,
                     oidc_issuer: Some("https://accounts.google.com".to_string()),
@@ -2752,6 +2511,7 @@ signers = [
                 SignerSpec::Key(KeyMatcher {
                     key: None,
                     key_pem: Some(GOLDEN_PUBLIC_KEY_PEM.to_string()),
+                    sigstore: None,
                 }),
             ],
             system_locked: false,
@@ -2797,6 +2557,7 @@ signers = [
             KeyMatcher {
                 key: Some("awskms://alias/acme-release".to_string()),
                 key_pem: None,
+                sigstore: None,
             },
         )
         .compile()
@@ -2826,6 +2587,7 @@ signers = [
             KeyMatcher {
                 key: Some(missing.display().to_string()),
                 key_pem: None,
+                sigstore: None,
             },
         )
         .compile()
@@ -2848,6 +2610,7 @@ signers = [
             KeyMatcher {
                 key: None,
                 key_pem: Some("-----BEGIN PUBLIC KEY-----\nnot base64 at all\n-----END PUBLIC KEY-----\n".to_string()),
+                sigstore: None,
             },
         )
         .compile()
@@ -2866,6 +2629,7 @@ signers = [
             KeyMatcher {
                 key: None,
                 key_pem: Some(private.to_string()),
+                sigstore: None,
             },
         )
         .compile()
@@ -2998,6 +2762,7 @@ signers = [
             KeyMatcher {
                 key: Some("acme.pub".to_string()),
                 key_pem: None,
+                sigstore: None,
             },
         );
         policy.anchor_relative_keys(Path::new("/etc/ocx"));
@@ -3023,6 +2788,7 @@ signers = [
             KeyMatcher {
                 key: Some("file:acme.pub".to_string()),
                 key_pem: None,
+                sigstore: None,
             },
         );
         policy.anchor_relative_keys(Path::new("/etc/ocx"));
@@ -3046,6 +2812,7 @@ signers = [
             KeyMatcher {
                 key: Some(absolute.clone()),
                 key_pem: None,
+                sigstore: None,
             },
         );
         policy.anchor_relative_keys(Path::new("/etc/ocx"));
@@ -3065,6 +2832,7 @@ signers = [
             KeyMatcher {
                 key: Some("awskms://alias/acme-release".to_string()),
                 key_pem: None,
+                sigstore: None,
             },
         );
         policy.anchor_relative_keys(Path::new("/etc/ocx"));
@@ -3085,6 +2853,7 @@ signers = [
             KeyMatcher {
                 key: None,
                 key_pem: Some(SPKI_PEM.to_string()),
+                sigstore: None,
             },
         );
         let before = policy.signers.clone();
@@ -3101,50 +2870,9 @@ signers = [
         assert_eq!(keyless.signers, before);
     }
 
-    // ── [trust.sigstore] rekor_upload ────────────────────────────────────────
-
-    /// The fleet-wide key-mode default parses, and absent stays absent — the
-    /// resolver distinguishes "unset" from "false", so `Option` must survive.
-    #[test]
-    fn rekor_upload_parses_and_absent_stays_absent() {
-        #[derive(Deserialize)]
-        struct Root {
-            trust: TrustConfig,
-        }
-        let configured: Root = toml::from_str("[trust.sigstore]\nrekor_upload = true\n").expect("the field parses");
-        assert_eq!(
-            configured.trust.sigstore.expect("sigstore table").rekor_upload,
-            Some(true)
-        );
-
-        let absent: Root = toml::from_str("[trust.sigstore]\nrekor_url = \"https://rekor.example\"\n")
-            .expect("the table parses without the field");
-        assert_eq!(absent.trust.sigstore.expect("sigstore table").rekor_upload, None);
-    }
-
-    /// It merges like its siblings: a higher tier that sets it wins, and one
-    /// that does not leaves the lower tier's answer in place.
-    #[test]
-    fn rekor_upload_merges_like_its_siblings() {
-        let mut lower = SigstoreTrust {
-            rekor_upload: Some(true),
-            ..SigstoreTrust::default()
-        };
-        lower.merge(SigstoreTrust {
-            rekor_url: Some("https://rekor.example".to_string()),
-            ..SigstoreTrust::default()
-        });
-        assert_eq!(lower.rekor_upload, Some(true), "an unset higher tier overrides nothing");
-
-        lower.merge(SigstoreTrust {
-            rekor_upload: Some(false),
-            ..SigstoreTrust::default()
-        });
-        assert_eq!(lower.rekor_upload, Some(false), "a set higher tier wins");
-    }
-
     fn keyless_with_claims(claims: &[(&str, &str)], identity: Option<&str>) -> [SignerSpec; 1] {
         [SignerSpec::Keyless(KeylessMatcher {
+            sigstore: None,
             identity: identity.map(str::to_string),
             identity_regexp: None,
             oidc_issuer: Some("https://token.actions.githubusercontent.com".to_owned()),
@@ -3236,5 +2964,23 @@ signers = [
             panic!("one keyless backend");
         };
         assert_eq!(keyless.claims.len(), 1);
+    }
+
+    /// A `key` signer cannot name a Sigstore instance; refusing beats ignoring a signer meant to be keyless.
+    #[test]
+    fn a_key_signer_carrying_sigstore_is_refused_and_a_keyless_one_is_accepted() {
+        let key = "{ kind = \"key\", key_pem = \"x\", sigstore = \"fulcio.example\" }";
+        let policy: TrustPolicy = toml::from_str(&format!("scope = \"ocx.sh\"\nsigners = [{key}]\n")).expect("parses");
+        let error = policy.compile().expect_err("a key signer with `sigstore` is refused");
+        assert!(
+            matches!(error, TrustPolicyError::KeySigstoreUnsupported { .. }),
+            "{error:?}"
+        );
+
+        let keyless: TrustPolicy = toml::from_str(
+            "scope = \"ocx.sh\"\nsigners = [{ kind = \"keyless\", identity = \"a\", oidc_issuer = \"i\", sigstore = \"fulcio.example\" }]\n",
+        )
+        .expect("parses");
+        keyless.compile().expect("a keyless signer may name its instance");
     }
 }

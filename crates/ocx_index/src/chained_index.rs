@@ -581,7 +581,7 @@ impl ChainedIndex {
                             return Err(super::error::Error::NotInIndex {
                                 identifier: identifier.to_string(),
                                 namespace: identifier.registry().to_string(),
-                                base_url: base_url.to_string(),
+                                base_url: super::ocx_index::redact_url(base_url),
                             });
                         }
                         log::debug!("Authoritative source has no '{}' — stopping.", identifier);
@@ -646,6 +646,8 @@ impl ChainedIndex {
                 Ok(Some(result)) => return Ok(Some(result)),
                 Ok(None) if authoritative => return Ok(None),
                 Ok(None) => {}
+                // An authoritative failure ends the walk, or the registry catch-all answers the same name unchecked.
+                Err(e) if authoritative => return Err(e),
                 Err(e) => {
                     log::warn!("Remote-mode fetch_manifest failed for '{}': {e}", identifier);
                     last_error = Some(e);
@@ -663,6 +665,8 @@ impl ChainedIndex {
                 Ok(Some(digest)) => return Ok(Some(digest)),
                 Ok(None) if authoritative => return Ok(None),
                 Ok(None) => {}
+                // An authoritative failure ends the walk, or the registry catch-all answers the same name unchecked.
+                Err(e) if authoritative => return Err(e),
                 Err(e) => {
                     log::warn!("Remote-mode fetch_manifest_digest failed for '{}': {e}", identifier);
                     last_error = Some(e);
@@ -907,6 +911,8 @@ impl index_impl::IndexImpl for ChainedIndex {
                 }
                 Ok(None) if authoritative => return Ok(None),
                 Ok(None) => {}
+                // An authoritative failure ends the walk, or the registry catch-all answers the same name unchecked.
+                Err(e) if authoritative => return Err(e),
                 Err(e) => {
                     log::warn!("Source fetch_blob failed for '{blob_ref}': {e}");
                     last_error = Some(e);
@@ -1111,6 +1117,19 @@ impl index_impl::IndexImpl for ChainedIndex {
         })
     }
 
+    fn quiet_view(&self) -> Box<dyn index_impl::IndexImpl> {
+        Box::new(Self {
+            sources: self.sources.iter().map(Index::quiet_view).collect(),
+            local_index: self.local_index.clone(),
+            mode: self.mode,
+            singleflight: self.singleflight.clone(),
+            write_policy: self.write_policy,
+            content_store: self.content_store.clone(),
+            blob_lookup: self.blob_lookup.clone(),
+            rules: self.rules.clone(),
+        })
+    }
+
     fn source_kind_for(&self, registry: &str) -> SourceKind {
         self.sources
             .iter()
@@ -1166,6 +1185,8 @@ impl index_impl::IndexImpl for ChainedIndex {
                 }
                 Ok(None) if authoritative => return Ok(None),
                 Ok(None) => {}
+                // An authoritative failure ends the walk, or the registry catch-all answers the same name unchecked.
+                Err(e) if authoritative => return Err(e),
                 Err(e) => {
                     log::warn!("Source fetch_manifest_raw_bytes failed for '{}': {e}", identifier);
                     last_error = Some(e);
@@ -4317,6 +4338,71 @@ mod chain_refs_tests {
         );
     }
 
+    /// [`AuthoritativeMissSource`] that also names a base URL carrying userinfo.
+    #[derive(Clone)]
+    struct CredentialedMissSource;
+
+    #[async_trait]
+    impl index_impl::IndexImpl for CredentialedMissSource {
+        async fn list_repositories(&self, _: &str) -> Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+        async fn list_tags(&self, _: &PackageRef) -> Result<Option<Vec<String>>> {
+            Ok(None)
+        }
+        async fn fetch_manifest(&self, _: &PackageRef, _op: IndexOperation) -> Result<Option<(Digest, Manifest)>> {
+            Ok(None)
+        }
+        async fn fetch_manifest_digest(&self, _: &PackageRef, _op: IndexOperation) -> Result<Option<Digest>> {
+            Ok(None)
+        }
+        async fn fetch_blob(&self, _: &ocx_oci::PinnedPackageRef) -> Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
+        fn jurisdiction(&self, identifier: &PackageRef) -> Jurisdiction {
+            if identifier.registry() == REGISTRY {
+                Jurisdiction::Authoritative
+            } else {
+                Jurisdiction::Outside
+            }
+        }
+        fn serves_registry(&self, registry: &str) -> bool {
+            registry == REGISTRY
+        }
+        fn index_base_url(&self) -> Option<&str> {
+            Some("https://user:hunter2@index.example.com")
+        }
+        fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {
+            Box::new(self.clone())
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_chain_walk_not_in_index_error_never_holds_userinfo_from_the_base_url() {
+        let dir = TempDir::new().unwrap();
+        let cache = make_local_index(&dir);
+        let chained = Index::from_chained(
+            cache,
+            vec![Index::from_impl(CredentialedMissSource)],
+            ChainMode::Default,
+        );
+
+        let err = chained
+            .fetch_manifest(&tagged_id(), IndexOperation::Resolve)
+            .await
+            .expect_err("an authoritative miss with a base URL is the not-in-index error");
+        let debug = format!("{err:?}");
+        assert!(
+            debug.contains("NotInIndex"),
+            "the walk reached the construction: {debug}"
+        );
+        assert!(
+            !debug.contains("hunter2") && !debug.contains("user:"),
+            "userinfo leaked: {debug}"
+        );
+        assert!(debug.contains("***@index.example.com"), "the host stays: {debug}");
+    }
+
     /// Same authoritative-stop invariant on the `--remote` pure-query path
     /// (`query_sources_manifest`).
     #[tokio::test(flavor = "multi_thread")]
@@ -5509,6 +5595,51 @@ mod chain_refs_tests {
         assert_is_physical(&physical);
     }
 
+    /// The Routing record swallows its own read error at debug level, so the digest check has to
+    /// sit upstream of it: a tampered root is refused before the pointer is recorded, and nothing
+    /// is committed locally.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_tampered_root_is_refused_before_a_routing_pointer_is_recorded() {
+        use crate::catalog_verifier::fixtures::{
+            CountingTransport, FakeVerifier, NAMESPACE, root_url, serve_roots, source,
+        };
+        use ocx_config::IndexSignatureMode;
+
+        let wire = CountingTransport::default();
+        let repositories = serve_roots(&wire, 1);
+        wire.put(
+            &root_url(&repositories[0]),
+            br#"{"repository":"oci://evil.example/x","tags":{}}"#,
+        );
+        let dir = TempDir::new().unwrap();
+        let chained = Index::from_chained(
+            make_local_index(&dir),
+            vec![Index::from_impl(source(
+                &wire,
+                FakeVerifier::script([]),
+                IndexSignatureMode::Enforce,
+            ))],
+            ChainMode::Default,
+        );
+        let identifier = PackageRef::new_registry(&repositories[0], NAMESPACE).clone_with_digest(digest_a());
+
+        let error = chained
+            .route_to_materialize(&identifier)
+            .await
+            .expect_err("a tampered root must not route");
+        assert!(
+            matches!(
+                super::super::error::coalesced_cause(&error),
+                super::super::error::Error::Trust(super::super::IndexTrustError::RootDigestMismatch { .. })
+            ),
+            "{error:?}"
+        );
+        assert!(
+            chained.route_local(&identifier).await.unwrap().is_none(),
+            "nothing was committed from the tampered root"
+        );
+    }
+
     /// The re-raise half against the same real source: with no local root the
     /// outage still fails loudly, and it still exits 69.
     ///
@@ -5552,6 +5683,169 @@ mod chain_refs_tests {
             matches!(error, super::super::error::Error::IndexHttpFailed { .. }),
             "expected the source's own transport error, got: {error:?}"
         );
+    }
+
+    /// An authoritative source that fails every read with a transport error, not the mirror refusal.
+    #[derive(Clone)]
+    struct AuthoritativeFailingSource;
+
+    fn authoritative_failure() -> super::super::error::Error {
+        super::super::error::Error::IndexHttpFailed {
+            url: "https://index.example.com/p/cmake.json".to_string(),
+            status: None,
+            source: "scripted transport failure".into(),
+        }
+    }
+
+    #[async_trait]
+    impl index_impl::IndexImpl for AuthoritativeFailingSource {
+        async fn list_repositories(&self, _: &str) -> Result<Vec<String>> {
+            Err(authoritative_failure())
+        }
+        async fn list_tags(&self, _: &PackageRef) -> Result<Option<Vec<String>>> {
+            Err(authoritative_failure())
+        }
+        async fn fetch_manifest(&self, _: &PackageRef, _: IndexOperation) -> Result<Option<(Digest, Manifest)>> {
+            Err(authoritative_failure())
+        }
+        async fn fetch_manifest_digest(&self, _: &PackageRef, _: IndexOperation) -> Result<Option<Digest>> {
+            Err(authoritative_failure())
+        }
+        async fn fetch_blob(&self, _: &ocx_oci::PinnedPackageRef) -> Result<Option<Vec<u8>>> {
+            Err(authoritative_failure())
+        }
+        async fn fetch_manifest_raw_bytes(&self, _: &PackageRef) -> Result<Option<(Vec<u8>, Digest, Manifest)>> {
+            Err(authoritative_failure())
+        }
+        fn jurisdiction(&self, identifier: &PackageRef) -> Jurisdiction {
+            if identifier.registry() == REGISTRY {
+                Jurisdiction::Authoritative
+            } else {
+                Jurisdiction::Outside
+            }
+        }
+        fn serves_registry(&self, registry: &str) -> bool {
+            registry == REGISTRY
+        }
+        fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {
+            Box::new(self.clone())
+        }
+    }
+
+    /// Any error from the authoritative source ends the read, or the registry catch-all behind it answers
+    /// the same name with nothing checked.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_authoritative_sources_failure_never_reaches_the_registry_catch_all() {
+        let dir = TempDir::new().unwrap();
+        let (catch_all, catch_all_idx) = make_source(TAG, digest_a());
+        let chained = Index::from_chained(
+            make_local_index(&dir),
+            vec![Index::from_impl(AuthoritativeFailingSource), catch_all_idx],
+            ChainMode::Remote,
+        );
+        let id = tagged_id();
+        let failed = |error: crate::error::Error| {
+            matches!(
+                crate::error::coalesced_cause(&error),
+                crate::error::Error::IndexHttpFailed { .. }
+            )
+        };
+
+        assert!(failed(
+            chained.fetch_manifest(&id, IndexOperation::Query).await.unwrap_err()
+        ));
+        assert!(failed(
+            chained
+                .fetch_manifest_digest(&id, IndexOperation::Query)
+                .await
+                .unwrap_err()
+        ));
+        assert!(failed(
+            chained.fetch_manifest_raw_bytes(&digest_only_id()).await.unwrap_err()
+        ));
+        let pinned = ocx_oci::PinnedPackageRef::try_from(digest_only_id()).unwrap();
+        assert!(failed(chained.fetch_blob(&pinned).await.unwrap_err()));
+        assert_eq!(catch_all.calls(), 0, "the catch-all must never be asked");
+    }
+
+    /// A refused enforce namespace answers every read itself: the registry catch-all behind it is never
+    /// asked for a name in that namespace, in any mode, while another registry's name still reaches it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_refused_namespace_never_reaches_the_registry_catch_all() {
+        for mode in [ChainMode::Default, ChainMode::Remote] {
+            let dir = TempDir::new().unwrap();
+            let (catch_all, catch_all_idx) = make_source(TAG, digest_a());
+            let chained = Index::from_chained(
+                make_local_index(&dir),
+                vec![
+                    Index::refusing_catalog_through_mirror(REGISTRY.to_string()),
+                    catch_all_idx,
+                ],
+                mode,
+            );
+            // A walk wraps its failure for the singleflight cohort.
+            let refused = |error: crate::error::Error| {
+                let cause = match &error {
+                    crate::error::Error::SourceWalkFailed(arc) => arc.as_error(),
+                    other => crate::error::coalesced_cause(other),
+                };
+                matches!(
+                    cause,
+                    crate::error::Error::IndexCatalogThroughMirror { namespace } if namespace == REGISTRY
+                )
+            };
+
+            let id = tagged_id();
+            assert!(
+                refused(chained.fetch_manifest(&id, IndexOperation::Resolve).await.unwrap_err()),
+                "{mode:?}"
+            );
+            assert!(
+                refused(chained.fetch_manifest_raw_bytes(&digest_only_id()).await.unwrap_err()),
+                "{mode:?}"
+            );
+            let pinned = ocx_oci::PinnedPackageRef::try_from(digest_only_id()).unwrap();
+            assert!(refused(chained.fetch_blob(&pinned).await.unwrap_err()), "{mode:?}");
+            // Default answers a query, a tag listing and a repository listing from the local copy alone; only
+            // `--remote` reads the source, and so only it meets the refusal.
+            if mode == ChainMode::Remote {
+                assert!(
+                    refused(chained.fetch_manifest(&id, IndexOperation::Query).await.unwrap_err()),
+                    "{mode:?}"
+                );
+                assert!(
+                    refused(
+                        chained
+                            .fetch_manifest_digest(&id, IndexOperation::Query)
+                            .await
+                            .unwrap_err()
+                    ),
+                    "{mode:?}"
+                );
+                assert!(refused(chained.list_tags(&id).await.unwrap_err()), "{mode:?}");
+                assert!(
+                    refused(chained.list_repositories(REGISTRY).await.unwrap_err()),
+                    "{mode:?}"
+                );
+            }
+            assert_eq!(
+                catch_all.calls(),
+                0,
+                "{mode:?}: the catch-all must never be asked for a refused namespace"
+            );
+
+            // Paired positive: a name in another registry is untouched by the refusal.
+            let other = PackageRef::new_registry(REPO, "other.example").clone_with_tag(TAG);
+            assert!(
+                chained.fetch_manifest(&other, IndexOperation::Resolve).await.is_ok(),
+                "{mode:?}"
+            );
+            assert_eq!(
+                catch_all.calls(),
+                1,
+                "{mode:?}: another registry still reaches the catch-all"
+            );
+        }
     }
 }
 

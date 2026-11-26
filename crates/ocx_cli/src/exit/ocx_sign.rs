@@ -744,6 +744,16 @@ mod tests {
         }
     }
 
+    /// A private Sigstore instance with no trusted root is a configuration fault: exit 78 with its own slug.
+    #[test]
+    fn a_private_instance_without_a_trusted_root_is_a_config_error_with_its_own_slug() {
+        let kind = VerifyErrorKind::SigstoreTrustedRootMissing {
+            authority: "fulcio.corp.example".into(),
+        };
+        assert_eq!(kind.exit_code(), ExitCode::ConfigError);
+        assert_kind_detail(&kind, "sigstore_trusted_root_missing");
+    }
+
     /// C-012/C-013. A trust-root path the operator typed exits 74, matching
     /// `--key file:<missing>`; the two sites that are not file reads keep 78.
     ///

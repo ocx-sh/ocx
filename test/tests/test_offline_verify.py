@@ -27,6 +27,7 @@ import subprocess
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from src.index_signing import assert_retired_table_refused
 from src.runner import OcxRunner, PackageInfo, current_platform
 from tests.fixtures import adversarial
 from tests.fixtures.sigstore_stack import SigstoreStack
@@ -272,7 +273,7 @@ def test_trusted_root_flag_and_env_take_the_file_url_spelling(
 ) -> None:
     """D3 — both hand-reached doors read a bare path or a ``file://`` one.
 
-    The config tier's ``[trust.sigstore] trusted_root`` and these two flags read
+    The config tier's ``[sigstore."<authority>"] trusted_root`` and these two flags read
     one grammar (`ocx-sh/ocx#379`), so the door an operator is most likely to use
     must not be the one covered by unit tests alone.
 
@@ -354,3 +355,7 @@ def test_trusted_root_offline_air_gapped_verify(
         f"air-gapped verify (OCX_OFFLINE + TUF root) must succeed, got "
         f"{result.returncode}\nstderr: {result.stderr.strip()}"
     )
+
+
+def test_the_retired_trust_sigstore_spelling_is_refused_by_verify(ocx: OcxRunner) -> None:
+    assert_retired_table_refused(ocx)

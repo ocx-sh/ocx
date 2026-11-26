@@ -29,7 +29,7 @@ impl RekorUploadOpt {
     /// Resolve whether a transparency record is created: keyless always, a key
     /// pair per the flag, then `configured`, then off.
     ///
-    /// `configured` (`[trust.sigstore] rekor_upload`) is ignored under keyless,
+    /// `configured` (the selected instance table's `rekor_upload`) is ignored under keyless,
     /// without a warning, or a fleet-wide key-mode setting breaks keyless signing.
     ///
     /// # Errors

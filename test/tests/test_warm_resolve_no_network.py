@@ -41,6 +41,9 @@ from src.helpers import make_package
 from src.registry import fetch_manifest_raw
 from src.runner import OcxRunner
 
+# The registry routed to the fixture index sets `index_signature = "off"`: this module does not test the
+# catalog signature check (test_index_signature.py does), so it expects no signature request and no WARN.
+
 BINDING = "warmtool"
 
 
@@ -69,15 +72,20 @@ def dead_endpoint() -> Iterator[str]:
         yield f"127.0.0.1:{port}"
 
 
-def _write_index_config(ocx: OcxRunner, server: static_index.StaticIndexServer) -> None:
+def _write_index_config(
+    ocx: OcxRunner, server: static_index.StaticIndexServer, *, index_signature: str | None = "off"
+) -> None:
     """Points ``[registries."ocx.sh"] index`` at the fixture and trusts the
     physical registry's host (the SSRF escape hatch every fixture here needs,
     since the roots point at the loopback ``registry:2`` instance).
     """
     registry_host = ocx.registry.split(":", 1)[0]
+    # `None` leaves the key out, so the registry gets its built-in default (`warn` for `ocx.sh`).
+    signature_line = "" if index_signature is None else f'index_signature = "{index_signature}"\n'
     (Path(ocx.env["OCX_HOME"]) / "config.toml").write_text(
         f'[registries."ocx.sh"]\n'
         f'index = "{server.base_url}"\n'
+        f"{signature_line}"
         f'trusted_hosts = ["{registry_host}", "127.0.0.1"]\n'
     )
     ocx.env["OCX_INSECURE_REGISTRIES"] = f"{ocx.registry},{server.host}"
@@ -149,13 +157,35 @@ def warm_project(
     tmp_path: Path,
     index_server: static_index.StaticIndexServer,
 ) -> WarmProject:
+    return _warm(ocx, unique_repo, tmp_path, index_server, index_signature="off")
+
+
+@pytest.fixture()
+def warm_project_default_signature(
+    ocx: OcxRunner,
+    unique_repo: str,
+    tmp_path: Path,
+    index_server: static_index.StaticIndexServer,
+) -> WarmProject:
+    """The same warm home, but `index_signature` is unset: `ocx.sh` runs on its built-in `warn` default."""
+    return _warm(ocx, unique_repo, tmp_path, index_server, index_signature=None)
+
+
+def _warm(
+    ocx: OcxRunner,
+    unique_repo: str,
+    tmp_path: Path,
+    index_server: static_index.StaticIndexServer,
+    *,
+    index_signature: str | None,
+) -> WarmProject:
     """Publishes a package, serves it through the index fixture, installs it
     cold, and runs every command under test once so the local snapshot is
     complete.
     """
     pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, index=False)
 
-    _write_index_config(ocx, index_server)
+    _write_index_config(ocx, index_server, index_signature=index_signature)
     static_index.write_config(index_server.root)
     repository = f"{unique_repo}/pkg"
     logical_id = _serve_registry_image_index(index_server, repository, ocx, pkg.repo, pkg.tag)
@@ -224,6 +254,25 @@ def test_warm_commands_never_contact_the_index_source(warm_project: WarmProject)
         )
 
 
+def test_warm_commands_never_contact_the_index_source_under_the_default_signature_mode(
+    warm_project_default_signature: WarmProject,
+) -> None:
+    """The `warn` default for `ocx.sh` adds no request once the home is warm.
+
+    The cold install is the red half: it must have reached the source, so the log can see a request here.
+    """
+    warm = warm_project_default_signature
+    assert warm.cold_requests > 0, "the cold install must be visible in the request log"
+    for args in _warm_commands(warm, group="measured"):
+        checkpoint = warm.checkpoint()
+        warm.ocx.plain(*args)
+        new_paths = warm.new_paths(checkpoint)
+        assert not new_paths, (
+            f"`ocx {' '.join(args)}` contacted the index source under the default signature mode. "
+            f"Requests: {new_paths}"
+        )
+
+
 def test_a_cold_install_does_contact_the_index_source(warm_project: WarmProject) -> None:
     """The counter can go red: the FIRST install of the same package fetched
     the config declaration and the root document over HTTP.
@@ -276,6 +325,7 @@ def test_warm_exec_and_run_succeed_with_the_index_and_the_registry_dead(
     (Path(ocx.env["OCX_HOME"]) / "config.toml").write_text(
         f'[registries."ocx.sh"]\n'
         f'index = "http://{dead_endpoint}"\n'
+        f'index_signature = "off"\n'
         f'trusted_hosts = ["{registry_host}", "127.0.0.1"]\n'
         f'\n[mirrors."{ocx.registry}"]\n'
         f'registry = "http://{dead_endpoint}"\n'

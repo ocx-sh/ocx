@@ -79,7 +79,7 @@ Distributing pre-built binaries across platforms and teams fragmented:
 | 9 | First-class corporate / air-gapped mirror support | Explicit `[mirrors]` config routes OCI read traffic to Artifactory/Nexus/Harbor with host+repo-key path-prefix rewrite, replace semantics (no egress fallback), content-address verified; a gap mise/asdf/ORAS do not close. Reinforces Principle #7 (Private-first). |
 | 10 | Automatic libc/ABI resolution | glibc vs musl selected per-host from one OCI index; no `-musl` tag suffixes, no separate repos |
 | 11 | Centrally managed corporate config as ordinary OCX package | `[managed]` config tier syncs mirrors/patches-pointer/default-registry settings from one operator-published `config.toml` package per fleet (`ocx config push` — versioned tags, cascades, per-host pins/rollbacks/pause reuse the package machinery); identity-gated local snapshot means config resolution stays network-free on every ordinary command, refresh never blocks, required-but-absent snapshot fails closed. Deliberately pull-based and console-free: fleet visibility is `ocx config update --check --format json` in existing inventory tooling. Rolls out a fleet-wide config change without re-provisioning every host — a gap mise/asdf/ORAS do not close either. Reinforces Principle #7 (Private-first). |
-| 12 | Keyless Sigstore signing (v1 scope) | Sign + verify via OCI Referrers, identity-pinned `[[trust.policy]]`, offline/auto-verify. Real Sigstore throughout: public-good trust root over TUF, standard Rekor SET + Merkle proof (verification delegated to `sigstore-rs`), cosign 3.x bundle interop, and a self-hostable stack (Fulcio/Rekor/TesseraCT/dex) the acceptance suite runs against. Rekor v2 and DSSE attestations deferred — see the Current Limitations section of `website/src/content/docs/explanation/signing.mdx` |
+| 12 | Keyless Sigstore signing (v1 scope) | Sign + verify via OCI Referrers, identity-pinned `[[trust.policy]]`, offline/auto-verify. Real Sigstore throughout: public-good trust root over TUF, standard Rekor SET + Merkle proof (verification delegated to `sigstore-rs`), cosign 3.x bundle interop, and a self-hostable stack (Fulcio/Rekor/TesseraCT/dex) the acceptance suite runs against, selected per `[sigstore."<fulcio host>"]` instance table (a keyless signer names its table with `sigstore`). Index catalogs are signed too (`ocx index sign`, DSSE bundle `c/index.json.sigstore.json`, `expires` inside the signed bytes), checked on the remote-to-local path under `index_signature = off | warn | enforce` (`warn` for `ocx.sh`). Rekor v2 and DSSE attestations deferred — see the Current Limitations section of `website/src/content/docs/explanation/signing.mdx` |
 
 ## Competitive Positioning
 
@@ -125,11 +125,12 @@ ocx package env nodejs/node:24                # Print resolved environment varia
 ocx package select nodejs/node:24             # Set "current" to this version
 ocx package push -p linux/amd64 -i acme/mytool:1.0.0 --cascade mytool.tar.xz  # Publish
 ocx package sign acme/mytool:1.0.0            # Keyless Sigstore sign via OCI Referrers
-ocx package verify acme/mytool:1.0.0 \        # Keyless verify (self-hosted stack: --sigstore-trusted-root or [trust.sigstore])
+ocx package verify acme/mytool:1.0.0 \        # Keyless verify (self-hosted stack: --sigstore-trusted-root or a [sigstore."<fulcio host>"] table)
   --certificate-identity you@example.com \
   --certificate-oidc-issuer https://github.com/login/oauth
 ocx clean                           # GC all unreferenced objects
 ocx index catalog                   # List known repositories
+ocx index sign --registry ocx.sh ./site  # Sign the catalog c/index.json (keyless, or --key)
 ```
 
 Global flags: `--offline`, `--remote`, `--format json`, `--blob-dir`, `--blob-cache-dir`.

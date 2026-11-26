@@ -122,6 +122,11 @@ pub enum Error {
     #[exit(delegate)]
     File(#[from] ocx_util::error::FileError),
 
+    /// A signed catalog check refused the source.
+    #[error(transparent)]
+    #[exit(delegate)]
+    Trust(#[from] super::trust_error::IndexTrustError),
+
     /// A path under the index home was not usable (e.g. it had no parent).
     #[error("invalid path: {0}")]
     #[exit(Failure, slug = "index_path_invalid", summary = "A local index path is invalid")]
@@ -252,9 +257,10 @@ pub enum Error {
     /// to the plain registry would resolve past the yank gate. An unreachable or
     /// malformed index raises its own error instead, never this.
     #[error(
-        "'{identifier}' is not in the index at {base_url}, which is authoritative for every name in \
+        "'{identifier}' is not in the index at {}, which is authoritative for every name in \
          registry '{namespace}'; announce it there with `ocx package announce`, or take the namespace \
-         off the index with `[registries.\"{namespace}\"] index = \"\"`"
+         off the index with `[registries.\"{namespace}\"] index = \"\"`",
+        crate::ocx_index::redact_url(.base_url)
     )]
     #[exit(NotFound, slug = "not_in_index", summary = "The package is not listed in the index")]
     NotInIndex {
@@ -262,6 +268,22 @@ pub enum Error {
         namespace: String,
         base_url: String,
     },
+
+    /// `index_signature = "enforce"` on a namespace a local registry-role `[mirrors]` entry pulled off its index.
+    ///
+    /// Terminal: the registry catch-all would answer the same name through the mirror, with nothing checked.
+    #[error(
+        "[mirrors.\"{namespace}\"] pins this namespace at a registry mirror, so its signed index catalog \
+         cannot be checked through a registry mirror, yet [registries.\"{namespace}\"] sets \
+         index_signature = \"enforce\"; remove the [mirrors.\"{namespace}\"] entry, set index_signature \
+         to \"warn\" or \"off\", or opt out with --no-verify or OCX_NO_VERIFY"
+    )]
+    #[exit(
+        ConfigError,
+        slug = "index_catalog_through_mirror",
+        summary = "The signed index catalog cannot be checked through a registry mirror, so index_signature enforce has nothing to check"
+    )]
+    IndexCatalogThroughMirror { namespace: String },
 
     /// A root's `repository` pointer was not a well-formed `oci://` reference
     /// (`adr_index_indirection.md#c3`); a missing scheme is never a host guess.
@@ -403,7 +425,7 @@ pub enum Error {
 
     /// A published index source serves no `c/index.json` at all — distinct from an
     /// empty catalog, so `index sync` fails instead of exiting 0 having refreshed nothing.
-    #[error("index source '{index_source}' serves no catalog document at {url}")]
+    #[error("index source '{index_source}' serves no catalog document at {}", crate::ocx_index::redact_url(.url))]
     #[exit(
         Unavailable,
         slug = "catalog_document_absent",
@@ -413,6 +435,29 @@ pub enum Error {
 }
 
 impl Error {
+    /// A fixed-vocabulary cause for a one-line warning: a status, a timeout, a failed connect, or the size cap.
+    ///
+    /// Never the error's own text, which for a `reqwest` error carries the request URL.
+    pub fn short_transport_cause(&self) -> String {
+        let Self::IndexHttpFailed { status, source, .. } = self else {
+            return "the request failed".to_string();
+        };
+        // A 2xx status here means the body was refused (the size cap), not the request: say why.
+        if let Some(status) = status {
+            if (200..300).contains(status) && source.downcast_ref::<reqwest::Error>().is_none() {
+                return source.to_string();
+            }
+            return format!("HTTP status {status}");
+        }
+        match source.downcast_ref::<reqwest::Error>() {
+            Some(error) if error.is_timeout() => "the request timed out".to_string(),
+            Some(error) if error.is_connect() => "the connection failed".to_string(),
+            Some(_) => "the request failed".to_string(),
+            // Our own refusals (the size cap, an offline guard) carry no URL.
+            None => source.to_string(),
+        }
+    }
+
     /// Whether this is an [`Error::IndexHttpFailed`] a rerun may clear: a transient status, or a
     /// refused or timed-out connect.
     ///
@@ -426,6 +471,25 @@ impl Error {
             || source
                 .downcast_ref::<reqwest::Error>()
                 .is_some_and(ocx_oci::transport_policy::is_transient_transport_error)
+    }
+}
+
+/// The `source` of an [`Error::IndexHttpFailed`] that refused a body for passing its size cap.
+#[derive(Debug)]
+pub(crate) struct BodyOverCap(pub(crate) String);
+
+impl std::fmt::Display for BodyOverCap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for BodyOverCap {}
+
+impl Error {
+    /// Whether the transport refused a body for passing its size cap.
+    pub(crate) fn is_body_over_cap(&self) -> bool {
+        matches!(self, Self::IndexHttpFailed { source, .. } if source.downcast_ref::<BodyOverCap>().is_some())
     }
 }
 
@@ -449,6 +513,25 @@ fn http_failure(error: &Error, [transient, failed]: [Row; 2]) -> Pick<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_url_carrying_variant_never_prints_userinfo_or_a_query() {
+        let url = "https://user:secret@idx.test/c/index.json?token=hunter2";
+        let absent = Error::CatalogDocumentAbsent {
+            index_source: "ocx.sh".to_string(),
+            url: url.to_string(),
+        };
+        let not_in_index = Error::NotInIndex {
+            identifier: "ocx.sh/cmake".to_string(),
+            namespace: "ocx.sh".to_string(),
+            base_url: url.to_string(),
+        };
+        for error in [absent, not_in_index] {
+            let text = error.to_string();
+            assert!(!text.contains("secret") && !text.contains("hunter2"), "{text}");
+            assert!(text.contains("https://***@idx.test/c/index.json?***"), "{text}");
+        }
+    }
 
     /// The picker is wired to two arms only; the fallback arm answers the declared row instead of
     /// chaining back into the error it was handed, which would classify it again.

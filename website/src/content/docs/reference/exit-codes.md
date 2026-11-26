@@ -201,8 +201,11 @@ Input data is malformed or fails verification.
 | `extra_ca_certs_not_utf8` | The extra CA bundle is not UTF-8 and cannot be persisted |
 | `extra_ca_file_invalid` | The extra CA bundle file holds no usable certificate |
 | `feature_mismatch` | The package needs a platform feature this host lacks |
+| `index_catalog_rollback` | The index catalog is older than one already verified |
 | `index_dispatch_digest_mismatch` | A dispatch object does not hash to the digest its root claims |
+| `index_root_digest_mismatch` | A package root differs from the digest its signed catalog lists |
 | `index_serialization` | An index document could not be serialized |
+| `index_signature_invalid` | The index catalog's signature does not verify |
 | `integration_namespace_invalid` | An integration key is invalid |
 | `integration_too_large` | An integrations payload exceeds its size limit |
 | `integrations_too_large` | A package's integrations exceed the per-package size limit |
@@ -451,6 +454,7 @@ The operation was refused for lack of permission.
 | `forge_push_refused` | The forge refused the push |
 | `identity_mismatch` | The certificate identity does not match the required signer |
 | `identity_token_file_permissive` | The identity token file is readable by group or other |
+| `index_publisher_mismatch` | The index catalog is signed by a signer that is not trusted |
 | `issuer_mismatch` | The certificate OIDC issuer does not match the required issuer |
 | `oidc_pre_check_failed` | The OIDC token failed a client-side check before reaching the certificate authority |
 | `permission_denied` | The operating system refused access to a file or directory |
@@ -487,6 +491,9 @@ Configuration is invalid or incomplete.
 | `forbidden_registry_target` | The rewritten registry resolves into a forbidden address range |
 | `fulcio_bad_request` | The certificate authority rejected the signing request |
 | `group_holds_direct_binding` | A group table holds a binding outside its tools table |
+| `index_catalog_through_mirror` | The signed index catalog cannot be checked through a registry mirror, so index_signature enforce has nothing to check |
+| `index_publishers_invalid` | An index_publishers entry is malformed |
+| `index_publishers_missing` | Index signature enforcement is on with no publishers to check against |
 | `index_source_not_published` | The registry is not a published index source, so it has no catalog to regenerate |
 | `invalid_auth_type` | The configured authentication type is not recognized |
 | `invalid_env` | An OCX environment variable holds a value its declaration refuses |
@@ -536,6 +543,10 @@ Configuration is invalid or incomplete.
 | `session_path_not_utf8` | A session PATH entry is not valid UTF-8 |
 | `session_path_unencodable` | A session PATH entry contains a character the host format cannot store |
 | `shell_section_in_project` | ocx.toml declares a [shell] section, which only config.toml may hold |
+| `sigstore_authority_invalid` | A Sigstore authority is not a valid host and port |
+| `sigstore_rekor_url_missing` | A Sigstore table has no rekor_url to upload a signature to |
+| `sigstore_table_key_mismatch` | A Sigstore table's fulcio_url names another authority than its key |
+| `sigstore_trusted_root_missing` | A private Sigstore instance has no trusted root configured |
 | `ssrf_forbidden_target` | A registry host resolves to an address outside the trusted set |
 | `system_config_invalid` | The system-wide config file is unusable |
 | `telemetry_section_in_project` | ocx.toml declares a [telemetry] section, which only config.toml may hold |
@@ -560,6 +571,7 @@ Configuration is invalid or incomplete.
 | `trust_policy_invalid` | A trust policy entry is malformed |
 | `trust_root_load` | Trust material failed to load |
 | `trust_root_unavailable` | The trust root could not be loaded |
+| `trust_sigstore_retired` | A config file declares the retired [trust.sigstore] table |
 | `trusted_root_invalid` | The named file is not a usable Sigstore trusted root |
 | `unknown_group_section` | A group table holds an unknown key |
 | `unsupported_declaration_hash_version` | ocx.lock records a declaration hash version this build does not understand |
@@ -585,6 +597,9 @@ A named package, tag, file or resource does not exist.
 | `dependency_not_found` | A dependency is not in the selected index |
 | `export_not_found` | The export directory lacks something that was asked for |
 | `index_manifest_not_found` | The registry has no manifest for a tag the index update walked |
+| `index_package_not_in_catalog` | The signed catalog lists no entry for the package |
+| `index_root_not_found` | A package the signed catalog lists is not served |
+| `index_signature_not_found` | The index serves no signature for its catalog |
 | `managed_config_input_not_found` | A file the managed-config payload names does not exist |
 | `managed_config_source_not_found` | The registry has no managed-config package at the configured source |
 | `manifest_not_found` | The registry has no such manifest |
@@ -633,6 +648,7 @@ A local policy or safeguard refused the operation; loosen the flag or pass --for
 | --- | --- |
 | `credential_helper_not_installed` | The credential helper is not installed, and an OCX started by a credential helper never downloads |
 | `frozen_refused` | The verb discovers new digests, which frozen mode forbids |
+| `index_catalog_expired` | The index catalog's validity window has ended |
 | `index_resolution_blocked` | A local policy refused resolving through the index |
 | `no_verify_refused` | --no-verify was refused because the system config requires signatures |
 | `offline_attest_refused` | Attaching was refused because offline mode is on |
@@ -655,6 +671,7 @@ The operation as requested is not supported or not enabled by this registry, for
 | Slug | Meaning |
 | --- | --- |
 | `forge_capability_unavailable` | The forge or project lacks a capability the transport needs |
+| `index_publishers_unrecognized` | No index publisher entry is of a kind this build understands |
 | `publishers_unrecognized` | The index lists publishers only a newer OCX understands |
 | `referrers_unsupported` | The registry supports neither the OCI Referrers API nor a referrers fallback tag |
 | `registry_delete_unsupported` | The registry API cannot delete tags; on ghcr.io, `ocx package prune --forge github` deletes them |

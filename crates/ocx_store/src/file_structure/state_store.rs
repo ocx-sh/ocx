@@ -212,6 +212,14 @@ impl StateStore {
         self.update_check_dir().join(slug)
     }
 
+    /// Highest catalog `expires` a verified index source has served, one file per source namespace.
+    ///
+    /// Keyed by the namespace's sha256, not a slug: a lossy slug lets two registries share a record.
+    pub fn index_catalog(&self, namespace: &str) -> PathBuf {
+        let key = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(namespace.as_bytes()));
+        self.root.join("index_catalog").join(format!("{key}.json"))
+    }
+
     /// Drift-notice throttle marker for the project toolchain at the canonical `project_dir`, keyed as
     /// `state/projects/<key>/` is; write it only through [`Self::touch`].
     ///
@@ -423,6 +431,16 @@ mod tests {
     fn update_check_dir_is_rooted_under_state() {
         let store = StateStore::new("/ocx/state");
         assert_eq!(store.update_check_dir(), PathBuf::from("/ocx/state/update-check"));
+    }
+
+    #[test]
+    fn index_catalog_file_is_one_json_per_namespace_and_never_shared() {
+        let store = StateStore::new("/ocx/state");
+        let path = store.index_catalog("index.ocx.sh");
+        assert_eq!(path.parent(), Some(std::path::Path::new("/ocx/state/index_catalog")));
+        assert_eq!(path.extension().and_then(|e| e.to_str()), Some("json"));
+        // Namespaces a slug would fold together keep their own record.
+        assert_ne!(store.index_catalog("h.example:81"), store.index_catalog("h.example_81"));
     }
 
     /// The state file for `ocx.sh/ocx/cli` must be rooted under `update-check/`

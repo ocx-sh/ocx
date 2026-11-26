@@ -662,9 +662,9 @@ def signing(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, list[
     (`OCX_TEST_FULCIO_PORT` and friends). The docs page carries the concrete
     values.
 
-    The identity token arrives as `OCX_IDENTITY_TOKEN` and the self-hosted CA
-    as `OCX_SIGSTORE_TRUSTED_ROOT` — the same two channels a CI job uses, and the
-    reason the cast's sign and verify lines carry neither flag.
+    The identity token arrives as `OCX_IDENTITY_TOKEN` and the CA as
+    `OCX_SIGSTORE_TRUSTED_ROOT`, which only verify and sbom read; sign and attest
+    need no root, and no cast line installs, so `config.toml` carries none.
 
     The `[[trust.policy]]` written here is what lets the cast's verify line omit
     `--certificate-identity` / `--certificate-oidc-issuer`; the cast `cat`s the

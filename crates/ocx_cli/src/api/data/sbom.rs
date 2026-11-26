@@ -79,6 +79,8 @@ pub struct ListingSummary {
 /// One verified attestation.
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct SbomEntry {
+    /// The package whose attestation this is.
+    pub package: ocx_oci::PackageRef,
     /// predicateType. Read out of the **signed** payload when `verified`;
     /// derived from the referrer's `artifactType`
     /// otherwise, since an unsigned referrer states its type nowhere else.
@@ -154,6 +156,8 @@ impl From<ocx_sign::sbom::SbomSummary> for SbomSummaryOut {
 /// One candidate that was examined and refused.
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct RefusedEntry {
+    /// The package whose candidate was refused.
+    pub package: ocx_oci::PackageRef,
     /// The referrer's digest as the registry listed it. Absent when no
     /// well-formed digest names the candidate: a budget-stop row, or a
     /// registry listing a malformed digest.
@@ -291,6 +295,10 @@ mod tests {
     use super::*;
 
     /// A full-length sha256 digest of one repeated hex character.
+    fn package() -> ocx_oci::PackageRef {
+        ocx_oci::PackageRef::parse_with_default_registry("ocx.sh/tool:1", "ocx.sh").expect("a valid identifier")
+    }
+
     fn digest(fill: char) -> ocx_oci::Digest {
         ocx_oci::Digest::Sha256(fill.to_string().repeat(64))
     }
@@ -301,6 +309,7 @@ mod tests {
 
     fn entry(identity: &str) -> SbomEntry {
         SbomEntry {
+            package: package(),
             predicate_type: "https://cyclonedx.org/bom".into(),
             verified: true,
             shadowed: false,
@@ -316,6 +325,7 @@ mod tests {
     /// The unsigned twin: same document, nothing vouching for it.
     fn unverified_entry(referrer_digest: ocx_oci::Digest) -> SbomEntry {
         SbomEntry {
+            package: package(),
             predicate_type: "https://cyclonedx.org/bom".into(),
             verified: false,
             shadowed: false,
@@ -405,6 +415,7 @@ mod tests {
         }
 
         let shadowed = SbomEntry {
+            package: package(),
             shadowed: true,
             ..entry("you@example.com")
         };
@@ -421,6 +432,7 @@ mod tests {
     #[test]
     fn a_shadowed_document_leaves_the_table_and_stays_in_json() {
         let superseded = SbomEntry {
+            package: package(),
             shadowed: true,
             referrer_digest: digest('d'),
             ..entry("you@example.com")
@@ -468,6 +480,7 @@ mod tests {
         let report = SbomListingReport::new(
             ListingVerification::Verified,
             vec![SbomEntry {
+                package: package(),
                 subject_digest: ocx_oci::Digest::try_from(subject.as_str()).expect("digest"),
                 ..entry("you@example.com")
             }],
@@ -487,6 +500,7 @@ mod tests {
 
     fn refusal(referrer_digest: Option<ocx_oci::Digest>, reason: &str) -> RefusedEntry {
         RefusedEntry {
+            package: package(),
             referrer_digest,
             reason: reason.into(),
             reason_kind: "payload_type_unsupported",
@@ -552,13 +566,13 @@ mod tests {
             json,
             [
                 r#"{"summary":{"status":"partial_failure","verification":"verified","total":3,"verified":1,"unverified":0,"refused":2},"#,
-                r#""attestations":[{"predicate_type":"https://cyclonedx.org/bom","verified":true,"shadowed":false,"#,
+                r#""attestations":[{"package":"ocx.sh/tool:1","predicate_type":"https://cyclonedx.org/bom","verified":true,"shadowed":false,"#,
                 &format!(r#""subject_digest":"{a}","referrer_digest":"{b}","certificate_identity":"you@example.com","#),
                 r#""certificate_oidc_issuer":"https://token.actions.githubusercontent.com","#,
                 r#""signed_at":"2026-08-19T10:00:00Z"}],"#,
-                &format!(r#""refused":[{{"referrer_digest":"{c}","reason":"payload type unsupported","#),
+                &format!(r#""refused":[{{"package":"ocx.sh/tool:1","referrer_digest":"{c}","reason":"payload type unsupported","#),
                 r#""reason_kind":"payload_type_unsupported"},"#,
-                r#"{"reason":"budget exhausted","reason_kind":"payload_type_unsupported"}]}"#,
+                r#"{"package":"ocx.sh/tool:1","reason":"budget exhausted","reason_kind":"payload_type_unsupported"}]}"#,
             ]
             .concat(),
         );

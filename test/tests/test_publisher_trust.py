@@ -29,6 +29,9 @@ from tests.fixtures import cosign
 from tests.fixtures.sigstore_stack import SigstoreStack
 from tests.test_attest import cyclonedx_predicate
 
+# The registry routed to the fixture index sets `index_signature = "off"`: this module does not test the
+# catalog signature check (test_index_signature.py does), so it expects no signature request and no WARN.
+
 KEY_PASSWORD = "ocxtest-publisher"
 SKIPPED_WARNING = "signature verification skipped for policy-covered package(s) via --no-verify / OCX_NO_VERIFY"
 BAD_IDENTITY = "not-a-listed-publisher@example.com"
@@ -110,7 +113,7 @@ def configure(
 ) -> None:
     """Write `config.toml`: the `ocx.sh` index source, an optional `signatures`, an operator policy."""
     host = ocx.registry.split(":", 1)[0]
-    text = f'[registries."ocx.sh"]\nindex = "{server.base_url}"\ntrusted_hosts = ["{host}"]\n'
+    text = f'[registries."ocx.sh"]\nindex = "{server.base_url}"\nindex_signature = "off"\ntrusted_hosts = ["{host}"]\n'
     if signatures is not None:
         text += f'signatures = "{signatures}"\n'
     text += policy
@@ -163,8 +166,15 @@ def write_root(
 
 
 def trust_env(stack: SigstoreStack) -> dict[str, str]:
-    """Pin the local stack's Rekor key and CA; no Sigstore-services request is possible."""
+    """Pin the local stack's Rekor key and CA for `package verify` / `package sbom`, the only readers of the variable."""
     return {"OCX_SIGSTORE_TRUSTED_ROOT": str(stack.trusted_root_json)}
+
+
+def seed_root(ocx: OcxRunner, stack: SigstoreStack) -> None:
+    """Install-time verification reads the public instance's root from `$OCX_HOME/sigstore/trusted-root.json`."""
+    target = ocx.ocx_home / "sigstore" / "trusted-root.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(stack.trusted_root_json.read_bytes())
 
 
 #: Everything that is not the loopback registry or index is unreachable, so a
@@ -211,10 +221,11 @@ def install(
     ocx: OcxRunner, ref: str, *, stack: SigstoreStack | None = None, flags: tuple[str, ...] = (),
     env: dict[str, str] | None = None, log_level: str | None = None, verb: str = "install",
 ) -> subprocess.CompletedProcess[str]:
-    overlay = {**(trust_env(stack) if stack else {}), **(env or {})}
+    if stack:
+        seed_root(ocx, stack)
     return ocx.run(
         "package", verb, "-p", current_platform(), *flags, ref,
-        check=False, env_overlay=overlay, log_level=log_level,
+        check=False, env_overlay=env or {}, log_level=log_level,
     )
 
 
@@ -222,10 +233,11 @@ def exec_hello(
     ocx: OcxRunner, ref: str, *, stack: SigstoreStack | None = None, flags: tuple[str, ...] = (),
     env: dict[str, str] | None = None, fmt: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    overlay = {**(trust_env(stack) if stack else {}), **(env or {})}
+    if stack:
+        seed_root(ocx, stack)
     return ocx.run(
         "package", "exec", "-p", current_platform(), *flags, ref, "--", "hello",
-        format=fmt, check=False, env_overlay=overlay,
+        format=fmt, check=False, env_overlay=env or {},
     )
 
 
@@ -382,7 +394,7 @@ def test_s006_key_publisher_installs_with_sigstore_unreachable_and_no_trust_root
     d = publish(ocx, unique_repo, tmp_path, index_server, [key_a.entry])
     sign_key(ocx, key_a, d.pkg)
 
-    result = install(ocx, d.logical, env=SIGSTORE_UNREACHABLE)  # no OCX_SIGSTORE_TRUSTED_ROOT
+    result = install(ocx, d.logical, env=SIGSTORE_UNREACHABLE)  # no trust root in the home
     assert result.returncode == 0, result.stderr
     assert_installed(ocx)
 
@@ -578,7 +590,7 @@ def test_s010_a_lock_pinned_exec_of_an_installed_declared_package_makes_no_index
     for env in ({"OCX_FROZEN": "1"}, {"OCX_OFFLINE": "1"}):
         result = subprocess.run(
             [str(ocx.binary), "exec", "--", "hello"], cwd=project, capture_output=True, text=True,
-            env={**ocx.env, **trust_env(sigstore_stack), **env}, stdin=subprocess.DEVNULL, check=False,
+            env={**ocx.env, **env}, stdin=subprocess.DEVNULL, check=False,
         )
         assert result.returncode == 0, f"{env}: {result.stderr}"
         assert index_server.requests == [], f"{env}: lock-pinned exec hit the index"

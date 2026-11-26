@@ -8,8 +8,8 @@ use std::path::PathBuf;
 use super::runtime::{Error, Ocx, Outcome, Raw};
 use super::types::{
     About, AnnounceReport, Catalog, ClaimReport, Clean, ConfigSetupData, ConfigTestData, ConfigUpdateData, CopyReport,
-    ExportReport, ImportReport, InspectReport, Installs, LocatedPaths, LockReport, LoginResult, LogoutResult,
-    PackageCascadeCheck, PackageCascadeRepair, PackageDescriptions, PackageReceipt, PatchFreezeReport,
+    ExportReport, ImportReport, IndexSignReport, InspectReport, Installs, LocatedPaths, LockReport, LoginResult,
+    LogoutResult, PackageCascadeCheck, PackageCascadeRepair, PackageDescriptions, PackageReceipt, PatchFreezeReport,
     PatchPublishReport, PatchSyncReport, PatchWhyReport, Paths, PruneOutcome, PushReport, RegenerateReport, Removed,
     SelfSetupData, StatusReport, Tags, VerificationReport,
 };
@@ -438,6 +438,10 @@ pub struct IndexCatalogArgs {
     pub with_tags: bool,
     /// Registries to list repositories from (defaults to OCX_DEFAULT_REGISTRY)
     pub registries: Vec<String>,
+    /// Check the signed index catalog even when `OCX_NO_VERIFY` is set
+    pub verify: bool,
+    /// Skip the signed index catalog check for this run
+    pub no_verify: bool,
 }
 
 impl IndexCatalogArgs {
@@ -445,6 +449,8 @@ impl IndexCatalogArgs {
     pub fn push(&self, argv: &mut Argv) {
         argv.switch("with-tags", self.with_tags);
         argv.positional("registries", &self.registries, Presence::Optional, Hyphen::Refuse);
+        argv.switch("verify", self.verify);
+        argv.switch("no-verify", self.no_verify);
     }
 }
 
@@ -458,6 +464,10 @@ pub struct IndexListArgs {
     pub variants: bool,
     /// Package identifiers to list the available versions for
     pub packages: Vec<String>,
+    /// Check the signed index catalog even when `OCX_NO_VERIFY` is set
+    pub verify: bool,
+    /// Skip the signed index catalog check for this run
+    pub no_verify: bool,
 }
 
 impl IndexListArgs {
@@ -466,6 +476,8 @@ impl IndexListArgs {
         argv.switch("platforms", self.platforms);
         argv.switch("variants", self.variants);
         argv.positional("packages", &self.packages, Presence::Required, Hyphen::Refuse);
+        argv.switch("verify", self.verify);
+        argv.switch("no-verify", self.no_verify);
     }
 }
 
@@ -483,6 +495,60 @@ impl IndexRegenerateArgs {
     }
 }
 
+/// The arguments of `ocx index sign`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct IndexSignArgs {
+    /// Registry the index serves, for example `ocx.sh`
+    pub registry: String,
+    /// Days until the signed catalog expires (0-366)
+    pub expires_in_days: Option<i64>,
+    /// Fulcio CA endpoint (the keyless certificate issuer)
+    pub fulcio_url: Option<String>,
+    /// Rekor transparency-log endpoint
+    pub rekor_url: Option<String>,
+    /// Read the OIDC identity token from this file (highest precedence)
+    pub identity_token_file: Option<PathBuf>,
+    /// Read the OIDC identity token from stdin (second precedence)
+    pub identity_token_stdin: Option<Secret>,
+    /// Suppress the interactive browser OAuth fallback (CI / headless)
+    pub no_tty: bool,
+    /// Sign or verify with a key pair instead of keyless Sigstore
+    pub key: Option<String>,
+    /// Record the signature in the Rekor transparency log
+    pub rekor_upload: bool,
+    /// Skip the Rekor entry
+    pub no_rekor_upload: bool,
+    /// Index directory holding `c/index.json`
+    pub dir: PathBuf,
+}
+
+impl IndexSignArgs {
+    /// Appends the arguments to `argv`.
+    pub fn push(&self, argv: &mut Argv) {
+        argv.flag("registry", [&self.registry], Presence::Required, &[]);
+        argv.flag(
+            "expires-in-days",
+            self.expires_in_days.map(|number| number.to_string()),
+            Presence::Optional,
+            &[],
+        );
+        argv.flag("fulcio-url", &self.fulcio_url, Presence::Optional, &[]);
+        argv.flag("rekor-url", &self.rekor_url, Presence::Optional, &[]);
+        argv.flag(
+            "identity-token-file",
+            &self.identity_token_file,
+            Presence::Optional,
+            &[],
+        );
+        argv.secret("identity-token-stdin", self.identity_token_stdin.as_ref());
+        argv.switch("no-tty", self.no_tty);
+        argv.flag("key", &self.key, Presence::Optional, &[]);
+        argv.switch("rekor-upload", self.rekor_upload);
+        argv.switch("no-rekor-upload", self.no_rekor_upload);
+        argv.positional("dir", [&self.dir], Presence::Required, Hyphen::Refuse);
+    }
+}
+
 /// The arguments of `ocx index sync`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct IndexSyncArgs {
@@ -491,6 +557,10 @@ pub struct IndexSyncArgs {
     /// Print the packages this would refresh and refresh none; nothing is written, not even
     /// `config.json`, and no `\[patches\]` sync runs
     pub dry_run: bool,
+    /// Check the signed index catalog even when `OCX_NO_VERIFY` is set
+    pub verify: bool,
+    /// Skip the signed index catalog check for this run
+    pub no_verify: bool,
 }
 
 impl IndexSyncArgs {
@@ -498,6 +568,8 @@ impl IndexSyncArgs {
     pub fn push(&self, argv: &mut Argv) {
         argv.positional("registries", &self.registries, Presence::Required, Hyphen::Refuse);
         argv.switch("dry-run", self.dry_run);
+        argv.switch("verify", self.verify);
+        argv.switch("no-verify", self.no_verify);
     }
 }
 
@@ -506,12 +578,18 @@ impl IndexSyncArgs {
 pub struct IndexUpdateArgs {
     /// Packages to refresh; a bare name resolves against the default registry
     pub packages: Vec<String>,
+    /// Check the signed index catalog even when `OCX_NO_VERIFY` is set
+    pub verify: bool,
+    /// Skip the signed index catalog check for this run
+    pub no_verify: bool,
 }
 
 impl IndexUpdateArgs {
     /// Appends the arguments to `argv`.
     pub fn push(&self, argv: &mut Argv) {
         argv.positional("packages", &self.packages, Presence::Required, Hyphen::Refuse);
+        argv.switch("verify", self.verify);
+        argv.switch("no-verify", self.no_verify);
     }
 }
 
@@ -1565,6 +1643,12 @@ pub struct PackageSbomArgs {
     pub certificate_identity: Option<String>,
     /// Expected certificate OIDC issuer (exact match)
     pub certificate_oidc_issuer: Option<String>,
+    /// Sigstore instance the signer used, named by the host of its Fulcio (`host\[:port\]`)
+    pub sigstore: Option<String>,
+    /// Cover the named package and every package in its dependency closure
+    pub dependencies: bool,
+    /// Cover the named package alone
+    pub no_dependencies: bool,
     /// Sign or verify with a key pair instead of keyless Sigstore
     pub key: Option<String>,
     /// Trust-root override: a Sigstore trusted-root JSON (or a directory holding
@@ -1605,6 +1689,9 @@ impl PackageSbomArgs {
             Presence::Optional,
             &[],
         );
+        argv.flag("sigstore", &self.sigstore, Presence::Optional, &[]);
+        argv.switch("dependencies", self.dependencies);
+        argv.switch("no-dependencies", self.no_dependencies);
         argv.flag("key", &self.key, Presence::Optional, &[]);
         argv.flag("sigstore-trusted-root", &self.trusted_root, Presence::Optional, &[]);
         argv.flag("rekor-url", &self.rekor_url, Presence::Optional, &[]);
@@ -1802,6 +1889,8 @@ pub struct PackageVerifyArgs {
     pub certificate_identity: Option<String>,
     /// Expected certificate OIDC issuer (exact match)
     pub certificate_oidc_issuer: Option<String>,
+    /// Sigstore instance the signer used, named by the host of its Fulcio (`host\[:port\]`)
+    pub sigstore: Option<String>,
     /// Sign or verify with a key pair instead of keyless Sigstore
     pub key: Option<String>,
     /// Rekor transparency-log endpoint
@@ -1840,6 +1929,7 @@ impl PackageVerifyArgs {
             Presence::Optional,
             &[],
         );
+        argv.flag("sigstore", &self.sigstore, Presence::Optional, &[]);
         argv.flag("key", &self.key, Presence::Optional, &[]);
         argv.flag("rekor-url", &self.rekor_url, Presence::Optional, &[]);
         argv.switch("attestation", self.attestation);
@@ -2526,6 +2616,15 @@ impl Ocx {
         let mut argv = self.argv(&["index", "regenerate"]);
         args.push(&mut argv);
         self.call("index regenerate", "RegenerateReport", argv)
+    }
+
+    /// Sign a local index catalog
+    ///
+    /// Runs `ocx index sign`.
+    pub fn index_sign(&self, args: &IndexSignArgs) -> Result<IndexSignReport, Error> {
+        let mut argv = self.argv(&["index", "sign"]);
+        args.push(&mut argv);
+        self.call("index sign", "IndexSignReport", argv)
     }
 
     /// Refresh every package one or more registries' catalogs list

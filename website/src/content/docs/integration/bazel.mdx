@@ -90,7 +90,7 @@ Bazel runs a repository rule from its own working directory, with its own enviro
 - Registry traffic: [`OCX_MIRRORS`][env-mirrors], [`OCX_INSECURE_REGISTRIES`][env-insecure] and the `OCX_AUTH_<REGISTRY>_*` variables from [Authenticate to GHCR and ECR][p-istry-auth-recipes-auth-method]. Bazel cannot enumerate the auth variables, so run `bazel fetch --force` after you change one.
 - Resolution: `OCX_INDEX`, `OCX_OFFLINE`, `OCX_FROZEN`, `OCX_REMOTE`, `OCX_JOBS` and `OCX_DEFAULT_REGISTRY`.
 - Configuration: `OCX_CONFIG`, `OCX_NO_CONFIG`, `OCX_MANAGED_CONFIG` and `OCX_PATCHES`.
-- Trust: `OCX_SIGSTORE_TRUSTED_ROOT` and `OCX_EXTRA_CA_CERTS`. The second one is how a [corporate proxy CA][p-proxy-and-ca-ca-env] reaches Bazel.
+- Trust: `OCX_EXTRA_CA_CERTS`, which is how a [corporate proxy CA][p-proxy-and-ca-ca-env] reaches Bazel.
 
 `rules_ocx` does not forward `OCX_NO_VERIFY` or `OCX_ALLOW_YANKED` to a fetch. A build that must skip verification or accept a yanked package says so in `MODULE.bazel` with `ocx.policy(...)`, so an exported variable cannot weaken a fetch silently.
 

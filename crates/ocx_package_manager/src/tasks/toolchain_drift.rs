@@ -49,7 +49,7 @@ impl PackageManager {
     /// deadline is an instant so several toolchains share one budget ([`DRIFT_DEADLINE`]).
     /// Digest-pinned bindings are skipped; fetches run at most 8 at a time.
     pub async fn toolchain_drift(&self, bound: &[BoundTool], deadline: Instant) -> Vec<DriftedTool> {
-        probe_drift(&self.index().remote_view(), bound, deadline).await
+        probe_drift(&self.index().remote_view().quiet_view(), bound, deadline).await
     }
 }
 

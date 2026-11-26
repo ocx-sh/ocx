@@ -582,11 +582,11 @@ Distinct from `OCX_NO_CONFIG_REFRESH`, which silences only the managed-config ti
 
 ## `OCX_NO_VERIFY` {#ocx-no-verify}
 
-Boolean — skip the policy-gated auto-verify on install/pull; `--no-verify` wins. Forwarded to child OCX.
+Boolean — skip the policy-gated auto-verify and the signed index catalog check; `--verify` and `--no-verify` win. Forwarded to child OCX.
 
-Skips the policy-gated auto-verify on `install`, `pull` and every command that auto-installs on demand (`exec`, `env`, `package exec`, `package env`, patch discovery). Only `install` and `pull` carry the `--verify` / `--no-verify` flag, which outranks this variable.
+Skips the policy-gated auto-verify on `install`, `pull` and every command that auto-installs on demand (`exec`, `env`, `package exec`, `package env`, patch discovery), and the signature check of the index catalog of every index source a command reads. `install`, `pull`, `index update`, `index sync`, `index catalog` and `index list` carry the `--verify` / `--no-verify` flag.
 
-A skipped package that publishers or a policy cover prints one `warning:` line per invocation.
+The flag outranks this variable for the one run, the index catalog check included. A skipped package that publishers or a policy cover prints one `warning:` line per invocation.
 
 With no publishers listed in the index and no `[[trust.policy]]` covering a package, verification does not run regardless.
 
@@ -736,15 +736,16 @@ Stripped from plugin-dispatched children and written environments; a key in any 
 
 ## `OCX_SIGSTORE_TRUSTED_ROOT` {#ocx-sigstore-trusted-root}
 
-Path (bare or `file://`) to a Sigstore trusted-root JSON document, or a directory holding `trusted_root.json`, that `ocx package verify` loads its trust material from.
+Sigstore trusted root for `ocx package verify` and `ocx package sbom`, the only commands that read it.
 
-The `--sigstore-trusted-root` flag takes precedence. The root must carry the Fulcio CAs, the CT log keys and the
-pinned Rekor key together; CA anchors alone are refused with exit 78.
+The environment form of `--sigstore-trusted-root`; the flag wins. A path (bare or `file://`) to a trusted-root JSON document, or a directory holding `trusted_root.json`.
 
-Bypasses the TUF fetch, so keeping it current is the operator's job.
+It replaces the root of the one instance the run selected: the instance `--sigstore` names, else the public instance. The root must carry the Fulcio CAs, the CT log keys and the pinned Rekor key together; CA anchors alone are refused with exit 78.
 
-With `OCX_OFFLINE` it is the fully offline path. Ladder after the flag: this variable,
-`[trust.sigstore]`, `$OCX_HOME/sigstore/trusted-root.json`, the cache, then TUF.
+It bypasses TUF, so keeping it current is the operator's job.
+
+Install-time verification and the index catalog check take each instance's root from its
+`[sigstore."<host>"]` table, the convention file, the cache, then TUF.
 
 - Audience: public
 - Value: `path`

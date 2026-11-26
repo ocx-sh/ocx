@@ -6,7 +6,7 @@ A signed package is exported with its referrers and imported into an empty home
 whose ``[[trust.policy]]`` covers it, with every registry request refused.
 Verification is satisfied from the exported referrers; an export made with
 ``--no-referrers`` carries none, so import fails. The home pins the stack's
-Rekor key through ``OCX_SIGSTORE_TRUSTED_ROOT``: offline verify cannot fetch one.
+Rekor key as ``$OCX_HOME/sigstore/trusted-root.json``: offline verify cannot fetch one.
 """
 
 from __future__ import annotations
@@ -82,15 +82,10 @@ def _write_policy(home: OcxRunner, scope: str, identity: str, issuer: str) -> No
 def _import(
     home: OcxRunner, stack: SigstoreStack, directory: Path
 ) -> subprocess.CompletedProcess[str]:
-    return _run(
-        home,
-        "package",
-        "import",
-        "-p",
-        current_platform(),
-        str(directory),
-        extra_env={"OCX_SIGSTORE_TRUSTED_ROOT": str(stack.trusted_root_json)},
-    )
+    root = home.ocx_home / "sigstore" / "trusted-root.json"
+    root.parent.mkdir(parents=True, exist_ok=True)
+    root.write_bytes(stack.trusted_root_json.read_bytes())
+    return _run(home, "package", "import", "-p", current_platform(), str(directory))
 
 
 def test_import_verifies_from_carried_referrers(

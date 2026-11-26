@@ -27,6 +27,24 @@ pub fn serialize_catalog(catalog: &CatalogDocument) -> Vec<u8> {
     python_json(catalog)
 }
 
+/// [`serialize_catalog`] plus the members the catalog schema does not model, after the known ones.
+///
+/// For a signer that rewrites a catalog it did not author: a member this version does not know must
+/// survive the rewrite. A key in `extra` that the schema models would be written twice; the caller strips those.
+pub fn serialize_catalog_with_extra_members(
+    catalog: &CatalogDocument,
+    extra: &serde_json::Map<String, serde_json::Value>,
+) -> Vec<u8> {
+    #[derive(Serialize)]
+    struct WithExtra<'a> {
+        #[serde(flatten)]
+        catalog: &'a CatalogDocument,
+        #[serde(flatten)]
+        extra: &'a serde_json::Map<String, serde_json::Value>,
+    }
+    python_json(&WithExtra { catalog, extra })
+}
+
 /// Byte-exact `config.json` serialization (`render.py`'s config renderer), except
 /// that OCX omits the `name_segments` it cannot derive.
 pub fn serialize_config(config: &IndexFormatConfig) -> Vec<u8> {
@@ -187,6 +205,34 @@ mod tests {
             String::from_utf8(bytes).expect("a catalog of ASCII package ids is ASCII"),
             "{\n  \"format_version\": 1,\n  \"packages\": {\n    \"kitware/cmake\": \"sha256:1111\",\n    \"stable/tool\": \"sha256:2222\"\n  }\n}\n"
         );
+    }
+
+    /// `expires` is written after `packages` in whole-second `Z` form, and read back unchanged.
+    #[test]
+    fn catalog_expires_round_trips_through_the_writer() {
+        let mut catalog = CatalogDocument::new(BTreeMap::from([("a/b".to_string(), "sha256:1".to_string())]));
+        catalog.expires = Some(
+            chrono::DateTime::parse_from_rfc3339("2027-01-02T03:04:05Z")
+                .expect("fixture parses")
+                .with_timezone(&chrono::Utc),
+        );
+        let bytes = serialize_catalog(&catalog);
+        assert_eq!(
+            String::from_utf8(bytes.clone()).expect("ASCII"),
+            "{\n  \"format_version\": 1,\n  \"packages\": {\n    \"a/b\": \"sha256:1\"\n  },\n  \"expires\": \"2027-01-02T03:04:05Z\"\n}\n"
+        );
+        let parsed: CatalogDocument = serde_json::from_slice(&bytes).expect("written catalog parses");
+        assert_eq!(parsed.expires, catalog.expires);
+        assert_eq!(serialize_catalog(&parsed), bytes);
+    }
+
+    /// A catalog written before `expires` existed re-serializes to the same bytes.
+    #[test]
+    fn catalog_without_expires_reserializes_byte_identically() {
+        let old = "{\n  \"format_version\": 1,\n  \"packages\": {\n    \"a/b\": \"sha256:1\"\n  }\n}\n";
+        let parsed: CatalogDocument = serde_json::from_str(old).expect("old catalog parses");
+        assert_eq!(parsed.expires, None);
+        assert_eq!(serialize_catalog(&parsed), old.as_bytes());
     }
 
     /// C-025 — an index with nothing published yet still emits the envelope,
@@ -354,5 +400,31 @@ mod tests {
         let text = String::from_utf8(bytes).unwrap();
         assert_eq!(text, "{\n  \"zebra\": 1,\n  \"apple\": 2\n}\n");
         assert!(text.ends_with("}\n") && !text.ends_with("\n\n"));
+    }
+
+    #[test]
+    fn catalog_extra_members_follow_the_known_ones_and_keep_their_values() {
+        let catalog = CatalogDocument::new(BTreeMap::new());
+        let extra: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(r#"{"zeta":1,"nested":{"a":{"b":[1,2]}},"alpha":"caf\u00e9"}"#).unwrap();
+        let text = String::from_utf8(serialize_catalog_with_extra_members(&catalog, &extra)).unwrap();
+        let known = String::from_utf8(serialize_catalog(&catalog)).unwrap();
+        assert!(
+            text.starts_with(known.trim_end().trim_end_matches('}').trim_end()),
+            "known members lead: {text}"
+        );
+        let reparsed: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(reparsed["zeta"], 1);
+        assert_eq!(reparsed["nested"]["a"]["b"], serde_json::json!([1, 2]));
+        assert_eq!(reparsed["alpha"], "caf\u{e9}");
+        assert!(
+            text.contains("caf\\u00e9"),
+            "the writer's ascii escaping applies: {text}"
+        );
+        assert_eq!(
+            serialize_catalog_with_extra_members(&catalog, &serde_json::Map::new()),
+            serialize_catalog(&catalog),
+            "no extras is the plain catalog, byte for byte"
+        );
     }
 }

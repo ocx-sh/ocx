@@ -87,6 +87,9 @@ from src import OcxRunner, static_index
 from src.helpers import make_package
 from src.registry import fetch_platform_manifest_digest
 
+# The registry routed to the fixture index sets `index_signature = "off"`: this module does not test the
+# catalog signature check (test_index_signature.py does), so it expects no signature request and no WARN.
+
 pytestmark = pytest.mark.command(
     "index_update",
     "index_list",
@@ -152,6 +155,7 @@ def configure_index_source(
     config_path.write_text(
         f'[registries."{namespace}"]\n'
         f'index = "{base_url}"\n'
+        f'index_signature = "off"\n'
         f'trusted_hosts = ["{registry_host}"]\n'
         f"{extra}"
     )
@@ -609,9 +613,11 @@ def test_a_fleet_snapshot_lands_every_root_and_bounds_its_fan_out(
     config_path.write_text(
         f'[registries."{NAMESPACE}"]\n'
         f'index = "{index_server.base_url}"\n'
+        f'index_signature = "off"\n'
         f'trusted_hosts = ["{registry_host}"]\n'
         f'[registries."{second}"]\n'
         f'index = "{air_gap_server.base_url}"\n'
+        f'index_signature = "off"\n'
         f'trusted_hosts = ["{registry_host}"]\n'
     )
     ocx.env["OCX_INSECURE_REGISTRIES"] = f"{ocx.registry},{index_server.host},{air_gap_server.host}"
@@ -679,9 +685,11 @@ def test_two_registries_overlap_rather_than_draining_one_at_a_time(
     config_path.write_text(
         f'[registries."{NAMESPACE}"]\n'
         f'index = "{index_server.base_url}"\n'
+        f'index_signature = "off"\n'
         f'trusted_hosts = ["{registry_host}"]\n'
         f'[registries."{second}"]\n'
         f'index = "{air_gap_server.base_url}"\n'
+        f'index_signature = "off"\n'
         f'trusted_hosts = ["{registry_host}"]\n'
     )
     ocx.env["OCX_INSECURE_REGISTRIES"] = f"{ocx.registry},{index_server.host},{air_gap_server.host}"
@@ -1308,9 +1316,11 @@ def test_one_unreachable_registry_does_not_cost_the_others_their_snapshot(
     config_path.write_text(
         f'[registries."{NAMESPACE}"]\n'
         f'index = "{index_server.base_url}"\n'
+        f'index_signature = "off"\n'
         f'trusted_hosts = ["{registry_host}"]\n'
         f'[registries."{second}"]\n'
         f'index = "{air_gap_server.base_url}"\n'
+        f'index_signature = "off"\n'
         f'trusted_hosts = ["{registry_host}"]\n'
     )
     ocx.env["OCX_INSECURE_REGISTRIES"] = f"{ocx.registry},{index_server.host},{air_gap_server.host}"
@@ -2215,8 +2225,12 @@ def test_reading_semantics_are_unchanged_by_the_sync_rework(
 
     # ── (c) `index update`'s grammar and default source ──────────────────────
     options = ocx.plain("index", "update", "-h").stdout.split("Options:", 1)[1]
-    assert sorted({word for word in options.split() if word.startswith("--")}) == ["--help"], (
-        f"`index update` takes package identifiers and no options; its help now lists: {options}"
+    assert sorted({word for word in options.split() if word.startswith("--")}) == [
+        "--help",
+        "--no-verify",
+        "--verify",
+    ], (
+        f"`index update` takes package identifiers and the catalog-check flags only; its help now lists: {options}"
     )
 
     del index_server.requests[:]

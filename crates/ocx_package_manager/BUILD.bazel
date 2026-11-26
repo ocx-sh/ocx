@@ -57,6 +57,7 @@ rust_test(
         "//test:tests/fixtures/golden/key_referrer_manifest.json",
         "//test:tests/fixtures/golden/keyless_bundle.json",
         "//test:tests/fixtures/golden/keyless_referrer_manifest.json",
+        "//test:tests/fixtures/golden/keys/cosign.key",
         "//test:tests/fixtures/golden/keys/cosign.pub",
         "//crates/ocx_project:src/config.rs",
     ],

@@ -112,6 +112,9 @@ from src.helpers import (
 from src.registry import fetch_manifest_digest, fetch_platform_manifest_digest
 from src.runner import OcxRunner, PackageInfo, current_platform
 
+# The registry routed to the fixture index sets `index_signature = "off"`: this module does not test the
+# catalog signature check (test_index_signature.py does), so it expects no signature request and no WARN.
+
 pytestmark = pytest.mark.command("exec", "toolchain_exec", "launcher*", "install")
 
 # ---------------------------------------------------------------------------
@@ -2124,6 +2127,7 @@ def test_registries_name_the_content_host_not_the_logical_namespace(
         ocx,
         f'[registries."ocx.sh"]\n'
         f'index = "{index_server.base_url}"\n'
+        f'index_signature = "off"\n'
         f'trusted_hosts = ["{ocx.registry.split(":", 1)[0]}"]\n',
     )
     ocx.env["OCX_INSECURE_REGISTRIES"] = f"{ocx.registry},{index_server.host}"

@@ -875,7 +875,7 @@ mod tests {
 
     #[test]
     fn rejected_url_echo_must_not_carry_query_or_fragment() {
-        // ERR-17: a `[trust.sigstore]` endpoint is operator config, and an
+        // ERR-17: a `[sigstore."<host>"]` endpoint is operator config, and an
         // operator's URL carries whatever the operator put in it — a bearer
         // token in the query string is the live case. The scheme rejection
         // echoes the URL back so the operator can see which entry was refused,

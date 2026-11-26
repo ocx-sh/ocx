@@ -393,7 +393,7 @@ async fn verify_keyless(
     }
 
     // The matched subset, not a boolean: the `builder` pin is decided from the policies this certificate satisfied.
-    let matched = matching_policies(&leaf_der, verify.policies)?;
+    let matched = matching_policies(&leaf_der, verify.policies, &verify.trust_root.instance())?;
 
     // Enforced here too, or a `builder`-pinned policy is silently unenforced for a keyless `.att`.
     dsse::enforce_builder_pin(&matched, &verified.attestation)?;
@@ -619,6 +619,7 @@ mod tests {
         CompiledPolicy {
             builder: None,
             backends: vec![PolicyBackend::Keyless(CompiledKeyless {
+                instance: ocx_trust::SigstoreAuthority::public(),
                 identity: Some(IdentityRule::Exact(identity.to_owned())),
                 issuer: issuer.to_owned(),
                 claims: Vec::new(),
@@ -1497,6 +1498,7 @@ mod tests {
             let policies = [CompiledPolicy {
                 builder: Some(pin.to_owned()),
                 backends: vec![PolicyBackend::Keyless(CompiledKeyless {
+                    instance: ocx_trust::SigstoreAuthority::public(),
                     identity: Some(IdentityRule::Exact(GOLDEN_IDENTITY.to_owned())),
                     issuer: GOLDEN_ISSUER.to_owned(),
                     claims: Vec::new(),

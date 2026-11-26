@@ -25,10 +25,12 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use tokio::sync::RwLock;
 
+use super::catalog_verifier::{CatalogCheck, CatalogState, CatalogVerifier, TrustFailure};
 use super::error::Result;
 use super::index_impl::DeclaredPublishers;
 use super::wire::{CatalogDocument, CatalogIndex, IndexFormatConfig, IndexRoot, RootTag, gate_format_version};
 use super::{IndexOperation, error, index_impl};
+use ocx_config::IndexSignatureMode;
 use ocx_oci::client::ReadAddressing;
 use ocx_oci::transport_policy::{self, Attempt, RetryBudget, RetryPolicy, TransportHardening};
 
@@ -49,18 +51,27 @@ const INDEX_IDLE_BOUND: std::time::Duration = std::time::Duration::from_secs(30)
 /// A backstop, not an SLA: it must not fire on any honest transfer.
 const INDEX_OUTER_CAP: std::time::Duration = std::time::Duration::from_secs(300);
 
-/// Redacts `user[:password]@` userinfo from `url`'s authority before it reaches an error or
-/// log line (CWE-532); a URL with no `://` is returned untouched.
-fn redact_url(url: &str) -> String {
+/// Redacts `user[:password]@` userinfo and any query string or fragment from `url` before it
+/// reaches an error or log line (CWE-532): either may carry a token. A URL with no `://` is
+/// returned untouched.
+///
+/// Any `@` before the first `?` or `#` closes userinfo, even past an unencoded `/` in the
+/// password: stopping at the first `/` would leave the secret in the output. A path holding
+/// an `@` is over-redacted for the same reason.
+pub(crate) fn redact_url(url: &str) -> String {
     let Some((scheme, rest)) = url.split_once("://") else {
         return url.to_string();
     };
-    let authority_end = rest.find('/').unwrap_or(rest.len());
-    let (authority, tail) = rest.split_at(authority_end);
-    match authority.rsplit_once('@') {
-        Some((_userinfo, host)) => format!("{scheme}://***@{host}{tail}"),
-        None => url.to_string(),
-    }
+    let query_start = rest.find(['?', '#']).unwrap_or(rest.len());
+    let host_start = rest[..query_start].rfind('@').map_or(0, |at| at + 1);
+    let (host_and_tail, userinfo) = (&rest[host_start..], if host_start == 0 { "" } else { "***@" });
+    let host_end = host_and_tail.find(['/', '?', '#']).unwrap_or(host_and_tail.len());
+    let (host, tail) = host_and_tail.split_at(host_end);
+    let (path, secret) = match tail.find(['?', '#']) {
+        Some(at) => (&tail[..at], "?***"),
+        None => (tail, ""),
+    };
+    format!("{scheme}://{userinfo}{host}{path}{secret}")
 }
 
 // ── HTTP transport seam ──────────────────────────────────────────────────────
@@ -88,12 +99,38 @@ pub trait IndexTransport: Send + Sync {
         self.get(url).await
     }
 
+    /// [`Self::get`] or [`Self::get_uncached`] per `freshness`, refusing a body over `cap` bytes.
+    ///
+    /// The default reads the whole body first, so a transport that can stop a stream early
+    /// overrides it: the cap bounds memory only where the bytes are counted as they arrive.
+    async fn get_capped(&self, url: &str, cap: usize, freshness: Freshness) -> Result<IndexFetch> {
+        let fetched = match freshness {
+            Freshness::Cacheable => self.get(url).await?,
+            Freshness::Revalidate => self.get_uncached(url).await?,
+        };
+        match fetched {
+            IndexFetch::Found { bytes } if bytes.len() > cap => Err(over_cap(url, cap)),
+            other => Ok(other),
+        }
+    }
+
     fn box_clone(&self) -> Box<dyn IndexTransport>;
+}
+
+/// The refusal for a body past a per-document `cap`.
+pub(crate) fn over_cap(url: &str, cap: usize) -> error::Error {
+    error::Error::IndexHttpFailed {
+        url: redact_url(url),
+        status: None,
+        source: Box::new(error::BodyOverCap(format!(
+            "response body exceeds the {cap}-byte cap for this document"
+        ))),
+    }
 }
 
 /// Whether an HTTP cache on the path may answer a request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Freshness {
+pub enum Freshness {
     Cacheable,
     Revalidate,
 }
@@ -222,7 +259,12 @@ impl ReqwestIndexTransport {
 
     /// One attempt at `url`, from dispatch through the last body byte. A retryable outcome
     /// carries its terminal value, so giving up never changes the error the caller sees.
-    async fn attempt(client: &reqwest::Client, url: &str, freshness: Freshness) -> Attempt<Result<IndexFetch>> {
+    async fn attempt(
+        client: &reqwest::Client,
+        url: &str,
+        freshness: Freshness,
+        cap: usize,
+    ) -> Attempt<Result<IndexFetch>> {
         let mut request = client.get(url);
         if freshness == Freshness::Revalidate {
             // `Pragma` for HTTP/1.0 intermediaries that ignore `Cache-Control` (RFC 9111 §5.4).
@@ -274,15 +316,14 @@ impl ReqwestIndexTransport {
 
         // Refuse a declared oversize body unread (CWE-400); not retried, the size will not change.
         if let Some(declared) = response.content_length()
-            && declared > MAX_INDEX_DOCUMENT_BYTES as u64
+            && declared > cap as u64
         {
             return Attempt::Done(Err(super::error::Error::IndexHttpFailed {
                 url: redact_url(url),
                 status: Some(status.as_u16()),
-                source: format!(
-                    "response body {declared} bytes exceeds the {MAX_INDEX_DOCUMENT_BYTES}-byte index-document cap"
-                )
-                .into(),
+                source: Box::new(super::error::BodyOverCap(format!(
+                    "response body {declared} bytes exceeds the {cap}-byte document cap"
+                ))),
             }));
         }
 
@@ -295,14 +336,13 @@ impl ReqwestIndexTransport {
                 Err(source) => return Self::transport_failure(url, Some(status.as_u16()), source),
                 Ok(None) => break,
                 Ok(Some(chunk)) => {
-                    if body.len() + chunk.len() > MAX_INDEX_DOCUMENT_BYTES {
+                    if body.len() + chunk.len() > cap {
                         return Attempt::Done(Err(super::error::Error::IndexHttpFailed {
                             url: redact_url(url),
                             status: Some(status.as_u16()),
-                            source: format!(
-                                "response body exceeds the {MAX_INDEX_DOCUMENT_BYTES}-byte index-document cap"
-                            )
-                            .into(),
+                            source: Box::new(super::error::BodyOverCap(format!(
+                                "response body exceeds the {cap}-byte document cap"
+                            ))),
                         }));
                     }
                     body.extend_from_slice(&chunk);
@@ -353,11 +393,15 @@ impl IndexTransport for ReqwestIndexTransport {
     /// Fetches `url`, retrying transient failures under [`RetryPolicy`] and the run-global
     /// [`RetryBudget`], which bounds retry volume as `outer_cap` bounds each attempt.
     async fn get(&self, url: &str) -> Result<IndexFetch> {
-        self.fetch(url, Freshness::Cacheable).await
+        self.fetch(url, Freshness::Cacheable, MAX_INDEX_DOCUMENT_BYTES).await
     }
 
     async fn get_uncached(&self, url: &str) -> Result<IndexFetch> {
-        self.fetch(url, Freshness::Revalidate).await
+        self.fetch(url, Freshness::Revalidate, MAX_INDEX_DOCUMENT_BYTES).await
+    }
+
+    async fn get_capped(&self, url: &str, cap: usize, freshness: Freshness) -> Result<IndexFetch> {
+        self.fetch(url, freshness, cap.min(MAX_INDEX_DOCUMENT_BYTES)).await
     }
 
     fn box_clone(&self) -> Box<dyn IndexTransport> {
@@ -366,7 +410,7 @@ impl IndexTransport for ReqwestIndexTransport {
 }
 
 impl ReqwestIndexTransport {
-    async fn fetch(&self, url: &str, freshness: Freshness) -> Result<IndexFetch> {
+    async fn fetch(&self, url: &str, freshness: Freshness, cap: usize) -> Result<IndexFetch> {
         // The in-process CLI seam's no-network guarantee; `false` outside tests.
         if ocx_oci::client::network_refused() {
             return Err(super::error::Error::IndexHttpFailed {
@@ -391,7 +435,7 @@ impl ReqwestIndexTransport {
                     policy.attempts
                 );
             }
-            Self::attempt(client, url, freshness).await
+            Self::attempt(client, url, freshness, cap).await
         })
         .await
     }
@@ -498,10 +542,29 @@ fn has_drive_prefix(path: &str) -> bool {
 #[derive(Default)]
 struct SourceCacheInner {
     /// repository → root, `None` for a confirmed 404, so an absent name costs one 404 per process.
-    roots: BTreeMap<String, Option<CachedRoot>>,
+    roots: BTreeMap<String, MemoizedRoot>,
     /// Set only for a served `config.json` that passed the version gate: an absent one is
     /// re-asked so a later-published config is seen, an unsupported one stays a hard error.
     config: Option<Arc<IndexFormatConfig>>,
+}
+
+/// A memoized answer and whether the catalog check judged it. The memo is shared with the
+/// unchecked clone `--no-verify` builds, so a checked read must never take an unchecked entry:
+/// it would serve a root no verified catalog vouched for.
+struct MemoizedRoot {
+    checked: bool,
+    root: Option<CachedRoot>,
+}
+
+impl SourceCacheInner {
+    /// The memoized answer a reader may take: a checked reader takes only a checked entry, an
+    /// unchecked reader takes either.
+    fn root(&self, repository: &str, checked_reader: bool) -> Option<&Option<CachedRoot>> {
+        self.roots
+            .get(repository)
+            .filter(|memo| memo.checked || !checked_reader)
+            .map(|memo| &memo.root)
+    }
 }
 
 /// One memoized root: the verbatim `p/<repo>.json` bytes beside their parse, so a first-sight
@@ -513,6 +576,9 @@ struct CachedRoot {
     bytes: Arc<Vec<u8>>,
     parsed: Arc<IndexRoot>,
 }
+
+/// Largest detached signature file a source may serve; a real bundle is a few KiB.
+const SIGNATURE_BYTES_CAP: usize = 256 * 1024;
 
 /// Max keys a source's singleflight group admits, sized for a whole `ocx index sync`: the groups
 /// live for the process with one key per repository, and a small cap exits `TempFail(75)` on
@@ -544,10 +610,18 @@ pub struct OcxIndex {
     cache: Arc<RwLock<SourceCacheInner>>,
     /// Coalesces cold `config.json` misses; broadcasts only a served document.
     config_group: singleflight::Group<(), Option<Arc<IndexFormatConfig>>>,
-    /// Coalesces cold `p/<repo>.json` misses, keyed like [`SourceCacheInner::roots`]. Shared across
-    /// `box_clone` so coalescing reaches the fan-out; safe only because `OcxIndex` writes nothing
-    /// locally, unlike `ChainedIndex`, whose read-only views need fresh groups.
-    root_group: singleflight::Group<String, Option<Arc<IndexRoot>>>,
+    /// Coalesces cold `p/<repo>.json` misses, keyed by `(checked, repository)`: a checked and an
+    /// unchecked fetch of one repository never share a leader, or the checked caller would take the
+    /// unchecked result. Shared across `box_clone` so coalescing reaches the fan-out; safe only
+    /// because `OcxIndex` writes nothing locally, unlike `ChainedIndex`, whose read-only views need
+    /// fresh groups.
+    root_group: singleflight::Group<(bool, String), Option<Arc<IndexRoot>>>,
+    /// The signed-catalog check; absent when none was attached or the mode is `off`.
+    pub(crate) check: Option<Arc<CatalogCheck>>,
+    /// Where the highest verified catalog `expires` is recorded.
+    high_water: Option<std::path::PathBuf>,
+    /// Whether a `warn`-mode trust verdict goes to the debug log instead of the terminal.
+    quiet: bool,
 }
 
 /// Construction inputs for [`OcxIndex::new`].
@@ -581,7 +655,48 @@ impl OcxIndex {
             // One key (`()`), so one slot is the whole capacity.
             config_group: singleflight::Group::new(1, SOURCE_SINGLEFLIGHT_TIMEOUT),
             root_group: singleflight::Group::new(SOURCE_SINGLEFLIGHT_MAX_KEYS, SOURCE_SINGLEFLIGHT_TIMEOUT),
+            check: None,
+            high_water: None,
+            quiet: false,
         }
+    }
+
+    /// This source with its `warn`-mode trust warning sent to the debug log, for a caller whose
+    /// result does not depend on the catalog; `enforce` still refuses, and the shared once-per-source
+    /// warning stays unspent.
+    #[must_use]
+    pub fn quiet(mut self) -> Self {
+        self.quiet = true;
+        self
+    }
+
+    /// Attaches the check that judges this source's catalog and every root read against it.
+    /// `IndexSignatureMode::Off` attaches nothing, so the source behaves as one built without a verifier.
+    #[must_use]
+    pub fn with_catalog_verifier(mut self, verifier: Arc<dyn CatalogVerifier>, mode: IndexSignatureMode) -> Self {
+        self.check = (mode != IndexSignatureMode::Off)
+            .then(|| Arc::new(CatalogCheck::new(verifier, mode, self.high_water.clone())));
+        self
+    }
+
+    /// This source with its catalog check removed, for a run that skips the check (`--no-verify`); the
+    /// high-water file is never touched through it.
+    #[must_use]
+    pub fn without_catalog_check(mut self) -> Self {
+        self.check = None;
+        self
+    }
+
+    /// The mode of the attached catalog check, or `None` when this source checks nothing.
+    pub fn catalog_check_mode(&self) -> Option<IndexSignatureMode> {
+        self.check.as_ref().map(|check| check.mode)
+    }
+
+    /// Where the highest verified catalog `expires` is kept; call before [`Self::with_catalog_verifier`].
+    #[must_use]
+    pub fn with_expiry_high_water_file(mut self, path: std::path::PathBuf) -> Self {
+        self.high_water = Some(path);
+        self
     }
 
     /// The logical registry this source serves (e.g. `"ocx.sh"`).
@@ -794,13 +909,14 @@ impl OcxIndex {
     async fn resolve_root(&self, repository: &str) -> Result<Option<Arc<IndexRoot>>> {
         // The version gate runs before any root is consumed.
         self.check_format_version().await?;
-        if let Some(cached) = self.cache.read().await.roots.get(repository) {
+        let checked = self.check.is_some();
+        if let Some(cached) = self.cache.read().await.root(repository, checked) {
             return Ok(cached.as_ref().map(|cached| cached.parsed.clone()));
         }
         // Coalesced: the per-tag fan-out asks for one repository's root once per tag.
         let handle = match self
             .root_group
-            .try_acquire(repository.to_string())
+            .try_acquire((checked, repository.to_string()))
             .await
             .map_err(error::Error::SingleflightFailed)?
         {
@@ -821,7 +937,130 @@ impl OcxIndex {
     }
 
     /// One `GET p/<repo>.json`; `Ok(None)` only on a confirmed 404.
+    ///
+    /// With a catalog check attached the bytes are judged against the signed catalog before any
+    /// caller sees them, so every reader of a remote root inherits the check.
     async fn fetch_root(&self, repository: &str, freshness: Freshness) -> Result<Option<CachedRoot>> {
+        let Some(check) = self.check.clone() else {
+            return self.fetch_root_unchecked(repository, freshness).await;
+        };
+        let mut snapshot = self.catalog_snapshot(&check).await?;
+        check.report_record_problem(self.quiet);
+        self.surface_catalog_failure(&check, &snapshot)?;
+        let mut fetched = self.fetch_root_unchecked(repository, freshness).await?;
+        let Some(failure) = check.judge_root(
+            &snapshot,
+            repository,
+            fetched.as_ref().map(|root| root.bytes.as_slice()),
+        ) else {
+            return Ok(fetched);
+        };
+        // The first answer may straddle a deploy: re-read the catalog and the root once, then judge for good.
+        let latest = self.refresh_snapshot(&check, &snapshot).await?;
+        if !Arc::ptr_eq(&latest, &snapshot) || freshness == Freshness::Cacheable {
+            self.surface_catalog_failure(&check, &latest)?;
+            snapshot = latest;
+            fetched = self.fetch_root_unchecked(repository, Freshness::Revalidate).await?;
+            let Some(failure) = check.judge_root(
+                &snapshot,
+                repository,
+                fetched.as_ref().map(|root| root.bytes.as_slice()),
+            ) else {
+                return Ok(fetched);
+            };
+            check.surface(&self.namespace, failure, self.quiet)?;
+            return Ok(fetched);
+        }
+        check.surface(&self.namespace, failure, self.quiet)?;
+        Ok(fetched)
+    }
+
+    /// The held generation of the catalog and its verdict, fetched under the slot's lock on first use.
+    async fn catalog_snapshot(&self, check: &CatalogCheck) -> Result<Arc<CatalogState>> {
+        let mut slot = check.slot.lock().await;
+        if let Some(snapshot) = &slot.snapshot {
+            return Ok(snapshot.clone());
+        }
+        let mut state = self.fetch_catalog_state(check, Freshness::Cacheable).await?;
+        if state.failure.as_ref().is_some_and(|failure| failure.refetchable()) {
+            slot.refetched = true;
+            state = self.fetch_catalog_state(check, Freshness::Revalidate).await?;
+        }
+        let snapshot = Arc::new(state);
+        slot.snapshot = Some(snapshot.clone());
+        Ok(snapshot)
+    }
+
+    /// Replaces `stale` with a freshly read generation, once per source per process; later callers
+    /// get whatever the slot holds.
+    async fn refresh_snapshot(&self, check: &CatalogCheck, stale: &Arc<CatalogState>) -> Result<Arc<CatalogState>> {
+        let mut slot = check.slot.lock().await;
+        if slot.refetched {
+            return Ok(slot.snapshot.clone().unwrap_or_else(|| stale.clone()));
+        }
+        slot.refetched = true;
+        let snapshot = Arc::new(self.fetch_catalog_state(check, Freshness::Revalidate).await?);
+        slot.snapshot = Some(snapshot.clone());
+        Ok(snapshot)
+    }
+
+    /// Reads the catalog and the signature beside it and has the verifier judge them.
+    ///
+    /// A source that serves no catalog, or cannot be reached under `warn`, yields a state with
+    /// nothing to compare against; under `enforce` an unreachable source fails as it always did.
+    async fn fetch_catalog_state(&self, check: &CatalogCheck, freshness: Freshness) -> Result<CatalogState> {
+        let enforcing = check.mode == IndexSignatureMode::Enforce;
+        let catalog_url = format!("{}/{}", self.base_url, super::wire::CATALOG_PATH);
+        let fetched = self
+            .transport
+            .get_capped(&catalog_url, MAX_INDEX_DOCUMENT_BYTES, freshness)
+            .await;
+        let bytes = match fetched {
+            Ok(IndexFetch::Found { bytes }) => bytes,
+            Ok(IndexFetch::NotFound) => return Ok(CatalogState::unavailable()),
+            Err(error) if enforcing => return Err(error),
+            Err(error) => {
+                log::debug!("catalog read for {} failed, not checking it: {error}", self.namespace);
+                return Ok(CatalogState::unfetched(None, "catalog", error));
+            }
+        };
+        let signature_url = format!("{}/{}", self.base_url, super::wire::CATALOG_SIGNATURE_PATH);
+        let signature = match self
+            .transport
+            .get_capped(&signature_url, SIGNATURE_BYTES_CAP, freshness)
+            .await
+        {
+            Ok(IndexFetch::Found { bytes }) => Some(bytes),
+            Ok(IndexFetch::NotFound) => None,
+            // A signature too large to be one is a bad signature, not a failed request.
+            Err(error) if error.is_body_over_cap() => {
+                let reason = format!("the catalog signature was refused: {}", error.short_transport_cause());
+                return Ok(CatalogState::invalid(bytes, reason));
+            }
+            Err(error) if enforcing => return Err(error),
+            Err(error) => {
+                log::debug!(
+                    "signature read for {} failed, treating it as unsigned: {error}",
+                    self.namespace
+                );
+                return Ok(CatalogState::unfetched(Some(bytes), "catalog signature", error));
+            }
+        };
+        match signature {
+            Some(signature) => Ok(check.evaluate(bytes, Some(&signature)).await),
+            None => Ok(CatalogState::unsigned(bytes)),
+        }
+    }
+
+    /// Applies the mode to a catalog that is not trusted: `enforce` refuses, `warn` logs once.
+    fn surface_catalog_failure(&self, check: &CatalogCheck, snapshot: &CatalogState) -> Result<()> {
+        match &snapshot.failure {
+            Some(failure) => Ok(check.surface(&self.namespace, failure.clone(), self.quiet)?),
+            None => Ok(()),
+        }
+    }
+
+    async fn fetch_root_unchecked(&self, repository: &str, freshness: Freshness) -> Result<Option<CachedRoot>> {
         let url = format!("{}/p/{}.json", self.base_url, repository);
         let fetched = match freshness {
             Freshness::Cacheable => self.transport.get(&url).await?,
@@ -843,7 +1082,12 @@ impl OcxIndex {
     /// call that actually asked *this* source may memoize, or a foreign identifier's `None`
     /// silently hides the served registry's same-named package for the rest of the process.
     async fn memoize_root(&self, repository: &str, root: Option<CachedRoot>) {
-        self.cache.write().await.roots.insert(repository.to_string(), root);
+        let checked = self.check.is_some();
+        self.cache
+            .write()
+            .await
+            .roots
+            .insert(repository.to_string(), MemoizedRoot { checked, root });
     }
 
     // ── dispatch object (immutable, VERIFIED) ────────────────────────────────
@@ -993,12 +1237,32 @@ impl OcxIndex {
     /// would exit 0 having listed nothing. A served catalog with zero packages is still `Ok`.
     pub async fn fetch_catalog_strict(&self) -> Result<CatalogIndex> {
         self.check_format_version().await?;
+        if let Some(check) = self.check.clone() {
+            let snapshot = self.catalog_snapshot(&check).await?;
+            check.report_record_problem(self.quiet);
+            self.surface_catalog_failure(&check, &snapshot)?;
+            let url = format!("{}/{}", self.base_url, super::wire::CATALOG_PATH);
+            // Under `warn` a catalog the check could not read stays unread: no second, unchecked fetch.
+            return match &snapshot.bytes {
+                Some(bytes) => parse_document::<CatalogDocument>(bytes, &url)?.into_packages(),
+                // A failed read keeps its own exit code; only a served 404 is "absent".
+                None => match &snapshot.failure {
+                    Some(TrustFailure::Unfetched { error, .. }) => {
+                        Err(super::error::Error::SourceFetchFailed(error.clone()))
+                    }
+                    _ => Err(super::error::Error::CatalogDocumentAbsent {
+                        index_source: self.namespace.clone(),
+                        url: redact_url(&url),
+                    }),
+                },
+            };
+        }
         let url = format!("{}/c/index.json", self.base_url);
         match self.transport.get(&url).await? {
             IndexFetch::Found { bytes } => Ok(parse_document::<CatalogDocument>(&bytes, &url)?.into_packages()?),
             IndexFetch::NotFound => Err(super::error::Error::CatalogDocumentAbsent {
                 index_source: self.namespace.clone(),
-                url,
+                url: redact_url(&url),
             }),
         }
     }
@@ -1173,32 +1437,21 @@ impl index_impl::IndexImpl for OcxIndex {
         // The version gate runs before any root is consumed.
         self.check_format_version().await?;
         // A memoized root is the whole answer, hit and miss alike.
-        if let Some(cached) = self.cache.read().await.roots.get(identifier.repository()) {
+        if let Some(cached) = self
+            .cache
+            .read()
+            .await
+            .root(identifier.repository(), self.check.is_some())
+        {
             return Ok(cached
                 .as_ref()
                 .map(|cached| ((*cached.bytes).clone(), (*cached.parsed).clone())));
         }
-        let url = format!("{}/p/{}.json", self.base_url, identifier.repository());
         // Both arms issued the request, so both memoize; otherwise the per-tag fan-out that
         // follows re-fetches this root once per tag, which coalescing alone would not prevent.
-        match self.transport.get(&url).await? {
-            IndexFetch::Found { bytes } => {
-                let root: IndexRoot = parse_document(&bytes, &url)?;
-                self.memoize_root(
-                    identifier.repository(),
-                    Some(CachedRoot {
-                        bytes: Arc::new(bytes.clone()),
-                        parsed: Arc::new(root.clone()),
-                    }),
-                )
-                .await;
-                Ok(Some((bytes, root)))
-            }
-            IndexFetch::NotFound => {
-                self.memoize_root(identifier.repository(), None).await;
-                Ok(None)
-            }
-        }
+        let fetched = self.fetch_root(identifier.repository(), Freshness::Cacheable).await?;
+        self.memoize_root(identifier.repository(), fetched.clone()).await;
+        Ok(fetched.map(|cached| ((*cached.bytes).clone(), (*cached.parsed).clone())))
     }
 
     async fn revalidate_root_document(&self, identifier: &ocx_oci::PackageRef) -> Result<Option<(Vec<u8>, IndexRoot)>> {
@@ -1221,8 +1474,7 @@ impl index_impl::IndexImpl for OcxIndex {
             .cache
             .read()
             .await
-            .roots
-            .get(identifier.repository())
+            .root(identifier.repository(), self.check.is_some())
             .and_then(Option::as_ref)
             .and_then(|cached| cached.parsed.publishers.clone())
             .map_or(DeclaredPublishers::Undeclared, DeclaredPublishers::Declared))
@@ -1261,6 +1513,10 @@ impl index_impl::IndexImpl for OcxIndex {
 
     fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {
         Box::new(self.clone())
+    }
+
+    fn quiet_view(&self) -> Box<dyn index_impl::IndexImpl> {
+        Box::new(self.clone().quiet())
     }
 }
 
@@ -1503,8 +1759,25 @@ mod tests {
     }
 
     #[test]
+    fn redact_url_drops_every_query_value_and_the_fragment() {
+        assert_eq!(redact_url("https://host/x?token=abc&k=v"), "https://host/x?***");
+        assert_eq!(
+            redact_url("https://user:pw@host?token=abc#frag"),
+            "https://***@host?***"
+        );
+        assert_eq!(redact_url("https://host/x#frag"), "https://host/x?***");
+    }
+
+    #[test]
     fn redact_url_leaves_non_url_string_untouched() {
         assert_eq!(redact_url("not a url"), "not a url");
+    }
+
+    #[test]
+    fn redact_url_strips_userinfo_containing_a_slash() {
+        assert_eq!(redact_url("https://user:pa/ss@host/x"), "https://***@host/x");
+        assert_eq!(redact_url("https://user:pa/ss@host"), "https://***@host");
+        assert_eq!(redact_url("https://us/er@host/x?token=abc"), "https://***@host/x?***");
     }
 
     #[test]
@@ -4204,6 +4477,9 @@ mod transport_wire_tests {
         /// TLS-inspecting proxy produces. The only reply here whose failure
         /// lands in the body loop rather than in `send()`.
         AbortMidBody { sent: &'static str },
+        /// A `200` with no `Content-Length` and `bytes` bytes of body, then close: only a count
+        /// kept while reading can refuse it.
+        Unsized { bytes: usize },
     }
 
     fn ok() -> Reply {
@@ -4389,6 +4665,13 @@ mod transport_wire_tests {
                 let _ = write_half.write_all(head.as_bytes()).await;
                 let _ = write_half.flush().await;
             }
+            Reply::Unsized { bytes } => {
+                let _ = write_half
+                    .write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n")
+                    .await;
+                let _ = write_half.write_all(&vec![b'x'; bytes]).await;
+                let _ = write_half.flush().await;
+            }
             Reply::AbortMidBody { sent } => {
                 // Promise the whole document, deliver a prefix, then drop —
                 // the client's body read ends short of the declared length.
@@ -4402,6 +4685,24 @@ mod transport_wire_tests {
                 drop(write_half);
             }
         }
+    }
+
+    /// A body with no declared length is counted as it arrives: past the caller's cap it is
+    /// refused, below the index-document cap that governs a plain `get`.
+    #[tokio::test]
+    async fn a_capped_get_refuses_an_undeclared_body_past_its_cap_while_reading() {
+        let endpoint = StubIndexEndpoint::start(vec![Reply::Unsized { bytes: 300 * 1024 }]).await;
+        let transport = ReqwestIndexTransport::with_hardening(&quick_bounds(), quick_ladder());
+
+        let capped = transport
+            .get_capped(&endpoint.url(), 256 * 1024, Freshness::Cacheable)
+            .await;
+        assert!(
+            matches!(&capped, Err(error::Error::IndexHttpFailed { source, .. }) if source.to_string().contains("exceeds")),
+            "a 300 KiB body must be refused at a 256 KiB cap: {capped:?}"
+        );
+        let plain = transport.get(&endpoint.url()).await.expect("under the document cap");
+        assert!(matches!(plain, IndexFetch::Found { bytes } if bytes.len() == 300 * 1024));
     }
 
     #[tokio::test]

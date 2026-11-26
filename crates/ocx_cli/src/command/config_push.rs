@@ -5,7 +5,9 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use ocx_package::publisher::Publisher;
-use ocx_package_manager::managed_config::{ManagedConfigPublishOptions, publish_managed_config};
+use ocx_package_manager::managed_config::{
+    ManagedConfigPublishOptions, publish_managed_config, read_candidate_payload, validate_managed_config_payload,
+};
 
 use crate::command::deprecated;
 use crate::options;
@@ -42,6 +44,9 @@ pub struct ConfigPushArgs {
 impl ConfigPushArgs {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         let identifier = self.identifier.as_target(context.default_registry())?;
+
+        // A payload the fleet would refuse (the retired `[trust.sigstore]` table, say) must fail before any registry contact.
+        validate_managed_config_payload(&read_candidate_payload(&self.config).await?)?;
 
         let publisher = Publisher::new(context.remote_client()?.clone());
         publisher.ensure_auth(&identifier).await?;

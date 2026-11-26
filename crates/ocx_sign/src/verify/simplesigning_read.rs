@@ -319,7 +319,7 @@ async fn verify_keyless(
         return Err(map_verification_error(error));
     }
 
-    matching_policies(leaf_der, verify.policies)?;
+    matching_policies(leaf_der, verify.policies, &verify.trust_root.instance())?;
 
     match logged.as_ref() {
         Some(entry) => {
@@ -691,6 +691,7 @@ mod tests {
         CompiledPolicy {
             builder: None,
             backends: vec![PolicyBackend::Keyless(CompiledKeyless {
+                instance: ocx_trust::SigstoreAuthority::public(),
                 identity: Some(IdentityRule::Exact(identity.to_owned())),
                 issuer: issuer.to_owned(),
                 claims: Vec::new(),

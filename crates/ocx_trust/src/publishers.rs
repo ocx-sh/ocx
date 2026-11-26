@@ -9,12 +9,19 @@ use serde_json::{Map, Value};
 
 use crate::claims::{ClaimKeyError, CompiledClaim, resolve_claim_key};
 use crate::key_ref::MAX_KEY_PEM_BYTES;
-use crate::{CompiledKeyless, CompiledPolicy, IdentityRule, PolicyBackend};
+use crate::{CompiledKeyless, CompiledPolicy, IdentityRule, PolicyBackend, SigstoreAuthority};
 
 /// Compiled-size ceiling for a remote `identity_regexp`.
 const REGEX_SIZE_LIMIT: usize = 64 * 1024;
 
-const KEYLESS_FIELDS: [&str; 5] = ["kind", "identity", "identity_regexp", "oidc_issuer", "claims"];
+const KEYLESS_FIELDS: [&str; 6] = [
+    "kind",
+    "identity",
+    "identity_regexp",
+    "oidc_issuer",
+    "claims",
+    "sigstore",
+];
 const KEY_FIELDS: [&str; 2] = ["kind", "key_pem"];
 
 /// One `publishers` array element, classified.
@@ -131,6 +138,13 @@ fn classify_keyless(object: &Map<String, Value>) -> Result<PolicyBackend, Refusa
     let identity = string_field(object, "identity")?;
     let pattern = string_field(object, "identity_regexp")?;
     let (claims, unknown_claim) = parse_claims(object.get("claims"))?;
+    let instance = match string_field(object, "sigstore")? {
+        Some(text) => match SigstoreAuthority::parse(text) {
+            Ok(authority) => authority,
+            Err(error) => return invalid(format!("`sigstore` is not an authority: {error}")),
+        },
+        None => SigstoreAuthority::public(),
+    };
     let rule = match (identity, pattern) {
         (Some(_), Some(_)) => return invalid("`identity` and `identity_regexp` are mutually exclusive"),
         (Some(exact), None) => Some(IdentityRule::Exact(exact.to_owned())),
@@ -151,6 +165,7 @@ fn classify_keyless(object: &Map<String, Value>) -> Result<PolicyBackend, Refusa
         identity: rule,
         issuer: issuer.to_owned(),
         claims,
+        instance,
     }))
 }
 
@@ -186,6 +201,9 @@ fn classify_key(object: &Map<String, Value>) -> Result<PolicyBackend, Refusal> {
     // Before the unknown-field rule: a remote document never names a local file, so this is malformed, not newer.
     if object.contains_key("key") {
         return invalid("a remote `key` entry may not name a file; use `key_pem`");
+    }
+    if object.contains_key("sigstore") {
+        return invalid("a `key` entry has no Sigstore instance; `sigstore` belongs on a keyless entry");
     }
     unknown_field(object, &KEY_FIELDS)?;
     let Some(pem) = string_field(object, "key_pem")? else {
@@ -320,9 +338,24 @@ mod tests {
             ("key_pem", json!({"kind": "key", "key_pem": P256_PEM}), Class::Usable),
             ("unknown kind", json!({"kind": "future"}), Class::Unrecognised),
             (
-                "unknown field (sigstore)",
+                "sigstore authority",
+                keyless(json!({"identity": "a", "sigstore": "fulcio.example:5555"})),
+                Class::Usable,
+            ),
+            (
+                "sigstore not an authority",
+                keyless(json!({"identity": "a", "sigstore": "https://fulcio.example"})),
+                Class::Invalid,
+            ),
+            (
+                "sigstore not a string",
                 keyless(json!({"identity": "a", "sigstore": {}})),
-                Class::Unrecognised,
+                Class::Invalid,
+            ),
+            (
+                "sigstore on a key entry",
+                json!({"kind": "key", "key_pem": P256_PEM, "sigstore": "fulcio.example"}),
+                Class::Invalid,
             ),
             ("not an object", json!("keyless"), Class::Invalid),
             ("no kind", json!({"identity": "a"}), Class::Invalid),

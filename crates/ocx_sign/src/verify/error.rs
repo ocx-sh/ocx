@@ -295,6 +295,22 @@ pub enum VerifyErrorKind {
     )]
     TrustRootLoad(TrustRootLoadReason),
 
+    /// A private Sigstore instance has no trusted root: no flag, variable, table field, convention file or cache
+    /// entry supplies one, and only the public instance falls back to TUF. Exit 78 (`ConfigError`).
+    #[error(
+        "no trusted root for Sigstore instance `{authority}`: set `trusted_root` or `trusted_root_json` in its \
+         [sigstore.\"{authority}\"] table, or pass --sigstore-trusted-root"
+    )]
+    #[exit(
+        ConfigError,
+        slug = "sigstore_trusted_root_missing",
+        summary = "A private Sigstore instance has no trusted root configured"
+    )]
+    SigstoreTrustedRootMissing {
+        /// The instance's authority, `host[:port]`.
+        authority: String,
+    },
+
     /// The registry the index rewrote this reference to resolves into a forbidden range (CWE-918).
     ///
     /// Exit 78 (`ConfigError`), matching the pull path's dial guard.
@@ -743,9 +759,9 @@ pub enum TrustRootLoadReason {
     #[error("trust root carries no certificate authority anchors")]
     NoCertificateBlocks,
 
-    /// `[trust.sigstore]` declared both `trusted_root` and `trusted_root_json`.
+    /// A `[sigstore."<host>"]` table declared both `trusted_root` and `trusted_root_json`.
     #[error(
-        "[trust.sigstore] declares both trusted_root and trusted_root_json: keep one \
+        "a [sigstore] table declares both trusted_root and trusted_root_json: keep one \
          (trusted_root_json is what `ocx config push` publishes; trusted_root names a local file)"
     )]
     AmbiguousTrustRootConfig,

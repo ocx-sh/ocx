@@ -15,6 +15,7 @@ use tokio::fs;
 use tokio::io::AsyncReadExt as _;
 
 use super::error::Result;
+use super::ocx_index::redact_url;
 use super::{IndexFetch, IndexTransport};
 use ocx_oci::client::MAX_INDEX_DOCUMENT_BYTES;
 use ocx_util::fs::path::join_under_root;
@@ -33,20 +34,6 @@ pub struct FileIndexTransport {
     base_url: String,
     /// The absolute path `base_url` names.
     root: PathBuf,
-}
-
-/// Strips `user[:password]@` userinfo from `url` before it lands in an error
-/// (CWE-532): the prefix-mismatch arm is handed a foreign URL that may carry credentials.
-fn redact_url(url: &str) -> String {
-    let Some((scheme, rest)) = url.split_once("://") else {
-        return url.to_string();
-    };
-    let authority_end = rest.find('/').unwrap_or(rest.len());
-    let (authority, tail) = rest.split_at(authority_end);
-    match authority.rsplit_once('@') {
-        Some((_userinfo, host)) => format!("{scheme}://***@{host}{tail}"),
-        None => url.to_string(),
-    }
 }
 
 /// A refusal: [`IndexHttpFailed`](super::error::Error::IndexHttpFailed), exit 69 — the one constructor, so no arm drifts to another exit code.

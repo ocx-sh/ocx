@@ -99,6 +99,8 @@ impl PackageManager {
         let result = if let Some(existing) = &existing
             && existing.source == canonical_source
             && existing.digest == fetched.manifest_digest
+            // A snapshot still carrying the retired table is never current, or the refresh that heals it is a no-op.
+            && !ocx_config::loader::ConfigLoader::declares_retired_trust_sigstore(&existing.config)
         {
             ManagedConfigUpdateResult::AlreadyCurrent {
                 digest: existing.digest.clone(),
@@ -465,6 +467,31 @@ mod tests {
         manager.update_managed_config(&resolved, None).await.unwrap();
         let second = manager.update_managed_config(&resolved, None).await.unwrap();
         assert!(matches!(second, ManagedConfigUpdateResult::AlreadyCurrent { .. }));
+    }
+
+    #[tokio::test]
+    async fn update_managed_config_replaces_a_snapshot_that_still_carries_the_retired_table() {
+        let home = TempDir::new().unwrap();
+        let identifier =
+            OciIdentifier::parse_target("corp.example.com/ocx-config:v1", ocx_oci::DEFAULT_REGISTRY).unwrap();
+        let client = stub_client_with_artifact(&identifier, "[registry]\ndefault = \"corp\"\n");
+        let manager = manager_with_client(home.path(), client);
+        let resolved = resolved(identifier, RefreshPolicy::Notify, Duration::from_secs(86_400));
+        manager.update_managed_config(&resolved, None).await.unwrap();
+
+        let payload = FileStructure::with_root(home.path().to_path_buf())
+            .state
+            .managed_config()
+            .toml_file();
+        let stale = format!(
+            "{}\n[trust.sigstore]\nrekor_upload = false\n",
+            std::fs::read_to_string(&payload).unwrap()
+        );
+        std::fs::write(&payload, stale).unwrap();
+
+        let second = manager.update_managed_config(&resolved, None).await.unwrap();
+        assert!(matches!(second, ManagedConfigUpdateResult::Updated { .. }));
+        assert!(!std::fs::read_to_string(&payload).unwrap().contains("trust.sigstore"));
     }
 
     #[tokio::test]

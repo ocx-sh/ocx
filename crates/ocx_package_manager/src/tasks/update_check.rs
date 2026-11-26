@@ -195,7 +195,7 @@ impl PackageManager {
                     ocx_store::file_structure::StateStore::touch(state_path.clone()).await;
                     return Ok(UpdateCheckResult::Skipped(SkippedReason::Offline));
                 }
-                self.index().remote_view().list_tags(identifier).await
+                self.index().remote_view().quiet_view().list_tags(identifier).await
             }
             TagProbe::Index => self.index().list_tags(identifier).await,
         };

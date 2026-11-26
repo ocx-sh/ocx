@@ -73,7 +73,7 @@ def _configure_index_source_without_trust(
     the wrong reason.
     """
     config_path = Path(ocx.env["OCX_HOME"]) / "config.toml"
-    config_path.write_text(f'[registries."ocx.sh"]\nindex = "{server.base_url}"\n')
+    config_path.write_text(f'[registries."ocx.sh"]\nindex = "{server.base_url}"\nindex_signature = "off"\n')
 
 
 # ---------------------------------------------------------------------------

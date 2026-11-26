@@ -253,7 +253,7 @@ pub const PUBLIC: &[EnvVar] = &[
     EnvVar {
         name: "OCX_NO_VERIFY",
         value: "bool",
-        summary: "Boolean — skip the policy-gated auto-verify on install/pull; `--no-verify` wins. Forwarded to child OCX.",
+        summary: "Boolean — skip the policy-gated auto-verify and the signed index catalog check; `--verify` and `--no-verify` win. Forwarded to child OCX.",
         secret: false,
     },
     EnvVar {
@@ -319,7 +319,7 @@ pub const PUBLIC: &[EnvVar] = &[
     EnvVar {
         name: "OCX_SIGSTORE_TRUSTED_ROOT",
         value: "path",
-        summary: "Path (bare or `file://`) to a Sigstore trusted-root JSON document, or a directory holding",
+        summary: "Sigstore trusted root for `ocx package verify` and `ocx package sbom`, the only commands that read it.",
         secret: false,
     },
     EnvVar {

@@ -10,15 +10,15 @@ Contract sources: ``.claude/artifacts/adr_offline_verify_trust_cache.md``
 ``--sigstore-trusted-root`` flag, ``OCX_SIGSTORE_TRUSTED_ROOT``, and the warm cache. The
 rungs below it are the ones a *fleet* uses, and they are what this file proves:
 
-3. ``[trust.sigstore] trusted_root_json`` in a ``config.toml``
-4. the convention path ``$OCX_HOME/sigstore/trusted-root.json``
+3. ``trusted_root_json`` in the ``[sigstore."<authority>"]`` table of a ``config.toml``
+4. the instance's convention path ``$OCX_HOME/sigstore/instances/<host>_<port>/trusted-root.json``
 
 plus the delivery channel that puts (3) on every machine: a managed-config
 package, whose path-form ``trusted_root`` ``ocx config push`` inlines at publish
 time.
 
 Every case runs ``--offline`` against an unreachable Rekor. Offline is what makes
-the assertion falsifiable: with no trust material the run must exit 81, so a pass
+the assertion falsifiable: with no trust material the run must exit 78 (`sigstore_trusted_root_missing`), so a pass
 can only have come from the rung under test — never from a cached key, and never
 from a TUF fetch.
 """
@@ -29,6 +29,7 @@ import subprocess
 from pathlib import Path
 
 from src.helpers import push_managed_config
+from src.index_signing import assert_retired_table_refused, authority
 from src.runner import OcxRunner, PackageInfo, current_platform
 from tests.fixtures import adversarial
 from tests.fixtures.sigstore_stack import SigstoreStack
@@ -52,7 +53,7 @@ def _verify_offline(
     *,
     extra_env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    """Offline verify with NO trust-root flag and NO ``OCX_SIGSTORE_TRUSTED_ROOT``.
+    """Offline verify of the private instance (``--sigstore``) with NO trust-root flag and NO ``OCX_SIGSTORE_TRUSTED_ROOT``.
 
     The Rekor URL is a dead port, so nothing can be fetched even if the offline
     gate were to leak: a pass proves the trust root was resolved locally.
@@ -63,6 +64,7 @@ def _verify_offline(
             "package", "verify",
             "--certificate-identity", stack.identity,
             "--certificate-oidc-issuer", stack.issuer,
+            "--sigstore", authority(stack),
             "--rekor-url", adversarial.unreachable_rekor_url(),
             "--platform", current_platform(),
             pkg.short,
@@ -103,7 +105,7 @@ def _drop_trust_cache(ocx: OcxRunner) -> None:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Rung 4 — $OCX_HOME/sigstore/trusted-root.json, no config, no flag, no env
+# Rung 4 — the instance convention path, no root in config, no flag, no env
 # ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -113,22 +115,24 @@ def test_home_convention_path_carries_the_trust_root_alone(
     sigstore_stack: SigstoreStack,
     identity_token: Path,
 ) -> None:
-    """A file at the convention path is enough — and taking it away breaks it.
+    """A file at the instance convention path is enough — and taking it away breaks it.
 
     Both halves matter. The first proves the rung is wired at all; the second
     proves the first was not passing for some other reason, by deleting the file
-    *and* the cache the successful run just warmed and demanding exit 81.
+    *and* the cache the successful run just warmed and demanding exit 78.
     """
     pkg = published_package
     _prepare(ocx, sigstore_stack, identity_token, pkg)
 
-    convention = Path(ocx.env["OCX_HOME"]) / "sigstore" / "trusted-root.json"
+    instance = authority(sigstore_stack).replace(":", "_")
+    convention = Path(ocx.env["OCX_HOME"]) / "sigstore" / "instances" / instance / "trusted-root.json"
     convention.parent.mkdir(parents=True, exist_ok=True)
+    (Path(ocx.env["OCX_HOME"]) / "config.toml").write_text(f'[sigstore."{authority(sigstore_stack)}"]\nfulcio_url = "{sigstore_stack.fulcio_url}"\n')
     convention.write_bytes(sigstore_stack.trusted_root_json.read_bytes())
 
     green = _verify_offline(ocx, sigstore_stack, pkg)
     assert green.returncode == 0, (
-        f"$OCX_HOME/sigstore/trusted-root.json must be consulted with no flag and no "
+        f"the instance convention path must be consulted with no flag and no "
         f"env var, got {green.returncode}\nstderr: {green.stderr.strip()}"
     )
 
@@ -136,15 +140,15 @@ def test_home_convention_path_carries_the_trust_root_alone(
     _drop_trust_cache(ocx)
 
     red = _verify_offline(ocx, sigstore_stack, pkg)
-    assert red.returncode == 81, (
+    assert red.returncode == 78, (
         f"with the convention path removed and the cache cold, offline verify must "
-        f"fail closed at 81 — otherwise the green above proved nothing. Got "
+        f"fail closed at 78 — otherwise the green above proved nothing. Got "
         f"{red.returncode}\nstderr: {red.stderr.strip()}"
     )
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Rung 3 — [trust.sigstore] trusted_root_json inlined in a config.toml
+# Rung 3 — trusted_root_json inlined in the instance table of a config.toml
 # ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -164,11 +168,11 @@ def test_config_tier_inline_trusted_root_json_carries_the_trust_root(
 
     document = sigstore_stack.trusted_root_json.read_text()
     config = Path(ocx.env["OCX_HOME"]) / "config.toml"
-    config.write_text(f"[trust.sigstore]\ntrusted_root_json = '''\n{document}\n'''\n")
+    config.write_text(f"[sigstore.\"{authority(sigstore_stack)}\"]\ntrusted_root_json = '''\n{document}\n'''\n")
 
     result = _verify_offline(ocx, sigstore_stack, pkg)
     assert result.returncode == 0, (
-        f"[trust.sigstore] trusted_root_json must supply the trust root on its own, got "
+        f"the table's trusted_root_json must supply the trust root on its own, got "
         f"{result.returncode}\nstderr: {result.stderr.strip()}"
     )
 
@@ -181,7 +185,7 @@ def test_config_tier_trusted_root_takes_the_file_url_spelling(
 ) -> None:
     """S-015 — the path form of rung 3 reads ``file://`` as well as a bare path.
 
-    ``[trust.sigstore] trusted_root`` sat three lines from ``[[trust.policy]]``
+    The old ``[trust.sigstore] trusted_root`` sat three lines from ``[[trust.policy]]``
     signers' ``key`` accepting a strictly smaller vocabulary, for no stated
     reason (`ocx-sh/ocx#379`). One grammar now serves both.
 
@@ -197,17 +201,17 @@ def test_config_tier_trusted_root_takes_the_file_url_spelling(
     root = sigstore_stack.trusted_root_json.resolve()
     config = Path(ocx.env["OCX_HOME"]) / "config.toml"
 
-    config.write_text(f'[trust.sigstore]\ntrusted_root = "{root.as_posix()}"\n')
+    config.write_text(f'[sigstore."{authority(sigstore_stack)}"]\ntrusted_root = "{root.as_posix()}"\n')
     control = _verify_offline(ocx, sigstore_stack, pkg)
     assert control.returncode == 0, (
         f"the bare path form is the control and must verify, got "
         f"{control.returncode}\nstderr: {control.stderr.strip()}"
     )
 
-    config.write_text(f'[trust.sigstore]\ntrusted_root = "file://{root.as_posix()}"\n')
+    config.write_text(f'[sigstore."{authority(sigstore_stack)}"]\ntrusted_root = "file://{root.as_posix()}"\n')
     result = _verify_offline(ocx, sigstore_stack, pkg)
     assert result.returncode == 0, (
-        f"[trust.sigstore] trusted_root must read the file:// spelling, got "
+        f"the table's trusted_root must read the file:// spelling, got "
         f"{result.returncode}\nstderr: {result.stderr.strip()}"
     )
 
@@ -235,7 +239,7 @@ def test_managed_config_delivers_the_trust_root_to_a_machine_with_no_local_copy(
     _prepare(ocx, sigstore_stack, identity_token, pkg)
 
     (tmp_path / "trusted_root.json").write_bytes(sigstore_stack.trusted_root_json.read_bytes())
-    payload = '[trust.sigstore]\ntrusted_root = "trusted_root.json"\n'
+    payload = f'[sigstore."{authority(sigstore_stack)}"]\ntrusted_root = "trusted_root.json"\n'
     digest = push_managed_config(ocx, f"{unique_repo}_cfg", "v1", payload, tmp_path)
 
     pinned = f"{ocx.registry}/{unique_repo}_cfg@{digest}"
@@ -272,7 +276,7 @@ def test_config_push_reads_the_file_url_spelling_of_the_declared_root(
     _prepare(ocx, sigstore_stack, identity_token, pkg)
 
     (tmp_path / "trusted_root.json").write_bytes(sigstore_stack.trusted_root_json.read_bytes())
-    payload = '[trust.sigstore]\ntrusted_root = "file://trusted_root.json"\n'
+    payload = f'[sigstore."{authority(sigstore_stack)}"]\ntrusted_root = "file://trusted_root.json"\n'
     digest = push_managed_config(ocx, f"{unique_repo}_cfg", "v1", payload, tmp_path)
 
     pinned = f"{ocx.registry}/{unique_repo}_cfg@{digest}"
@@ -303,21 +307,25 @@ def test_a_tag_pinned_managed_source_may_not_carry_a_trust_root(
     _prepare(ocx, sigstore_stack, identity_token, pkg)
 
     (tmp_path / "trusted_root.json").write_bytes(sigstore_stack.trusted_root_json.read_bytes())
-    payload = '[trust.sigstore]\ntrusted_root = "trusted_root.json"\n'
+    payload = f'[sigstore."{authority(sigstore_stack)}"]\ntrusted_root = "trusted_root.json"\n'
     push_managed_config(ocx, f"{unique_repo}_cfg", "v1", payload, tmp_path)
 
     floating = f"{ocx.registry}/{unique_repo}_cfg:v1"
     _adopt_managed(ocx, floating)
 
     result = _verify_offline(ocx, sigstore_stack, pkg, extra_env={"OCX_MANAGED_CONFIG": floating})
-    assert result.returncode == 81, (
+    assert result.returncode == 78, (
         f"a tag-pinned managed source must not be allowed to supply the trust root, "
         f"got {result.returncode}\nstderr: {result.stderr.strip()}"
     )
-    # The snapshot IS present (adopted above), so 81 must be the trust-material
+    # The snapshot IS present (adopted above), so 78 must be the trust-material
     # refusal and not "managed config snapshot required but absent" — otherwise
     # this test would pass without the loader ever dropping anything.
     assert "snapshot required" not in result.stderr, (
-        f"the snapshot must be present, so exit 81 has to come from the missing trust "
+        f"the snapshot must be present, so exit 78 has to come from the missing trust "
         f"root, not from an unadopted tier: {result.stderr.strip()}"
     )
+
+
+def test_the_retired_trust_sigstore_spelling_is_refused(ocx: OcxRunner) -> None:
+    assert_retired_table_refused(ocx)

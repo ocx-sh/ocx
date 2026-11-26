@@ -289,7 +289,7 @@ required = true
 - Forwarding: both variables are inherited by a child under the default and `--isolate` modes. Under `--clean` the child reads the values from [`__OCX_ENV_STATE`][env-ocx-env-state]
 - SYSTEM lock: a system-tier `[records]` declaration locks the whole block, `dir`, `name` and `required` together, and the variables and flags have no effect once it is locked
 - Lock survival: the lock survives [`OCX_NO_CONFIG=1`][env-ocx-no-config], and an unreadable `/etc/ocx/config.toml` aborts the invocation with exit `78`. An absent system file is silent
-- Relative `dir` in a config file: anchored at the declaring file's directory, like [`[trust.sigstore] trusted_root`][config-trust-sigstore]. `--records-dir` and `OCX_RECORDS_DIR` resolve against the process's working directory
+- Relative `dir` in a config file: anchored at the declaring file's directory, like [`trusted_root` in a `[sigstore."<host>"]` table][config-sigstore]. `--records-dir` and `OCX_RECORDS_DIR` resolve against the process's working directory
 - Project file: a project `ocx.toml` cannot set `[records]`. The section is stripped
 - Managed tier: an operator-published [`[managed]`][config-managed] configuration can set `required = true` in its `[records]` payload
 - Placeholder error: an unrecognized placeholder in `name` is a configuration error (exit `78`) at resolve time
@@ -342,7 +342,7 @@ The published schema lives at `https://ocx.sh/schemas/execution-record/v1.json` 
 [config-records]: ./configuration.md#keys-records
 [config-mirrors]: ./configuration.md#keys-mirrors
 [config-managed]: ./configuration.md#keys-managed
-[config-trust-sigstore]: ./configuration.md#keys-trust-sigstore
+[config-sigstore]: ./configuration.md#keys-sigstore
 [config-registries-insecure]: ./configuration.md#keys-registries-insecure
 
 <!-- environment -->

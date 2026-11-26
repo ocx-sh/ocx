@@ -27,6 +27,8 @@ pub use context_options::ContextOptions;
 mod env_flags;
 pub use env_flags::ENV_FLAGS;
 
+mod index_check;
+
 mod managed_config_check;
 
 pub mod plugin_dispatch;
@@ -164,6 +166,7 @@ impl App {
                     enforce_required: should_enforce_managed_config_required(&cli.command),
                     onboarding: is_managed_config_onboarding_command(&cli.command),
                     tolerate_vanished_received_config: is_shell_state_command(&cli.command),
+                    tolerate_retired_snapshot: is_config_update_command(&cli.command),
                 },
                 sends.then_some(&mut telemetry),
             )
@@ -459,6 +462,13 @@ fn is_shell_state_command(command: &Option<command::Command>) -> bool {
             command: Some(command::shell::Shell::State(_)),
             ..
         }))
+    )
+}
+
+fn is_config_update_command(command: &Option<command::Command>) -> bool {
+    matches!(
+        command,
+        Some(command::Command::Config(command::config::ConfigGroup::Update(_)))
     )
 }
 

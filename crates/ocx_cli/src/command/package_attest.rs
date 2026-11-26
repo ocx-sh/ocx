@@ -63,10 +63,11 @@ pub struct PackageAttest {
     #[clap(long = "type", required = true, value_name = "TYPE")]
     predicate_type: PredicateType,
 
-    // `Option`, not a clap default, or `[trust.sigstore]` can never apply to an unset flag.
+    // `Option`, not a clap default, or a `[sigstore."<host>"]` table can never apply to an unset flag.
     /// Fulcio CA endpoint (the keyless certificate issuer)
     ///
-    /// Defaults to [trust.sigstore].fulcio_url, else public Fulcio.
+    /// Defaults to public Fulcio. The host picks the `[sigstore."<host>"]` config table whose trust
+    /// root and Rekor endpoint apply.
     ///
     /// Keyless-only: an error alongside `--key`, never silently ignored.
     #[clap(long = "fulcio-url", value_name = "URL", conflicts_with = "key")]
@@ -74,7 +75,7 @@ pub struct PackageAttest {
 
     /// Rekor transparency-log endpoint
     ///
-    /// Defaults to [trust.sigstore].rekor_url, else public Rekor.
+    /// Defaults to the selected `[sigstore."<host>"]` table's `rekor_url`, else public Rekor.
     #[clap(long = "rekor-url", value_name = "URL")]
     rekor_url: Option<String>,
 
@@ -134,9 +135,10 @@ impl PackageAttest {
         let identifier = self.identifier.with_domain(context.default_registry())?;
 
         // SSRF-checked (CWE-918) here, before either URL becomes an HTTP target.
-        let (fulcio_url, rekor_url) = package_sign_common::resolve_sigstore_pair(
+        let target = package_sign_common::resolve_sigstore_pair(
             context.config_trust_sigstore(),
             &identifier,
+            self.key.is_key_mode(),
             self.fulcio_url.as_deref(),
             self.rekor_url.as_deref(),
         )?;
@@ -159,13 +161,11 @@ impl PackageAttest {
             .key
             .reference()
             .map_err(|kind| SignError::new(identifier.clone(), SignErrorKind::from(kind)))?;
-        let configured_rekor_upload = context
-            .config_trust_sigstore()
-            .and_then(|sigstore| sigstore.rekor_upload);
         let rekor_upload = self
             .rekor_upload
-            .enabled(self.key.is_key_mode(), configured_rekor_upload)
+            .enabled(self.key.is_key_mode(), target.configured_rekor_upload)
             .map_err(|kind| SignError::new(identifier.clone(), kind))?;
+        let (fulcio_url, rekor_url) = target.endpoints(rekor_upload)?;
 
         let options = AttestOptions {
             fulcio_url,

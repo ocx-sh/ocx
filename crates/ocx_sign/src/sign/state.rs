@@ -44,6 +44,20 @@ impl SigningStatePaths {
             .join(format!("{}.json", rekor_authority.to_relaxed_slug()))
     }
 
+    /// `{root}/trust_root/instances/{sha256 hex of the authority}.json`, the trust-root cache of a Sigstore instance
+    /// other than the public one.
+    ///
+    /// A hash, not a slug: a slug maps `:` to `_`, so `a:5555` and `a_5555` would share a file, and a table keyed
+    /// like the public Rekor host would share the public instance's entry.
+    #[must_use]
+    pub fn trust_root_instance_file(&self, authority: &str) -> PathBuf {
+        use sha2::{Digest, Sha256};
+        self.root
+            .join("trust_root")
+            .join("instances")
+            .join(format!("{}.json", hex::encode(Sha256::digest(authority.as_bytes()))))
+    }
+
     /// Checkout directory for the TUF client that fetches the public-good Sigstore trust root.
     #[must_use]
     pub fn tuf_cache_dir(&self) -> PathBuf {

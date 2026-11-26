@@ -50,6 +50,9 @@ from src.registry import (
 )
 from src.runner import OcxRunner, registry_dir
 
+# The registry routed to the fixture index sets `index_signature = "off"`: this module does not test the
+# catalog signature check (test_index_signature.py does), so it expects no signature request and no WARN.
+
 # ---------------------------------------------------------------------------
 # Fixture: a local `index.ocx.sh`-shaped HTTP server, one per test
 # ---------------------------------------------------------------------------
@@ -80,7 +83,7 @@ def configure_index_source(
     config_path = Path(ocx.env["OCX_HOME"]) / "config.toml"
     registry_host = ocx.registry.split(":", 1)[0]
     config_path.write_text(
-        f'[registries."{namespace}"]\nindex = "{server.base_url}"\ntrusted_hosts = ["{registry_host}"]\n'
+        f'[registries."{namespace}"]\nindex = "{server.base_url}"\nindex_signature = "off"\ntrusted_hosts = ["{registry_host}"]\n'
     )
     ocx.env["OCX_INSECURE_REGISTRIES"] = f"{ocx.registry},{server.host}"
 
@@ -269,7 +272,7 @@ def test_two_hop_resolve_licensed_by_config_registries_entry_alone(
     registry_host = ocx.registry.split(":", 1)[0]
     config_path = Path(ocx.env["OCX_HOME"]) / "config.toml"
     config_path.write_text(
-        f'[registries."ocx.sh"]\nindex = "{index_server.base_url}"\ntrusted_hosts = ["{registry_host}"]\n'
+        f'[registries."ocx.sh"]\nindex = "{index_server.base_url}"\nindex_signature = "off"\ntrusted_hosts = ["{registry_host}"]\n'
         f'[registries."{index_server.host}"]\ninsecure = true\n'
     )
     # Deliberately NOT the index host: only the physical registry goes
@@ -861,7 +864,7 @@ def test_index_role_mirror_override_routes_every_request_to_the_override(
     dead_host = "no-such-index.invalid"
     config_path = Path(ocx.env["OCX_HOME"]) / "config.toml"
     config_path.write_text(
-        f'[registries."ocx.sh"]\nindex = "https://{dead_host}"\n\n'
+        f'[registries."ocx.sh"]\nindex = "https://{dead_host}"\nindex_signature = "off"\n\n'
         f'[mirrors."{dead_host}"]\nindex = "{index_server.base_url}"\n'
     )
     ocx.env["OCX_INSECURE_REGISTRIES"] = f"{ocx.registry},{index_server.host}"
@@ -923,7 +926,7 @@ def test_ocx_mirrors_env_union_forms_override_index_base(
 
     dead_host = "no-such-index.invalid"
     config_path = Path(ocx.env["OCX_HOME"]) / "config.toml"
-    config_path.write_text(f'[registries."ocx.sh"]\nindex = "https://{dead_host}"\n')
+    config_path.write_text(f'[registries."ocx.sh"]\nindex = "https://{dead_host}"\nindex_signature = "off"\n')
     ocx.env["OCX_MIRRORS"] = json.dumps(
         {dead_host: mirror_value_factory(index_server.base_url)}
     )
@@ -967,6 +970,7 @@ def test_absent_index_field_never_touches_a_dead_index_endpoint(
 
     config_path = Path(ocx.env["OCX_HOME"]) / "config.toml"
     config_path.write_text(
+        '[registries."ocx.sh"]\nindex_signature = "off"\n\n'
         "[mirrors]\n"
         f'"plain.example" = "http://{ocx.registry}"\n'
         '"index.ocx.sh" = { index = "http://127.0.0.1:1" }\n'
@@ -1019,7 +1023,7 @@ def test_builtin_base_tier_makes_ocx_sh_index_bearing(
     registry_host = ocx.registry.split(":", 1)[0]
     config_path = tmp_path / "hermetic-config.toml"
     config_path.write_text(
-        f'[registries."ocx.sh"]\ntrusted_hosts = ["{registry_host}"]\n'
+        f'[registries."ocx.sh"]\nindex_signature = "off"\ntrusted_hosts = ["{registry_host}"]\n'
         "\n[mirrors]\n"
         f'"index.ocx.sh" = {{ index = "{index_server.base_url}" }}\n'
     )
@@ -1078,6 +1082,7 @@ def test_mirror_entry_for_ocx_sh_suppresses_the_builtin_index(
 
     config_path = Path(ocx.env["OCX_HOME"]) / "config.toml"
     config_path.write_text(
+        '[registries."ocx.sh"]\nindex_signature = "off"\n\n'
         "[mirrors]\n"
         f'"ocx.sh" = "http://{ocx.registry}"\n'
         '"index.ocx.sh" = { index = "http://127.0.0.1:1" }\n'
@@ -1589,7 +1594,7 @@ def test_registry_role_only_mirror_for_index_host_never_redirects_index_traffic(
 
     config_path = Path(ocx.env["OCX_HOME"]) / "config.toml"
     config_path.write_text(
-        f'[registries."ocx.sh"]\nindex = "{index_server.base_url}"\n\n'
+        f'[registries."ocx.sh"]\nindex = "{index_server.base_url}"\nindex_signature = "off"\n\n'
         f'[mirrors."{index_server.host}"]\nregistry = "https://no-such-registry.invalid"\n'
     )
     ocx.env["OCX_INSECURE_REGISTRIES"] = f"{ocx.registry},{index_server.host}"
@@ -1674,7 +1679,7 @@ def test_registry_and_index_role_mirrors_compose_in_one_install(
     config_path = Path(ocx.env["OCX_HOME"]) / "config.toml"
     registry_host = ocx.registry.split(":", 1)[0]
     config_path.write_text(
-        f'[registries."ocx.sh"]\nindex = "https://{dead_index_host}"\ntrusted_hosts = ["{registry_host}"]\n\n'
+        f'[registries."ocx.sh"]\nindex = "https://{dead_index_host}"\nindex_signature = "off"\ntrusted_hosts = ["{registry_host}"]\n\n'
         f'[mirrors."{dead_index_host}"]\nindex = "{index_server.base_url}"\n\n'
         f'[mirrors."{ocx.registry}"]\nregistry = "http://{mirror_registry}"\n'
     )
@@ -1793,6 +1798,7 @@ def _arrange_dead_physical_host(
     config = (
         f'[registries."ocx.sh"]\n'
         f'index = "{index_server.base_url}"\n'
+        f'index_signature = "off"\n'
         f'trusted_hosts = ["{registry_host}", "127.0.0.1"]\n'
     )
     if with_registry_mirror:

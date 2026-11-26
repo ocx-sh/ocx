@@ -567,6 +567,9 @@ fn candidate_fetch_error(err: crate::Error, identifier: PackageRef) -> super::Er
         )
         .into();
     }
+    if is_trust_refusal(&err) {
+        return err;
+    }
     project_err_from_client(err, identifier, |id, src| ProjectErrorKind::RegistryUnreachable {
         identifier: Box::new(id),
         source: src,
@@ -653,6 +656,9 @@ async fn retry_fetch(
                     )
                     .into());
                 }
+                if is_trust_refusal(&err) {
+                    return Err(err);
+                }
                 let classification = classify_client_error(&err);
                 match classification {
                     ClientFailure::Transient if attempt < options.retry_attempts => {
@@ -720,6 +726,20 @@ fn policy_block_label(err: &crate::Error) -> Option<(&'static str, ocx_index::er
         return Some((policy, *block));
     }
     None
+}
+
+/// Whether the index refused a source on its signed-catalog check, directly or from inside a source walk.
+///
+/// Such a refusal is a verdict on the index, not an unreachable registry, so it keeps its own exit code.
+fn is_trust_refusal(err: &crate::Error) -> bool {
+    use ocx_index::error::Error as IndexError;
+    fn peeled(error: &IndexError) -> bool {
+        match ocx_index::error::coalesced_cause(error) {
+            IndexError::SourceWalkFailed(arc) => peeled(arc.as_error()),
+            other => matches!(other, IndexError::Trust(_)),
+        }
+    }
+    matches!(err, crate::Error::OciIndex(error) if peeled(error))
 }
 
 /// Find and classify a [`ClientError`] in `err`. `OciClient` is
@@ -1049,6 +1069,29 @@ mod tests {
     //!    source cause is preserved regardless of the outer variant.
     //! 2. Cross-check `ClassifyExitCode` — the exit code is the stable
     //!    surface contract a script depends on.
+
+    /// A signed-catalog refusal must reach the exit-code chain as itself: wrapped as an unreachable
+    /// registry it exits 69 and hides that the index, not the network, was refused.
+    #[test]
+    fn a_trust_refusal_inside_a_source_walk_is_not_an_unreachable_registry() {
+        use ocx_index::error::Error as IndexError;
+        use ocx_index::trust_error::IndexTrustError;
+
+        let refusal = || IndexTrustError::RootDigestMismatch {
+            registry: "ocx.sh".to_owned(),
+            package: "acme/tool".to_owned(),
+        };
+        let walked = crate::Error::OciIndex(IndexError::SourceWalkFailed(IndexError::Trust(refusal()).into()));
+        assert!(is_trust_refusal(&walked));
+        let fetched = crate::Error::OciIndex(IndexError::SourceWalkFailed(
+            IndexError::SourceFetchFailed(IndexError::Trust(refusal()).into()).into(),
+        ));
+        assert!(is_trust_refusal(&fetched));
+        assert!(is_trust_refusal(&crate::Error::OciIndex(IndexError::Trust(refusal()))));
+        assert!(!is_trust_refusal(&crate::Error::OciIndex(
+            IndexError::SourceWalkFailed(IndexError::PathInvalid(PathBuf::new()).into())
+        )));
+    }
 
     use std::sync::Arc;
     use std::sync::Mutex;

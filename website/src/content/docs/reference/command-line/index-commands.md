@@ -27,6 +27,8 @@ ocx index catalog [OPTIONS] [REGISTRY]...
 
 | Flag | Value | Description |
 | --- | --- | --- |
+| `--no-verify` |  | Skip the signed index catalog check for this run |
+| `--verify` |  | Check the signed index catalog even when `OCX_NO_VERIFY` is set |
 | `--with-tags` |  | List tags for each repository in the catalog |
 
 ## `ocx index list` {#index-list}
@@ -45,8 +47,10 @@ ocx index list [OPTIONS] <PACKAGE>...
 
 | Flag | Value | Description |
 | --- | --- | --- |
+| `--no-verify` |  | Skip the signed index catalog check for this run |
 | `--platforms` |  | Shows which platforms are available for each package. Uses the tag from the identifier, or `latest` if none specified |
 | `--variants` |  | Lists unique variant names found in the tags |
+| `--verify` |  | Check the signed index catalog even when `OCX_NO_VERIFY` is set |
 
 ## `ocx index regenerate` {#index-regenerate}
 
@@ -73,6 +77,37 @@ A symlinked directory takes everything beneath it in one step.
 ```text
 ocx index regenerate <REGISTRY>...
 ```
+
+## `ocx index sign` {#index-sign}
+
+Sign a local index catalog.
+
+Sets the catalog's expiry, then writes `c/index.json` and its detached signature `c/index.json.sigstore.json` under `<DIR>`. The signature is keyless (Sigstore) unless `--key` names a signing key.
+
+The signature records `--registry`, so it cannot be replayed for another registry's catalog.
+
+Nothing is written unless signing succeeds. Re-running replaces both files with a new expiry.
+
+`--offline` rejects this command.
+
+Details: <https://ocx.sh/docs/explanation/signing#index-signatures>
+
+```text
+ocx index sign [OPTIONS] --registry <REGISTRY> <DIR>
+```
+
+| Flag | Value | Description |
+| --- | --- | --- |
+| `--expires-in-days` | `DAYS` | Days until the signed catalog expires (0-366) |
+| `--fulcio-url` | `URL` | Fulcio CA endpoint (the keyless certificate issuer) |
+| `--identity-token-file` | `PATH` | Read the OIDC identity token from this file (highest precedence) |
+| `--identity-token-stdin` |  | Read the OIDC identity token from stdin (second precedence) |
+| `--key` | `REF` | Sign or verify with a key pair instead of keyless Sigstore |
+| `--no-rekor-upload` |  | Skip the Rekor entry |
+| `--no-tty` |  | Suppress the interactive browser OAuth fallback (CI / headless) |
+| `--registry` | `REGISTRY` | Registry the index serves, for example `ocx.sh` |
+| `--rekor-upload` |  | Record the signature in the Rekor transparency log |
+| `--rekor-url` | `URL` | Rekor transparency-log endpoint |
 
 ## `ocx index sync` {#index-sync}
 
@@ -104,6 +139,8 @@ A plain-OCI registry's repository listing needs the registry's `_catalog` endpoi
 
 A registry that refuses it fails that registry's snapshot. A catalog that cannot be read fails the command (exit 80 for an auth refusal, 69 for a published source serving no `c/index.json`).
 
+With `index_signature` set to `enforce`, that absent catalog exits 79 instead. A catalog that could not be fetched keeps the transport's exit, 75 for a transient failure.
+
 A catalog listing zero packages exits 0 with a warning, since a token without catalog scope often answers with an empty list. A catalog carrying a yanked tag is refused with exit 65 unless the operator sets `OCX_ALLOW_YANKED`.
 
 The first successful sync for a published source also writes its `config.json` when it is absent.
@@ -117,6 +154,8 @@ ocx index sync [OPTIONS] <REGISTRY>...
 | Flag | Value | Description |
 | --- | --- | --- |
 | `--dry-run` |  | Print the packages this would refresh and refresh none; nothing is written, not even `config.json`, and no `[patches]` sync runs |
+| `--no-verify` |  | Skip the signed index catalog check for this run |
+| `--verify` |  | Check the signed index catalog even when `OCX_NO_VERIFY` is set |
 
 ## `ocx index update` {#index-update}
 
@@ -149,5 +188,10 @@ The first successful update for a published source also writes that source's `co
 Details: <https://ocx.sh/docs/reference/command-line/index-commands/#index-update>
 
 ```text
-ocx index update <PACKAGE>...
+ocx index update [OPTIONS] <PACKAGE>...
 ```
+
+| Flag | Value | Description |
+| --- | --- | --- |
+| `--no-verify` |  | Skip the signed index catalog check for this run |
+| `--verify` |  | Check the signed index catalog even when `OCX_NO_VERIFY` is set |

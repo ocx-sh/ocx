@@ -10,13 +10,13 @@ install fail-closed (no package-store or symlink state). No policy → no verify
 (trust is opt-in). `--no-verify` / `OCX_NO_VERIFY` opt out with a single WARN
 (the flag wins over the env).
 
-Auto-verify has no flag tier, so it uses `[trust.sigstore].rekor_url` if set
-and the public default otherwise — these tests set neither, and instead pin
-the local stack's Rekor key via
-`OCX_SIGSTORE_TRUSTED_ROOT`, the same air-gapped seam `test_offline_verify.py`
-exercises. That pin is what makes the tests hermetic AND what makes them
-falsifiable: the SET was signed by the local Rekor, so a verify that reached the
-public endpoint instead would fail against a key that never signed it.
+Auto-verify has no flag tier. A policy signer names its Sigstore instance with
+`sigstore = "<authority>"`, and the instance table `[sigstore."<authority>"]`
+carries the local stack's trust root (Fulcio CA and pinned Rekor key). That is
+what makes the tests hermetic AND what makes them falsifiable: the SET was
+signed by the local Rekor, so a verify that reached the public instance instead
+would fail against a root that never signed it. `OCX_SIGSTORE_TRUSTED_ROOT` is read by
+`package verify` and `package sbom` only, so this path ignores it and it is not used here.
 
 Identity and issuer come from the stack fixture rather than literals — the local
 dex mints exactly one identity, and restating it here would be a second source
@@ -32,6 +32,12 @@ from pathlib import Path
 import pytest
 
 from src.helpers import rglob_no_links
+from src.index_signing import (
+    assert_retired_table_refused,
+    authority,
+    private_authority,
+    stack_table,
+)
 from src.runner import OcxRunner, PackageInfo, current_platform
 from tests.fixtures.sigstore_stack import SigstoreStack
 from tests.test_attest import attest, cyclonedx_predicate
@@ -46,12 +52,15 @@ def _policy_scope(ocx: OcxRunner, pkg: PackageInfo) -> str:
     return f"{ocx.registry}/{pkg.repo}"
 
 
-def _write_operator_policy(ocx: OcxRunner, scope: str, identity: str, issuer: str) -> None:
+def _write_operator_policy(
+    ocx: OcxRunner, scope: str, identity: str, issuer: str, *, trusted_root: str | None = None
+) -> None:
     """Write a `[[trust.policy]]` into `$OCX_HOME/config.toml` (operator tier)."""
     config = ocx.ocx_home / "config.toml"
     config.write_text(
         f'[[trust.policy]]\nscope = "{scope}"\n'
-        f'signers = [{{ kind = "keyless", identity = "{identity}", oidc_issuer = "{issuer}" }}]\n'
+        f'signers = [{{ kind = "keyless", identity = "{identity}", oidc_issuer = "{issuer}", '
+        f'sigstore = "{private_authority()}" }}]\n' + stack_table(trusted_root=trusted_root)
     )
 
 
@@ -83,8 +92,9 @@ def _assert_no_partial_state(ocx: OcxRunner, pkg: PackageInfo) -> None:
 
 
 def _tuf(stack: SigstoreStack) -> dict[str, str]:
-    """Env pinning the Rekor key so auto-verify needs no default-Rekor fetch."""
-    return {"OCX_SIGSTORE_TRUSTED_ROOT": str(stack.trusted_root_json)}
+    """Extra env for auto-verify: none. The private instance's root comes from the table
+    `_write_operator_policy` writes, never from `OCX_SIGSTORE_TRUSTED_ROOT`."""
+    return {}
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -272,11 +282,11 @@ def test_offline_auto_verify_reads_the_file_url_spelling(
     ocx: OcxRunner, published_package: PackageInfo,
     sigstore_stack: SigstoreStack, identity_token: Path,
 ) -> None:
-    """D1 — auto-verify reads ``OCX_SIGSTORE_TRUSTED_ROOT`` at the same door verify does.
+    """D1 — auto-verify reads the table's ``trusted_root`` in the ``file://`` spelling too.
 
-    ``ocx package verify`` and auto-verify read the variable at two different
+    ``ocx package verify`` and auto-verify read the root at two different
     call sites, so a widening applied to one and not the other leaves an
-    operator holding "the env var takes ``file://`` except on install".
+    operator holding "the root takes ``file://`` except on install".
 
     Offline is what makes it discriminating: with the spelling unconsumed there
     is no pinned Rekor key, install carries no ``--rekor-url``, and
@@ -285,18 +295,79 @@ def test_offline_auto_verify_reads_the_file_url_spelling(
     """
     pkg = published_package
     _sign(ocx, sigstore_stack, identity_token, pkg)
-    _write_operator_policy(ocx, _policy_scope(ocx, pkg), sigstore_stack.identity, sigstore_stack.issuer)
-
-    spelled = {"OCX_SIGSTORE_TRUSTED_ROOT": f"file://{sigstore_stack.trusted_root_json.resolve().as_posix()}"}
+    spelled_root = f"file://{sigstore_stack.trusted_root_json.resolve().as_posix()}"
+    _write_operator_policy(
+        ocx, _policy_scope(ocx, pkg), sigstore_stack.identity, sigstore_stack.issuer, trusted_root=spelled_root
+    )
+    spelled: dict[str, str] = {}
 
     online = _run(ocx, "install", pkg.short, extra_env=spelled)
     assert online.returncode == 0, f"online install (cache warm) failed: {online.stderr.strip()}"
 
     offline = _run(ocx, "install", pkg.short, extra_env={"OCX_OFFLINE": "1", **spelled})
     assert offline.returncode == 0, (
-        f"auto-verify must read the file:// spelling of OCX_SIGSTORE_TRUSTED_ROOT, got "
+        f"auto-verify must read the file:// spelling of the table trusted_root, got "
         f"{offline.returncode}\nstderr: {offline.stderr.strip()}"
     )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# OCX_SIGSTORE_TRUSTED_ROOT is a `package verify` / `package sbom` input, not an install one
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_the_trusted_root_variable_does_not_supply_the_root_of_an_install_time_verify(
+    ocx: OcxRunner, published_package: PackageInfo,
+    sigstore_stack: SigstoreStack, identity_token: Path,
+) -> None:
+    """The variable alone cannot satisfy auto-verify; the convention file can.
+
+    1. Install under a policy naming the private instance, whose table carries no root, with the stack's
+       root in `OCX_SIGSTORE_TRUSTED_ROOT` only: refused 78 `sigstore_trusted_root_missing`, exactly
+       as with the variable unset.
+    2. Positive control: `package verify` of the same package in the same environment passes, so the
+       root itself is good and only the install path ignored it.
+    3. The same root at the instance's convention path, variable unset: the install passes.
+    """
+    pkg = published_package
+    _sign(ocx, sigstore_stack, identity_token, pkg)
+    name = authority(sigstore_stack)
+    ocx.ocx_home.joinpath("config.toml").write_text(
+        f'[[trust.policy]]\nscope = "{_policy_scope(ocx, pkg)}"\n'
+        f'signers = [{{ kind = "keyless", identity = "{sigstore_stack.identity}", '
+        f'oidc_issuer = "{sigstore_stack.issuer}", sigstore = "{name}" }}]\n'
+        f'[sigstore."{name}"]\nfulcio_url = "{sigstore_stack.fulcio_url}"\n'
+        f'rekor_url = "{sigstore_stack.rekor_url}"\n'
+    )
+    variable = {"OCX_SIGSTORE_TRUSTED_ROOT": str(sigstore_stack.trusted_root_json)}
+
+    def install(env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+        return ocx.run("package", "install", "-p", current_platform(), pkg.short, check=False, env_overlay=env)
+
+    without_root = install({})
+    assert without_root.returncode == 78, without_root.stderr
+    with_variable = install(variable)
+    assert with_variable.returncode == without_root.returncode, with_variable.stderr
+    for refused in (without_root, with_variable):
+        assert json.loads(refused.stdout)["error"]["detail"] == "sigstore_trusted_root_missing", refused.stdout
+    _assert_no_partial_state(ocx, pkg)
+
+    control = subprocess.run(
+        [
+            str(ocx.binary), "package", "verify", "-p", current_platform(),
+            "--sigstore", name, "--rekor-url", sigstore_stack.rekor_url,
+            "--certificate-identity", sigstore_stack.identity,
+            "--certificate-oidc-issuer", sigstore_stack.issuer, pkg.short,
+        ],
+        capture_output=True, text=True, env={**ocx.env, **variable}, check=False,
+    )
+    assert control.returncode == 0, f"the root must verify with the variable: {control.stderr.strip()}"
+
+    convention = ocx.ocx_home / "sigstore" / "instances" / name.replace(":", "_") / "trusted-root.json"
+    convention.parent.mkdir(parents=True)
+    convention.write_bytes(sigstore_stack.trusted_root_json.read_bytes())
+    installed = install({})
+    assert installed.returncode == 0, installed.stderr.strip()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -553,3 +624,7 @@ def test_no_verify_is_honoured_under_an_unlocked_required(
     result = _run(ocx, "install", pkg.short, flags=("--no-verify",))
     assert result.returncode == 0, result.stderr
     assert result.stderr.lower().count("verification skipped") == 1, result.stderr
+
+
+def test_the_retired_trust_sigstore_spelling_is_refused_by_install(ocx: OcxRunner) -> None:
+    assert_retired_table_refused(ocx)

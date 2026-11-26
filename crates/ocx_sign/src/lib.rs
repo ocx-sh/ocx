@@ -4,6 +4,7 @@
 //! Supply-chain signing: keyless Sigstore sign, DSSE attest, full verify,
 //! `TrustRoot` verification material, cosign simplesigning, SBOM referrers.
 
+pub mod detached;
 pub mod simplesigning;
 
 // The attest <-> sign/verify error-kind cycle is deliberate: adr_sbom_attestations.md § D-i — Module layout

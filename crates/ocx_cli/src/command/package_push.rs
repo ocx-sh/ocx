@@ -174,7 +174,8 @@ pub struct PackagePush {
 
     /// Fulcio CA endpoint (the keyless certificate issuer)
     ///
-    /// Defaults to [trust.sigstore].fulcio_url, else public Fulcio.
+    /// Defaults to public Fulcio. The host picks the `[sigstore."<host>"]` config table whose trust
+    /// root and Rekor endpoint apply.
     ///
     /// Keyless-only: an error alongside `--key`, never silently ignored. A
     /// usage error without `--sign` or `--sbom`.
@@ -183,7 +184,7 @@ pub struct PackagePush {
 
     /// Rekor transparency-log endpoint
     ///
-    /// Defaults to [trust.sigstore].rekor_url, else public Rekor. A usage
+    /// Defaults to the selected `[sigstore."<host>"]` table's `rekor_url`, else public Rekor. A usage
     /// error without `--sign` or `--sbom`.
     #[clap(long = "rekor-url", value_name = "URL")]
     rekor_url: Option<String>,
@@ -358,7 +359,7 @@ impl PackagePush {
         };
 
         // Before the push, so a bad `--key`, keyless `--no-rekor-upload` or forbidden URL costs no upload.
-        // Gated on a signing request, or an ordinary push fails on a `[trust.sigstore]` key it never reads.
+        // Gated on a signing request, or an ordinary push fails on a Sigstore instance table key it never reads.
         let signing = match self.sign || self.sbom.is_some() {
             false => None,
             true => Some(self.resolve_signing(&context, &identifier).await?),
@@ -500,9 +501,10 @@ impl PackagePush {
         context: &crate::app::Context,
         identifier: &ocx_oci::PackageRef,
     ) -> anyhow::Result<ocx_package_manager::SignOptions> {
-        let (fulcio_url, rekor_url) = package_sign_common::resolve_sigstore_pair(
+        let target = package_sign_common::resolve_sigstore_pair(
             context.config_trust_sigstore(),
             identifier,
+            self.key.is_key_mode(),
             self.fulcio_url.as_deref(),
             self.rekor_url.as_deref(),
         )?;
@@ -510,13 +512,11 @@ impl PackagePush {
         let key = self.key.reference().map_err(|kind| {
             ocx_sign::sign::SignError::new(identifier.clone(), ocx_sign::sign::SignErrorKind::from(kind))
         })?;
-        let configured_rekor_upload = context
-            .config_trust_sigstore()
-            .and_then(|sigstore| sigstore.rekor_upload);
         let rekor_upload = self
             .rekor_upload
-            .enabled(self.key.is_key_mode(), configured_rekor_upload)
+            .enabled(self.key.is_key_mode(), target.configured_rekor_upload)
             .map_err(|kind| ocx_sign::sign::SignError::new(identifier.clone(), kind))?;
+        let (fulcio_url, rekor_url) = target.endpoints(rekor_upload)?;
         let identity_token = package_sign_common::resolve_override_token(None, false, identifier).await?;
         Ok(ocx_package_manager::SignOptions {
             fulcio_url,
@@ -917,7 +917,7 @@ mod signing_flag_tests {
     }
 
     /// The endpoint pair `push` resolves prefers its own flags
-    /// over `[trust.sigstore]`.
+    /// over the Sigstore instance table.
     ///
     /// Both tiers are populated and they disagree, so a resolver reading the
     /// wrong one is a wrong *value* rather than an absent one — which a
@@ -925,16 +925,16 @@ mod signing_flag_tests {
     /// read off the parsed command exactly as `resolve_signing` reads them, so
     /// a flag that never reached the struct reds this too.
     ///
-    /// `[trust.sigstore]` is what makes a self-hosted stack a fleet-wide
+    /// the Sigstore instance table is what makes a self-hosted stack a fleet-wide
     /// setting; the flags are what let one publish run out-vote it, which is
     /// the whole reason ocx-mirror needs them.
     #[test]
     fn the_resolved_endpoint_pair_prefers_pushs_flags_over_trust_sigstore() {
-        let configured = ocx_trust::SigstoreTrust {
+        let configured = ocx_trust::SigstoreInstances::with_public(ocx_trust::SigstoreInstance {
             fulcio_url: Some("https://fleet-fulcio.example".to_string()),
             rekor_url: Some("https://fleet-rekor.example".to_string()),
-            ..ocx_trust::SigstoreTrust::default()
-        };
+            ..Default::default()
+        });
         let identifier = ocx_oci::PackageRef::parse("registry.example/pkg:1.0").expect("static parse");
 
         let push = parse(&[
@@ -949,10 +949,13 @@ mod signing_flag_tests {
         let (fulcio, rekor) = crate::command::package_sign_common::resolve_sigstore_pair(
             Some(&configured),
             &identifier,
+            false,
             push.fulcio_url.as_deref(),
             push.rekor_url.as_deref(),
         )
-        .expect("both flag values are valid https endpoints");
+        .expect("both flag values are valid https endpoints")
+        .endpoints(true)
+        .expect("a Rekor flag is present");
 
         assert_eq!(fulcio.as_str().trim_end_matches('/'), "https://flag-fulcio.example");
         assert_eq!(rekor.as_str().trim_end_matches('/'), "https://flag-rekor.example");

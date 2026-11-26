@@ -4,7 +4,7 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use ocx_package_manager::managed_config::{preview_managed_config, read_candidate_payload};
+use ocx_package_manager::managed_config::{ManagedConfigPublishError, preview_managed_config, read_candidate_payload};
 
 use crate::api::data::config_test::ConfigTestData;
 
@@ -26,7 +26,28 @@ impl ConfigTestArgs {
         // fold: base tiers, then the candidate, then the explicit overlay.
         // Same order adoption produces, so the report is the configuration the
         // machine would really resolve — overlay included.
-        let preview = preview_managed_config(&bytes, context.config_base().clone(), context.config_overlay())?;
+        // The loader's refusal names the file; the payload-level one has no path to name.
+        let preview = preview_managed_config(&bytes, context.config_base().clone(), context.config_overlay()).map_err(
+            |error| match error {
+                ManagedConfigPublishError::TrustSigstoreRetired => {
+                    anyhow::Error::new(ocx_config::error::Error::TrustSigstoreRetired {
+                        path: self.config.clone(),
+                    })
+                }
+                ManagedConfigPublishError::AmbiguousTrustRoot { authority } => {
+                    anyhow::Error::new(ocx_config::error::Error::AmbiguousTrustRoot {
+                        path: self.config.clone(),
+                        authority,
+                    })
+                }
+                // Same exit and slug through the context: the chain walk reaches the refusal.
+                other @ (ManagedConfigPublishError::SigstoreAuthorityInvalid { .. }
+                | ManagedConfigPublishError::SigstoreAuthorityDuplicate { .. }) => {
+                    anyhow::Error::new(other).context(format!("{} is not a valid config", self.config.display()))
+                }
+                other => other.into(),
+            },
+        )?;
 
         // The gates every ocx invocation applies to its own config, run against
         // the effective merge — a payload that parses can still be one no

@@ -11,7 +11,7 @@ set -euo pipefail
 # [[trust.policy]] pin that makes the verify lines flag-free, and put the
 # dex identity token in OCX_IDENTITY_TOKEN and the stack's CA in
 # OCX_SIGSTORE_TRUSTED_ROOT — the two channels a CI job uses, which is why the
-# lines below carry neither flag.
+# lines below carry neither flag. Only the verify lines read the CA variable.
 # $FULCIO / $REKOR address the stack; the docs page carries the concrete values.
 
 # region cast

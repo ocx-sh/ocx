@@ -27,6 +27,9 @@ from src.helpers import make_package
 from src.registry import fetch_manifest_digest, fetch_manifest_raw, put_manifest
 from src.runner import OcxRunner
 
+# The registry routed to the fixture index sets `index_signature = "off"`: this module does not test the
+# catalog signature check (test_index_signature.py does), so it expects no signature request and no WARN.
+
 pytestmark = pytest.mark.command("package_prune*")
 
 BUILD_1 = "0.5.0-canary_20260101000000"
@@ -144,7 +147,7 @@ def _configure(
     mirror: static_index.StaticIndexServer | None = None,
 ) -> None:
     """Points `[registries."ocx.sh"] index` at the fixture, optionally with an index-role mirror of it."""
-    lines = [f'[registries."ocx.sh"]\nindex = "{server.base_url}"\n']
+    lines = [f'[registries."ocx.sh"]\nindex = "{server.base_url}"\nindex_signature = "off"\n']
     if trusted:
         lines.append(f'trusted_hosts = ["{ocx.registry.split(":", 1)[0]}"]\n')
     if mirror is not None:

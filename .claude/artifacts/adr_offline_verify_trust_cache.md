@@ -104,6 +104,13 @@ material ⇒ verify offline; none ⇒ the documented fail-vs-skip policy.
 
 ## Amendment (2026-08-19) — six-rung ladder, `--trusted-root`, `[trust.sigstore]`
 
+> **Amendment note (2026-11-25).** `[trust.sigstore]` below is no longer live config:
+> it is refused with exit 78 and replaced by `[sigstore."<fulcio-authority>"]` instance
+> tables (`adr_publisher_trust_distribution.md`, amended). Rung 3 now reads the
+> instance table; the rest of the ladder stands. The index catalog check also seeds
+> the same `state/trust_root/` cache after a successful online check. The text below
+> is kept as written.
+
 Supersedes the "`OCX_SIGSTORE_TUF_ROOT` override" and "Trust-material precedence
 (verify)" sections above. Everything else in this ADR stands.
 

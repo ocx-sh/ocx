@@ -102,7 +102,7 @@ def configure_index_source(ocx: OcxRunner, server: static_index.StaticIndexServe
     config_path = Path(ocx.env["OCX_HOME"]) / "config.toml"
     registry_host = ocx.registry.split(":", 1)[0]
     config_path.write_text(
-        f'[registries."ocx.sh"]\nindex = "{server.base_url}"\ntrusted_hosts = ["{registry_host}"]\n'
+        f'[registries."ocx.sh"]\nindex = "{server.base_url}"\nindex_signature = "off"\ntrusted_hosts = ["{registry_host}"]\n'
     )
     ocx.env["OCX_INSECURE_REGISTRIES"] = f"{ocx.registry},{server.host}"
 
