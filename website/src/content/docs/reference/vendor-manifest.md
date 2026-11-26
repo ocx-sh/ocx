@@ -19,7 +19,8 @@ Every path field obeys these rules, enforced when the manifest is written.
 
 - Relative to the output directory, separated by `/`, with no leading `/`.
 - No empty, `.` or `..` segment.
-- For a `windows/*` platform: no `:` or `\`, no control character (U+0000 to U+001F), none of `<>"|?*`, no segment that is a device name (`CON`, `PRN`, `AUX`, `NUL`, `COM1` to `COM9`, `LPT1` to `LPT9`, with any extension) and no segment ending in `.` or a space.
+- For a `windows/*` platform: no `:`, `\`, control character (U+0000 to U+001F) or any of `<>"|?*`.
+- For a `windows/*` platform: no segment that is a device name (`CON`, `PRN`, `AUX`, `NUL`, `COM1` to `COM9`, `LPT1` to `LPT9`, with any extension) and no segment ending in `.` or a space.
 - A value that breaks a rule, a symlink whose target leaves its package, or a value holding `@VENDOR_DIR@`, NUL or non-UTF-8 text exits 65 (see [Errors](#vendor-manifest-errors)).
 
 ## Top-level fields {#vendor-manifest-fields}

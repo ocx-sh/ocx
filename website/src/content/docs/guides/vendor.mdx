@@ -92,7 +92,7 @@ Use it to learn which tools a selection exposes on a platform before paying for 
 
 ## macOS \{#vendor-macos\}
 
-macOS on Apple silicon starts only a binary that carries a code signature. The `aarch64-apple-darwin` launcher ships with an ad-hoc signature. OCX copies it unchanged, so a copy, a rename and a `tar` round trip keep it valid.
+The `aarch64-apple-darwin` launcher ships with an ad-hoc signature that `codesign --verify` accepts. OCX copies it unchanged, so a copy, a rename and a `tar` round trip keep it valid.
 
 A file that arrived through a browser or a mail client carries the quarantine attribute, and Gatekeeper blocks it. Clear it once on the copied directory.
 
@@ -114,7 +114,7 @@ Launchers are `.exe` files with a `.direct` file beside them. A declared binary 
 
 Every other program starts through `CreateProcessW` with the exit code passed through. Path rules for a `windows/*` platform are stricter than on Unix, listed in the [manifest reference][ref-manifest-paths].
 
-A launcher starts a program whose path is longer than 260 characters. A working directory that long still fails in Windows itself, and a batch entry point runs through `cmd.exe`, which has the same limit. Keep the directory the tree sits in short, and under [Bazel][bazel] use a short output root.
+A launcher starts a program whose path is 260 characters or longer. A working directory of that length still fails in Windows itself, and a batch entry point runs through `cmd.exe`, which has the same limit. Keep the directory the tree sits in short, and under [Bazel][bazel] use a short output root.
 
 ## Errors \{#vendor-errors\}
 
