@@ -112,6 +112,14 @@ pub(super) fn read_regular_bounded(path: &Path) -> Result<Option<Vec<u8>>, ReadE
         {
             return Ok(None);
         }
+        // Windows refuses to open a directory without backup semantics, so access denied there can mean "not a file".
+        Err(err)
+            if cfg!(windows)
+                && err.kind() == std::io::ErrorKind::PermissionDenied
+                && std::fs::metadata(path).is_ok_and(|metadata| metadata.is_dir()) =>
+        {
+            return Err(ReadError::NotRegular);
+        }
         Err(err) => return Err(ReadError::Io(err)),
     };
     // The check runs on the opened handle, so a path swapped for a FIFO after the open changes nothing.
@@ -1238,11 +1246,12 @@ mod tests {
             {"key":"FLAGS","value":"-b","kind":"list","separator":" "},
             {"key":"FLAGS","value":"-a","kind":"list","separator":" "}]"#;
         let located = located(&sidecar_with("[]", "[]", env), "/v");
-        let launch = plan_launch(&located, pairs(&[("PATH", "/usr/bin:/v/one")]), Vec::new(), false);
-        assert_eq!(
-            launch.env,
-            pairs(&[("FLAGS", "-b -a"), ("PATH", "/v/two:/v/one:/usr/bin")])
-        );
+        // A path list splits and joins on the host separator, `;` on Windows.
+        let host_list = |segments: &[&str]| std::env::join_paths(segments).unwrap().into_string().unwrap();
+        let inherited = host_list(&["/usr/bin", "/v/one"]);
+        let launch = plan_launch(&located, pairs(&[("PATH", inherited.as_str())]), Vec::new(), false);
+        let expected = host_list(&["/v/two", "/v/one", "/usr/bin"]);
+        assert_eq!(launch.env, pairs(&[("FLAGS", "-b -a"), ("PATH", expected.as_str())]));
     }
 
     #[test]
