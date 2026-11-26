@@ -224,6 +224,31 @@ fn a_pattern_carries_exactly_one_slot() {
     );
 }
 
+/// A `{…}` name under a removed-at-spawn class cannot be listed, so the vendored `unset` would miss it.
+fn patterned_in_enumerated_class(vars: &[&EnvVar]) -> Vec<String> {
+    vars.iter()
+        .filter(|var| {
+            var.is_pattern()
+                && matches!(
+                    var.propagation,
+                    Propagation::Credential | Propagation::HookLocal | Propagation::State
+                )
+        })
+        .map(|var| var.name.to_owned())
+        .collect()
+}
+
+#[test]
+fn removed_at_spawn_classes_hold_no_pattern() {
+    assert_eq!(patterned_in_enumerated_class(&live()), Vec::<String>::new());
+    let bad = [declaration("OCX_{A}_X", Visibility::Public, false, "d")];
+    let bad = Box::leak(Box::new(EnvVar {
+        propagation: Propagation::Credential,
+        ..*bad[0]
+    }));
+    assert_eq!(patterned_in_enumerated_class(&[bad]), ["OCX_{A}_X"]);
+}
+
 #[test]
 fn only_a_secret_is_scrubbed() {
     assert_eq!(credential_but_not_secret(&live()), Vec::<String>::new());

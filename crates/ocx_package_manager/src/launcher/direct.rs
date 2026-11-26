@@ -5,8 +5,10 @@
 
 use std::path::Path;
 
-use ocx_env_apply::direct::DirectSidecar;
+use ocx_env::Propagation;
+use ocx_env_apply::direct::{DirectSidecar, SidecarError};
 
+use super::generate::write_launcher_file;
 use crate::tasks::vendor::VendorError;
 
 /// Writes the launcher `<name>` (`<name>.exe` on Windows) as a byte copy of `blob`, then `<name>.direct`.
@@ -23,15 +25,57 @@ pub async fn write_direct_launcher(
     blob: &[u8],
     sidecar: &DirectSidecar,
 ) -> Result<(), VendorError> {
-    let _ = (dir, name, blob, sidecar);
-    unimplemented!("write_direct_launcher")
+    let mut sidecar = sidecar.clone();
+    // The launcher's environment is never the caller's: every credential and every plumbing key is removed.
+    sidecar.unset = unset_keys();
+    sidecar.validate(cfg!(windows)).map_err(|e| match e {
+        SidecarError::PathNotInRoot(path) => VendorError::PathUnrepresentable { path },
+        other => VendorError::ValueUnrepresentable {
+            reason: other.to_string(),
+        },
+    })?;
+    let body = serde_json::to_string_pretty(&sidecar)
+        .map_err(|e| VendorError::ValueUnrepresentable { reason: e.to_string() })?;
+
+    let launcher = dir.join(if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name.to_owned()
+    });
+    // Launcher first, sidecar second: a fault must not leave a sidecar without its launcher.
+    tokio::fs::write(&launcher, blob)
+        .await
+        .map_err(|e| crate::error::file_error(&launcher, e))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        tokio::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755))
+            .await
+            .map_err(|e| crate::error::file_error(&launcher, e))?;
+    }
+    write_launcher_file(dir.join(format!("{name}.direct")), body).await?;
+    Ok(())
+}
+
+/// Keys removed from the child's environment, sorted for a reproducible sidecar.
+fn unset_keys() -> Vec<String> {
+    let mut keys: Vec<String> = [Propagation::Credential, Propagation::HookLocal, Propagation::State]
+        .into_iter()
+        .flat_map(ocx_env::keys_with)
+        .chain(["OCX_BINARY_PIN"])
+        .map(str::to_owned)
+        .collect();
+    keys.sort();
+    keys.dedup();
+    keys
 }
 
 #[cfg(test)]
 mod tests {
-    use ocx_env_apply::direct::DirectSidecar;
+    use ocx_env_apply::direct::{DirectSidecar, EnvRecord};
 
     use super::write_direct_launcher;
+    use crate::tasks::vendor::VendorError;
 
     fn sidecar(name: &str) -> DirectSidecar {
         serde_json::from_value(serde_json::json!({
@@ -70,5 +114,54 @@ mod tests {
             let launcher_ino = std::fs::metadata(&launcher).expect("launcher").ino();
             assert_ne!(source_ino, launcher_ino, "a copy has its own inode");
         }
+    }
+
+    async fn write(sidecar: &DirectSidecar) -> (tempfile::TempDir, Result<(), VendorError>) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let result = write_direct_launcher(tmp.path(), "tool", b"blob", sidecar).await;
+        (tmp, result)
+    }
+
+    /// V-62 writer: a `program` outside the root is refused with nothing written; a well-formed one is written.
+    #[tokio::test]
+    async fn program_outside_the_root_is_refused() {
+        let mut bad = sidecar("bin/tool");
+        bad.program = "@VENDOR_DIR@/../escape".into();
+        let (tmp, result) = write(&bad).await;
+        assert!(matches!(result, Err(VendorError::PathUnrepresentable { .. })));
+        assert_eq!(std::fs::read_dir(tmp.path()).expect("dir").count(), 0);
+
+        let (_tmp, result) = write(&sidecar("bin/tool")).await;
+        assert!(result.is_ok());
+    }
+
+    /// V-72 writer: a reserved `env` key is refused; an ordinary key is written, with `unset` filled in.
+    #[tokio::test]
+    async fn reserved_env_key_is_refused() {
+        for key in ["OCX_BINARY_PIN", "__OCX_ENV_STATE", "OCX_IDENTITY_TOKEN"] {
+            let mut bad = sidecar("bin/tool");
+            bad.env = vec![EnvRecord {
+                key: key.into(),
+                value: "v".into(),
+                kind: ocx_env_apply::ApplyKind::Constant,
+                separator: None,
+            }];
+            let (_tmp, result) = write(&bad).await;
+            assert!(matches!(result, Err(VendorError::ValueUnrepresentable { .. })), "{key}");
+        }
+
+        let mut ok = sidecar("bin/tool");
+        ok.env = vec![EnvRecord {
+            key: "JAVA_HOME".into(),
+            value: "v".into(),
+            kind: ocx_env_apply::ApplyKind::Constant,
+            separator: None,
+        }];
+        let (tmp, result) = write(&ok).await;
+        assert!(result.is_ok());
+        let written: DirectSidecar =
+            serde_json::from_slice(&std::fs::read(tmp.path().join("tool.direct")).expect("sidecar")).expect("json");
+        assert!(written.unset.contains(&"OCX_BINARY_PIN".to_owned()));
+        assert!(written.unset.contains(&"OCX_IDENTITY_TOKEN".to_owned()));
     }
 }

@@ -224,7 +224,7 @@ async fn first_bakeable_ocx(installed: PathBuf, running: Option<PathBuf>) -> Opt
     None
 }
 
-async fn write_launcher_file(path: PathBuf, body: String) -> Result<(), crate::Error> {
+pub(super) async fn write_launcher_file(path: PathBuf, body: String) -> Result<(), crate::Error> {
     tokio::fs::write(&path, body.as_bytes())
         .await
         .map_err(|e| crate::error::file_error(&path, e))
