@@ -772,6 +772,13 @@ pub(crate) enum PathLane {
 
     /// The digest root, always; for dependencies, which are not lock entries.
     Digest,
+
+    /// `<token root>/packages/…` for `ocx vendor`; names a path inside the vendor directory, never one on this host.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the vendor task constructs it once the lane is wired")
+    )]
+    Vendor,
 }
 
 /// The composition's single install-path producer, carrying the already-probed trusted links;
@@ -806,6 +813,15 @@ impl ComposePaths {
         Self {
             trusted: HashMap::new(),
         }
+    }
+
+    /// Install paths rooted at `token_root` (the `@VENDOR_DIR@` token), touching no filesystem and no shim slot.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the vendor task constructs it once the lane is wired")
+    )]
+    pub(crate) fn vendor(_token_root: impl Into<PathBuf>) -> Self {
+        unimplemented!("the vendor lane is implemented by the composer vendor-lane step")
     }
 
     /// Heal the selected groups, probe their entries, and keep the ones this composition may follow;
@@ -893,6 +909,7 @@ impl ComposePaths {
     pub(crate) fn install_path_for(&self, package: &PackageDir, lane: PathLane) -> PackageDir {
         match lane {
             PathLane::Digest => package.clone(),
+            PathLane::Vendor => unimplemented!("the vendor lane is implemented by the composer vendor-lane step"),
             PathLane::Following => self
                 .trusted
                 .get(package.root())
@@ -8053,5 +8070,37 @@ mod wp15_following_lane_spec_tests {
             vec![serde_json::json!({ "toolPath": expected })],
             "RUL-97 — the payload's `${{installPath}}` names the home link, not the digest root"
         );
+    }
+}
+
+#[cfg(test)]
+mod vendor_lane_tests {
+    use super::{ComposePaths, PathLane};
+    use ocx_store::file_structure::PackageDir;
+
+    const SHARD: &str = "packages/ocx.sh/sha256/1f/2e3d4c5b6a79881f2e3d4c5b6a7988";
+
+    /// The package need not exist: the vendor lane never touches the filesystem.
+    #[test]
+    fn vendor_lane_roots_install_paths_at_the_token() {
+        let paths = ComposePaths::vendor("@VENDOR_DIR@");
+        let package = PackageDir::with_root(std::path::PathBuf::from("/nonexistent/home").join(SHARD));
+
+        let installed = paths.install_path_for(&package, PathLane::Vendor);
+
+        assert_eq!(
+            installed.root(),
+            std::path::Path::new("@VENDOR_DIR@").join(SHARD).as_path()
+        );
+    }
+
+    /// Existing lanes ignore the vendor constructor's token: the digest lane returns the package as given.
+    #[test]
+    fn digest_lane_is_unchanged_beside_the_vendor_lane() {
+        let package = PackageDir::with_root(std::path::PathBuf::from("/home").join(SHARD));
+
+        let installed = ComposePaths::digest_only().install_path_for(&package, PathLane::Digest);
+
+        assert_eq!(installed.root(), package.root());
     }
 }

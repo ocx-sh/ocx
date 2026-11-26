@@ -481,6 +481,7 @@ pub use tasks::toolchain_drift::{DRIFT_DEADLINE, DriftedTool};
 pub use tasks::update_check::{
     HandoffFailure, HandoffState, HandoffStdio, SelfUpdateResult, SkippedReason, TagProbe, UpdateCheckResult,
 };
+pub use tasks::vendor::{VendorContent, VendorError, VendorOutcome, VendorRequest, VendorSelection, VendoredPackage};
 pub use tasks::verify::{VerifyOptions, VerifyReport};
 
 use crate::patch::PatchSnapshot;

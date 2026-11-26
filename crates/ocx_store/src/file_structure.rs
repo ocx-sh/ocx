@@ -13,6 +13,7 @@ mod state_store;
 mod symlink_store;
 mod temp_store;
 mod toolchain_store;
+mod vendor_layout;
 
 pub use assemble::{
     AssembleError, AssemblyError, AssemblyStats, assemble_from_layer, assemble_from_layers,
@@ -30,6 +31,7 @@ pub use temp_store::{StaleEntry, TempAcquireResult, TempDir, TempEntry, TempStor
 pub use toolchain_store::{
     DEFAULT_SHELL, TREE_OWN_DEPTH1_NAMES, ToolchainHome, ToolchainPathComponent, ToolchainPathError, ToolchainStore,
 };
+pub use vendor_layout::{PathViolation, StagedTree, VendorLayout};
 
 /// Root layout of the local OCX data directory; the index lives in `IndexStore`, above this crate.
 #[derive(Debug, Clone)]

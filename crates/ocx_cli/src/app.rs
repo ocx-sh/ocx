@@ -411,7 +411,8 @@ fn should_check_toolchain_drift(command: &command::Command) -> bool {
         | Command::Patch(_)
         | Command::Pull(_)
         | Command::Export(_)
-        | Command::Import(_) => true,
+        | Command::Import(_)
+        | Command::Vendor(_) => true,
     }
 }
 

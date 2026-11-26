@@ -32,6 +32,7 @@ ocx_console.workspace = true
 # The classification vocabulary: error types declare their exit code and `error.detail` slug with `#[derive(Classify)]`.
 ocx_exit.workspace = true
 # The bottom tier: path normalisation, escaping.
+ocx_env_apply.workspace = true
 ocx_util.workspace = true
 # The environment registry every variable this crate reads is declared in.
 ocx_env.workspace = true

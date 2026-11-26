@@ -70,6 +70,7 @@ ocx_announce = { path = "crates/ocx_announce" }
 ocx_config = { path = "crates/ocx_config" }
 ocx_console = { path = "crates/ocx_console" }
 ocx_env = { path = "crates/ocx_env" }
+ocx_env_apply = { path = "crates/ocx_env_apply" }
 ocx_exit = { path = "crates/ocx_exit" }
 ocx_exit_derive = { path = "crates/ocx_exit_derive" }
 ocx_index = { path = "crates/ocx_index" }

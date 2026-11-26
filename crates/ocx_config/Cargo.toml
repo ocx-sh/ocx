@@ -43,6 +43,7 @@ ocx_trust.workspace = true
 ocx_exit.workspace = true
 # The bottom tier: `FileReference`, the bounded read every config file goes
 # through, and the scoped lock `edit` takes.
+ocx_env_apply.workspace = true
 ocx_util.workspace = true
 # The environment registry every variable this crate reads is declared in.
 ocx_env.workspace = true

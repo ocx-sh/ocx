@@ -5,6 +5,7 @@
 //! `adr_package_entry_points.md`.
 
 mod body;
+pub mod direct;
 #[cfg(test)]
 mod env_tests;
 mod generate;
@@ -12,7 +13,7 @@ mod generate;
 mod project_selector_tests;
 mod safety;
 
-pub use generate::{binary_pin_value, generate};
+pub use generate::{LauncherKind, binary_pin_value, generate, generate_kind};
 
 /// A `pub(crate)` item inside a private `mod` does not escape it, so the
 /// trampoline surface `crate::tasks::render_toolchain` calls needs this

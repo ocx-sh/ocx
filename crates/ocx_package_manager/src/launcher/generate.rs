@@ -79,6 +79,31 @@ pub async fn generate(
     Ok(())
 }
 
+/// What a generated launcher starts: `ocx exec` through a baked package root, or the tool directly from a vendored directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LauncherKind {
+    Exec,
+    Direct,
+}
+
+/// [`generate`] for the given [`LauncherKind`].
+///
+/// # Errors
+///
+/// As [`generate`]; [`LauncherKind::Direct`] is written by [`super::direct::write_direct_launcher`] and not here yet.
+pub async fn generate_kind(
+    kind: LauncherKind,
+    pkg_root: &Path,
+    entries: &Entrypoints,
+    dest: &Path,
+    shim_bin: &ShimBinStore,
+) -> Result<(), crate::Error> {
+    match kind {
+        LauncherKind::Exec => generate(pkg_root, entries, dest, shim_bin).await,
+        LauncherKind::Direct => unimplemented!("direct entry-point launchers"),
+    }
+}
+
 /// The value of `OCX_BINARY_PIN` for children of the running ocx.
 ///
 /// The installed path through `current` only when it is the binary running now and (Unix) the

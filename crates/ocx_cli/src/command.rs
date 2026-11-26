@@ -65,6 +65,7 @@ pub mod package_sbom;
 pub mod package_sign;
 pub mod package_sign_common;
 pub mod package_test;
+pub mod package_vendor;
 pub mod package_verify;
 pub mod patch;
 pub mod patch_common;
@@ -89,6 +90,7 @@ pub mod toolchain_exec;
 pub mod uninstall;
 pub mod update;
 pub mod upgrade;
+pub mod vendor;
 pub mod version;
 pub mod which;
 
@@ -321,6 +323,16 @@ pub enum Command {
         After writing, the new pins are materialized for the host platform, as `ocx update` \
         does.")]
     Upgrade(upgrade::Upgrade),
+    /// Write the project's tools, entry points and a manifest to a relocatable directory.
+    #[command(long_about = "\
+        Write the project's tools, entry points and a manifest to a relocatable directory.\n\n\
+        Reads the digest-pinned `ocx.lock` of the nearest `ocx.toml` and writes the selected tools' packages, \
+        one launcher per exposed name and `manifest.json` to DIR. The directory runs from wherever it is moved; \
+        nothing in it names this machine. `-g` and NAME select as for `ocx exec`; `--platform` names the target \
+        and defaults to the host.\n\n\
+        `--manifest-only` writes `manifest.json` alone. `--omit-links` creates no symlink. DIR must be absent or \
+        empty, else the command exits 64 and writes nothing. A missing `-o` exits 64.")]
+    Vendor(vendor::Vendor),
     /// Internal subcommands used by generated entry-point launchers (hidden).
     #[command(subcommand)]
     Launcher(launcher::Launcher),
@@ -513,6 +525,7 @@ impl Command {
             Command::Logout(logout) => boxed(move || logout.execute(context)).await,
             Command::Update(update) => boxed(move || update.execute(context)).await,
             Command::Upgrade(upgrade) => boxed(move || upgrade.execute(context)).await,
+            Command::Vendor(vendor) => boxed(move || vendor.execute(context)).await,
             Command::Launcher(launcher) => boxed(move || launcher.execute(context)).await,
             Command::Package(package) => boxed(move || package.execute(context)).await,
             Command::Patch(patch_group) => boxed(move || patch_group.execute(context)).await,

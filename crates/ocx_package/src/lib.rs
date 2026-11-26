@@ -22,6 +22,7 @@ pub mod prune;
 pub mod resolved_package;
 pub mod tag;
 pub mod upgrade_target;
+pub mod vendor;
 pub mod version;
 
 pub use install_info::InstallInfo;
