@@ -10,6 +10,12 @@ use std::num::NonZeroU32;
 
 use serde::{Deserialize, Serialize};
 
+/// Where a source serves its catalog, relative to the index base.
+pub const CATALOG_PATH: &str = "c/index.json";
+
+/// Where a source serves the detached signature over [`CATALOG_PATH`].
+pub const CATALOG_SIGNATURE_PATH: &str = "c/index.json.sigstore.json";
+
 /// The `format_version` OCX understands; any other served value is rejected.
 pub const SUPPORTED_FORMAT_VERSION: u64 = 1;
 
@@ -128,6 +134,31 @@ pub struct CatalogDocument {
     pub format_version: u64,
     #[serde(default)]
     pub packages: CatalogIndex,
+    /// When the signer stops vouching for this catalog; absent on an unsigned catalog.
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "expires_rfc3339")]
+    pub expires: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// RFC 3339 with whole seconds and a `Z` suffix, the one spelling the signed bytes carry.
+mod expires_rfc3339 {
+    use chrono::{DateTime, SecondsFormat, Utc};
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub(super) fn serialize<S: Serializer>(value: &Option<DateTime<Utc>>, serializer: S) -> Result<S::Ok, S::Error> {
+        match value {
+            Some(instant) => serializer.serialize_str(&instant.to_rfc3339_opts(SecondsFormat::Secs, true)),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<DateTime<Utc>>, D::Error> {
+        let Some(text) = Option::<String>::deserialize(deserializer)? else {
+            return Ok(None);
+        };
+        DateTime::parse_from_rfc3339(&text)
+            .map(|instant| Some(instant.with_timezone(&Utc)))
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 impl CatalogDocument {
@@ -136,6 +167,7 @@ impl CatalogDocument {
         Self {
             format_version: SUPPORTED_FORMAT_VERSION,
             packages,
+            expires: None,
         }
     }
 

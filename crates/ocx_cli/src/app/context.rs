@@ -19,9 +19,10 @@ use ocx_store::file_structure::{self, StateStore};
 use ocx_util::tls::ExtraRoots;
 
 use crate::api;
-use crate::command::package_sign_common::{SigstoreEndpoint, explicit_trust_root_path, resolve_endpoint};
+use crate::command::package_sign_common::resolve_public_rekor;
 
 use super::ContextOptions;
+use super::index_check::{IndexCheckPosture, index_suppressed_by_local_mirror};
 
 #[derive(Clone)]
 pub struct Context {
@@ -31,8 +32,17 @@ pub struct Context {
     remote_client: Option<ocx_oci::Client>,
     oci_index: Option<ocx_index::OciIndex>,
     /// One `index.ocx.sh`-protocol source per index-bearing namespace (`adr_index_indirection.md`),
-    /// chained ahead of `oci_index`; empty under `--offline`.
+    /// chained ahead of `oci_index`, as a command that sets no `--verify` / `--no-verify` flag sees them
+    /// (the `OCX_NO_VERIFY` opt-out applied); empty under `--offline`.
     index_sources: Vec<ocx_index::OcxIndex>,
+    /// The same sources with their signed-catalog check, whatever `OCX_NO_VERIFY` says.
+    checked_index_sources: Vec<ocx_index::OcxIndex>,
+    /// Namespaces whose enforced index a registry-role mirror pulled off: read refuses at the first read
+    /// of each, for a command whose catalog check runs. Empty under `--offline`, which reads nothing remote.
+    refused_namespaces: Vec<String>,
+    /// The resolved catalog-check decision; kept so a source built later (`canonical_index_source`)
+    /// is judged like the rest.
+    index_check: IndexCheckPosture,
     /// Registry client built lazily by [`Self::verify_client`], present even under `--offline`,
     /// which blocks only the Sigstore trust services. Shared so every caller reuses one auth
     /// store, token cache and connection pool.
@@ -46,6 +56,7 @@ pub struct Context {
     manager: ocx_package_manager::PackageManager,
     default_registry: String,
     config_trust: ocx_trust::TrustConfig,
+    config_sigstore: Option<ocx_trust::SigstoreInstances>,
     /// Whether `--global` selected `$OCX_HOME/ocx.toml`.
     global: bool,
     /// The resolution policy an execution record states about this invocation.
@@ -117,6 +128,9 @@ pub struct ManagedConfigGate {
     /// `config_path` whose file has vanished is skipped (the report carries a note) instead of failing
     /// as a missing `--config` would (exit 79).
     pub tolerate_vanished_received_config: bool,
+    /// `true` only for `ocx config update`: a managed snapshot still carrying the retired
+    /// `[trust.sigstore]` table loads with one warning, or the refresh that replaces it could never run.
+    pub tolerate_retired_snapshot: bool,
 }
 
 /// Splits a received `OCX_CONFIG` list into the entries to load, rejoined as a list, and the entries
@@ -237,13 +251,17 @@ impl Context {
                 other => other.map(|list| list.as_os_str().to_owned()),
             }
         };
-        let loaded_config = ConfigLoader::load_with_local_view(ConfigInputs {
+        let config_inputs = ConfigInputs {
             explicit_path: options.config.as_deref(),
             explicit_project_path: options.project.as_deref(),
             received_config_list: received_config_list.as_deref(),
             cwd: Some(&cwd),
-        })
-        .await?;
+        };
+        let loaded_config = if managed_config_gate.tolerate_retired_snapshot {
+            ConfigLoader::load_with_local_view_tolerating_retired_snapshot(config_inputs).await?
+        } else {
+            ConfigLoader::load_with_local_view(config_inputs).await?
+        };
         let config = loaded_config.merged;
         let local_only_config = loaded_config.local_only;
         let config_base = loaded_config.base;
@@ -378,7 +396,10 @@ impl Context {
 
         // Frozen keeps the remote source so digest-pinned content still fetches.
         let online_mode = Self::online_chain_mode(options.frozen, options.remote);
-        let index_sources = Self::build_index_sources(
+        // Read once: the catalog check, auto-verify and the recorded config must see the same value.
+        let no_verify_env = bool_or_received(&ocx_env::OCX_NO_VERIFY, env_slot.policy.no_verify)?;
+        let index_check = IndexCheckPosture::new(no_verify_env, config.sigstore.clone(), file_structure.state.clone())?;
+        let checked_index_sources = Self::build_index_sources(
             remote_client.is_some(),
             &config,
             local_only_config.mirrors.as_ref(),
@@ -387,8 +408,16 @@ impl Context {
             &insecure_hosts,
             &progress,
             &extra_roots_merged,
+            &index_check,
         )?;
-        let (mode, sources) = Self::chain_mode_and_sources(oci_index.as_ref(), &index_sources, online_mode);
+        let index_sources = index_check.resolved(&checked_index_sources, None);
+        let refused_namespaces = if remote_client.is_some() {
+            IndexCheckPosture::enforce_through_mirror(&config, local_only_config.mirrors.as_ref())
+        } else {
+            Vec::new()
+        };
+        let refusing = index_check.refusing_sources(&refused_namespaces, None);
+        let (mode, sources) = Self::chain_mode_and_sources(oci_index.as_ref(), &index_sources, refusing, online_mode);
         // The blob store lets an installed tool's leaf manifest resolve offline: an absent dispatch
         // object recovers from it before any source walk.
         let selected_index = ocx_index::Index::from_chained_with_content_store(
@@ -516,8 +545,6 @@ impl Context {
 
         // Attached once on the shared manager so every install surface inherits auto-verify.
         let operator_policies = config.trust_policies().to_vec();
-        // Read once: auto-verify and the recorded config must see the same value.
-        let no_verify_env = bool_or_received(&ocx_env::OCX_NO_VERIFY, env_slot.policy.no_verify)?;
         // Always constructed: an index-declared publisher covers a package no policy names.
         let auto_verify = {
             let client = registry_client_cell
@@ -531,7 +558,7 @@ impl Context {
             ocx_package_manager::AutoVerify::new(build_auto_verify(
                 operator_policies,
                 config.clone(),
-                config.trust.as_ref().and_then(|t| t.sigstore.clone()),
+                config.sigstore.clone(),
                 &client,
                 options.offline,
                 file_structure.state.clone(),
@@ -583,6 +610,9 @@ impl Context {
             remote_client,
             oci_index,
             index_sources,
+            checked_index_sources,
+            refused_namespaces,
+            index_check,
             registry_client_cell,
             mirror_map,
             offline: options.offline,
@@ -595,6 +625,7 @@ impl Context {
             manager,
             default_registry,
             config_trust: config.trust.clone().unwrap_or_default(),
+            config_sigstore: config.sigstore.clone(),
             global: options.global,
             recorded_config,
             skipped_received_config,
@@ -728,7 +759,8 @@ impl Context {
     /// the invocation's ceiling so `--frozen` still refuses an unindexed tag (exit 81).
     pub fn chain_sources(&self) -> (ocx_index::ChainMode, Vec<ocx_index::Index>) {
         let online_mode = Self::online_chain_mode(self.recorded_config.frozen, self.recorded_config.remote);
-        Self::chain_mode_and_sources(self.oci_index.as_ref(), &self.index_sources, online_mode)
+        let refusing = self.index_check.refusing_sources(&self.refused_namespaces, None);
+        Self::chain_mode_and_sources(self.oci_index.as_ref(), &self.index_sources, refusing, online_mode)
     }
 
     /// The online policy ceiling. `--offline` is not an arm: it leaves the remote index unbuilt.
@@ -750,20 +782,27 @@ impl Context {
         } else {
             ocx_index::ChainMode::Remote
         };
-        let (mode, sources) = Self::chain_mode_and_sources(self.oci_index.as_ref(), &self.index_sources, online_mode);
+        let refusing = self.index_check.refusing_sources(&self.refused_namespaces, None);
+        let (mode, sources) =
+            Self::chain_mode_and_sources(self.oci_index.as_ref(), &self.index_sources, refusing, online_mode);
         ocx_index::Index::from_chained_lock_scoped(self.local_index.clone(), sources, mode)
     }
 
     /// Mode and sources come from one value, so `--offline` never pairs with a built remote.
+    ///
+    /// `refusing` sources lead the chain: authoritative for their namespace, they stop a read before the
+    /// registry catch-all could answer it through the mirror.
     fn chain_mode_and_sources(
         oci_index: Option<&ocx_index::OciIndex>,
         index_sources: &[ocx_index::OcxIndex],
+        refusing: Vec<ocx_index::Index>,
         online_mode: ocx_index::ChainMode,
     ) -> (ocx_index::ChainMode, Vec<ocx_index::Index>) {
         match oci_index {
             None => (ocx_index::ChainMode::Offline, Vec::new()),
             Some(remote) => {
-                let mut sources = Vec::with_capacity(index_sources.len() + 1);
+                let mut sources = refusing;
+                sources.reserve(index_sources.len() + 1);
                 // Index sources register before the registry, so an index-bearing namespace resolves through
                 // the verified two-hop path and yank gate, never a same-named registry.
                 for source in index_sources {
@@ -793,6 +832,7 @@ impl Context {
         insecure_hosts: &[String],
         progress: &ocx_console::progress::ProgressManager,
         extra_roots: &ExtraRoots,
+        index_check: &IndexCheckPosture,
     ) -> anyhow::Result<Vec<ocx_index::OcxIndex>> {
         if !online {
             return Ok(Vec::new());
@@ -820,7 +860,7 @@ impl Context {
             // `resolve_base_url` settles the transport with the scheme; choosing one here re-derives it.
             let base =
                 ocx_index::OcxIndex::resolve_base_url(config, namespace, mirrors_index, insecure_hosts, extra_roots)?;
-            sources.push(ocx_index::OcxIndex::new(ocx_index::OcxIndexConfig {
+            let source = ocx_index::OcxIndex::new(ocx_index::OcxIndexConfig {
                 transport: base.transport,
                 base_url: base.url,
                 namespace: namespace.clone(),
@@ -829,7 +869,8 @@ impl Context {
                 trusted_hosts,
                 insecure_hosts: insecure_hosts.to_vec(),
                 proxy_rules: ocx_oci::ssrf::proxy_rules(),
-            }));
+            });
+            sources.push(index_check.attach(source, namespace, registries.get(namespace))?);
         }
         Ok(sources)
     }
@@ -837,6 +878,14 @@ impl Context {
     /// The published-index source for `namespace`, built without any `[mirrors]` index override so
     /// a read names the canonical index. `None` when the namespace has no index.
     pub fn canonical_index_source(&self, namespace: &str) -> anyhow::Result<Option<ocx_index::OcxIndex>> {
+        // The namespace's index is pulled off by a registry mirror, so naming the registry here would read
+        // it through the mirror unchecked.
+        if self.index_check.enabled(None) && self.refused_namespaces.iter().any(|refused| refused == namespace) {
+            return Err(ocx_index::error::Error::IndexCatalogThroughMirror {
+                namespace: namespace.to_owned(),
+            }
+            .into());
+        }
         let sources = Self::build_index_sources(
             true,
             &self.config,
@@ -846,7 +895,9 @@ impl Context {
             &self.insecure_hosts,
             &self.progress,
             &self.extra_roots_merged,
+            &self.index_check,
         )?;
+        let sources = self.index_check.resolved(&sources, None);
         Ok(sources.into_iter().find(|source| source.namespace() == namespace))
     }
 
@@ -860,9 +911,9 @@ impl Context {
         &self.config_trust.policy
     }
 
-    /// Operator-tier `[trust.sigstore]` from the merged `config.toml`.
-    pub fn config_trust_sigstore(&self) -> Option<&ocx_trust::SigstoreTrust> {
-        self.config_trust.sigstore.as_ref()
+    /// Operator-tier `[sigstore."<authority>"]` tables from the merged `config.toml`.
+    pub fn config_trust_sigstore(&self) -> Option<&ocx_trust::SigstoreInstances> {
+        self.config_sigstore.as_ref()
     }
 
     /// Hosts this invocation may contact over plain HTTP; take this rather than re-deriving it.
@@ -932,6 +983,73 @@ impl Context {
 
     pub fn manager(&self) -> &ocx_package_manager::PackageManager {
         &self.manager
+    }
+
+    /// Whether verification runs for a command whose `--verify` / `--no-verify` resolved to `flag`: the
+    /// flag, else `OCX_NO_VERIFY`, else on. One ladder for the signed-catalog check and package signatures.
+    pub fn verify_enabled(&self, flag: Option<bool>) -> bool {
+        self.index_check.enabled(flag)
+    }
+
+    /// Every index source with its signed-catalog check dropped or kept as `flag` resolves it.
+    ///
+    /// Prints the one bypass warning when a check was actually dropped. The dropped check never touches the
+    /// recorded expiry bound, since the source it ran through is a clone without it.
+    pub fn index_sources_for_run(&self, flag: Option<bool>) -> Vec<ocx_index::OcxIndex> {
+        if self
+            .index_check
+            .bypass_warning_due(flag, &self.checked_index_sources, &self.refused_namespaces)
+        {
+            log::warn!("index catalog signature check skipped via --no-verify or OCX_NO_VERIFY");
+        }
+        self.index_check.resolved(&self.checked_index_sources, flag)
+    }
+
+    /// The refusing sources of the namespaces whose enforced index a registry mirror pulled off, for a
+    /// command whose check `flag` resolves to running; the `index` verbs that pick a source per name need them.
+    pub fn index_refusals_for_run(&self, flag: Option<bool>) -> Vec<ocx_index::Index> {
+        self.index_check.refusing_sources(&self.refused_namespaces, flag)
+    }
+
+    /// The default-mode index, its sources checking their signed catalog as `flag` resolves it; warns on a bypass.
+    pub fn default_index_for_run(&self, flag: Option<bool>) -> ocx_index::Index {
+        if self
+            .index_check
+            .bypass_warning_due(flag, &self.checked_index_sources, &self.refused_namespaces)
+        {
+            log::warn!("index catalog signature check skipped via --no-verify or OCX_NO_VERIFY");
+        }
+        self.index_for(flag).unwrap_or_else(|| self.default_index.clone())
+    }
+
+    /// The index chain rebuilt over the sources `flag` resolves, or `None` when that equals the ambient one.
+    fn index_for(&self, flag: Option<bool>) -> Option<ocx_index::Index> {
+        if self.verify_enabled(flag) == self.verify_enabled(None) {
+            return None;
+        }
+        let sources = self.index_check.resolved(&self.checked_index_sources, flag);
+        let online_mode = Self::online_chain_mode(self.recorded_config.frozen, self.recorded_config.remote);
+        let refusing = self.index_check.refusing_sources(&self.refused_namespaces, flag);
+        let (mode, sources) = Self::chain_mode_and_sources(self.oci_index.as_ref(), &sources, refusing, online_mode);
+        Some(
+            ocx_index::Index::from_chained_with_content_store(
+                self.local_index.clone(),
+                sources,
+                mode,
+                self.file_structure.blobs.clone(),
+            )
+            .with_blob_lookup(self.blob_lookup.clone()),
+        )
+    }
+
+    /// The manager whose index sources check their signed catalog as `flag` resolves it.
+    ///
+    /// The dropped check never touches the recorded expiry bound, and prints nothing of its own.
+    pub fn manager_with_catalog_check(&self, flag: Option<bool>) -> ocx_package_manager::PackageManager {
+        match self.index_for(flag) {
+            Some(index) => self.manager.clone().with_selected_index(index),
+            None => self.manager.clone(),
+        }
     }
 
     /// The effective `[update]` posture: env ▸ local `config.toml` ▸ defaults, resolved once.
@@ -1180,7 +1298,7 @@ fn client_builder(
 fn build_auto_verify(
     operator_policies: Vec<ocx_trust::TrustPolicy>,
     config: ocx_config::Config,
-    sigstore_trust: Option<ocx_trust::SigstoreTrust>,
+    sigstore_trust: Option<ocx_trust::SigstoreInstances>,
     registry_client: &ocx_oci::Client,
     offline: bool,
     state: StateStore,
@@ -1188,8 +1306,8 @@ fn build_auto_verify(
 ) -> anyhow::Result<ocx_package_manager::AutoVerifyInput> {
     // Auto-verify keys its trust-root cache by this URL, so a bad URL fails the run: falling
     // back to the default would cache a self-hosted root under the public-good key.
-    let rekor = resolve_endpoint(None, sigstore_trust.as_ref(), SigstoreEndpoint::Rekor);
-    let rekor_url = ocx_oci::endpoint::validate_sigstore_url(&rekor, "[trust.sigstore].rekor_url")?;
+    let rekor = resolve_public_rekor(None, sigstore_trust.as_ref());
+    let rekor_url = ocx_oci::endpoint::validate_sigstore_url(&rekor, "[sigstore] rekor_url")?;
     Ok(ocx_package_manager::AutoVerifyInput {
         operator_policies,
         // ponytail: project `ocx.toml` policies are not read on OCI-tier surfaces yet; wire them
@@ -1200,33 +1318,10 @@ fn build_auto_verify(
         rekor_url,
         offline,
         state,
-        // Through the same door `ocx package verify` reads it at, so one env value cannot mean a
-        // bare path here and a `file://` one there.
-        trusted_root_env: ocx_env::OCX_SIGSTORE_TRUSTED_ROOT
-            .get_raw()
-            .map(PathBuf::from)
-            .map(explicit_trust_root_path),
-
         sigstore_trust,
         home_trusted_root: ocx_config::loader::ConfigLoader::home_sigstore_trusted_root_path(),
         user_opted_out,
     })
-}
-
-/// Condition 2 of [`is_published_namespace`] without its warning, so [`index_namespaces`]
-/// can reuse it silently.
-fn index_suppressed_by_local_mirror(
-    entry: &ocx_config::RegistryConfig,
-    namespace: &str,
-    local_mirrors: Option<&std::collections::HashMap<String, ocx_config::mirror::MirrorConfig>>,
-) -> bool {
-    // Only the REGISTRY role suppresses: the index role is keyed on the base's
-    // own host, so `[mirrors."<ns>"] index` redirects nothing for `<ns>`, and
-    // suppressing on it would leave neither the index nor the mirror. A
-    // bare-string `[mirrors]` entry sets `registry`, so it counts too.
-    let locally_pinned_at_a_mirror =
-        local_mirrors.is_some_and(|table| table.get(namespace).is_some_and(|entry| entry.registry.is_some()));
-    entry.index_is_compiled_default && locally_pinned_at_a_mirror
 }
 
 /// Every namespace [`is_published_namespace`] admits, without warning, so ownership holds
@@ -1247,6 +1342,18 @@ fn index_namespaces(
         .collect()
 }
 
+/// The warning for a locally-authored registry-role `[mirrors]` entry that suppresses the compiled-in index.
+fn mirror_suppression_warning(namespace: &str) -> String {
+    // The key can come from the managed tier, so it is sanitized before reaching the terminal.
+    let namespace = crate::api::data::sanitize_for_terminal(namespace);
+    format!(
+        "[mirrors.\"{namespace}\"] pins this namespace at a mirror, so the compiled-in index \
+         default for it is suppressed; it resolves as a plain OCI registry through the mirror, \
+         without the index's digest verification or yank gate, and its index catalog signature is not \
+         checked. Declare [registries.\"{namespace}\"] index explicitly to keep the index path."
+    )
+}
+
 /// Whether `namespace` resolves through the ocx-index protocol: `index` is non-empty (`""` is
 /// the kill switch) and not a compiled-in default a locally-authored `[mirrors]` entry pins at
 /// a registry.
@@ -1263,14 +1370,7 @@ pub fn is_published_namespace(
         return false;
     }
     if index_suppressed_by_local_mirror(entry, namespace, local_mirrors) {
-        // The key can come from the managed tier, so it is sanitized before reaching the terminal.
-        let namespace = crate::api::data::sanitize_for_terminal(namespace);
-        log::warn!(
-            "[mirrors.\"{namespace}\"] pins this namespace at a mirror, so the compiled-in index \
-             default for it is suppressed; it resolves as a plain OCI registry through the mirror, \
-             without the index's digest verification or yank gate. Declare \
-             [registries.\"{namespace}\"] index explicitly to keep the index path."
-        );
+        log::warn!("{}", mirror_suppression_warning(namespace));
         return false;
     }
     true
@@ -1837,7 +1937,7 @@ mod tests {
 
     /// Call `build_auto_verify` with `sigstore` as the only varying input.
     fn auto_verify_input(
-        sigstore: Option<ocx_trust::SigstoreTrust>,
+        sigstore: Option<ocx_trust::SigstoreInstances>,
     ) -> anyhow::Result<ocx_package_manager::AutoVerifyInput> {
         build_auto_verify(
             one_policy(),
@@ -1866,7 +1966,7 @@ mod tests {
         assert!(input.operator_policies.is_empty());
     }
 
-    /// Install and pull carry no `--rekor-url`, so `[trust.sigstore].rekor_url`
+    /// Install and pull carry no `--rekor-url`, so the configured Rekor URL
     /// is the only tier between auto-verify and the builtin default. It used to
     /// read neither: the endpoint was hardcoded.
     ///
@@ -1877,10 +1977,10 @@ mod tests {
     fn auto_verify_takes_its_rekor_endpoint_from_the_sigstore_config() {
         use ocx_sign::verify::trust_cache::cache_key_for_rekor;
 
-        let configured = ocx_trust::SigstoreTrust {
+        let configured = ocx_trust::SigstoreInstances::with_public(ocx_trust::SigstoreInstance {
             rekor_url: Some("https://rekor.corp.example".to_string()),
             ..Default::default()
-        };
+        });
         let from_config = auto_verify_input(Some(configured)).expect("a valid config URL must not fail the run");
         let from_builtin = auto_verify_input(None).expect("the builtin default is valid");
 
@@ -1902,18 +2002,18 @@ mod tests {
         );
     }
 
-    /// A typo in `[trust.sigstore].rekor_url` must fail the run: not panic (the
+    /// A typo in the configured Rekor URL must fail the run: not panic (the
     /// endpoint used to be a compile-time constant and was `.expect()`ed), and
     /// not silently fall back to the public good, which would downgrade an
     /// operator's trust configuration without saying so.
     #[test]
     fn a_rejected_sigstore_rekor_url_fails_the_run_rather_than_falling_back() {
-        let hostile = ocx_trust::SigstoreTrust {
+        let hostile = ocx_trust::SigstoreInstances::with_public(ocx_trust::SigstoreInstance {
             // Plain http off loopback: refused by the same SSRF guard the flag
             // tier hits.
             rekor_url: Some("http://rekor.corp.example".to_string()),
             ..Default::default()
-        };
+        });
         let Err(err) = auto_verify_input(Some(hostile)) else {
             panic!("a rejected Rekor URL must fail the run");
         };
@@ -2023,7 +2123,381 @@ mod tests {
             &[],
             &ocx_console::progress::ProgressManager::disabled(),
             &ExtraRoots::default(),
+            &test_index_check(false),
         )
+    }
+
+    const GOLDEN_KEY: &[u8] = include_bytes!("../../../../test/tests/fixtures/golden/keys/cosign.key");
+    const GOLDEN_PUBLIC_KEY: &str = include_str!("../../../../test/tests/fixtures/golden/keys/cosign.pub");
+    /// A well-formed key that signed nothing here.
+    const UNLISTED_PUBLIC_KEY: &str = "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEHKf0zqUEudwCix/9rS4Fn7nEjpG3\nIJt/JQukjC1J2EuX6CcB6cX/2wtIoc1arumQbrlNjFWMT6QAz3SEHOOcjA==\n-----END PUBLIC KEY-----\n";
+    const WIRED_NAMESPACE: &str = "idx.example";
+
+    /// A one-shot-per-connection HTTP/1.1 server over a fixed route table; every other path is a 404.
+    async fn serve_routes(routes: std::collections::HashMap<&'static str, Vec<u8>>) -> std::net::SocketAddr {
+        use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("binds a port");
+        let address = listener.local_addr().expect("a bound address");
+        let routes = std::sync::Arc::new(routes);
+        tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                let routes = routes.clone();
+                tokio::spawn(async move {
+                    let (read, mut write) = socket.into_split();
+                    let mut reader = tokio::io::BufReader::new(read);
+                    let mut request_line = String::new();
+                    if reader.read_line(&mut request_line).await.unwrap_or(0) == 0 {
+                        return;
+                    }
+                    loop {
+                        let mut header = String::new();
+                        match reader.read_line(&mut header).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(_) if header.trim_end().is_empty() => break,
+                            Ok(_) => {}
+                        }
+                    }
+                    let target = request_line.split_whitespace().nth(1).unwrap_or("/").to_owned();
+                    let (status, body) = match routes.get(target.as_str()) {
+                        Some(body) => ("200 OK", body.as_slice()),
+                        None => ("404 Not Found", &b""[..]),
+                    };
+                    let head = format!(
+                        "HTTP/1.1 {status}\r\ncontent-length: {}\r\ncontent-type: application/json\r\nconnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = write.write_all(head.as_bytes()).await;
+                    let _ = write.write_all(body).await;
+                    let _ = write.shutdown().await;
+                });
+            }
+        });
+        address
+    }
+
+    /// The golden key's DSSE bundle over `catalog`, as `ocx index sign --key` writes it.
+    async fn sign_fixture_catalog(catalog: &[u8]) -> Vec<u8> {
+        use ocx_sign::detached::{INDEX_CATALOG_PREDICATE_TYPE, SigningEndpoints, sign_statement};
+        use ocx_sign::sign::key_backend::PemKeyBackend;
+        use ocx_sign::sign::key_signer::KeySigner;
+
+        let backend =
+            PemKeyBackend::from_encrypted_pem(GOLDEN_KEY, b"ocxtest", ocx_trust::key_ref::KeyBackendKind::File)
+                .expect("the golden key decrypts");
+        let signer = KeySigner::new(std::sync::Arc::new(backend), None);
+        let (fulcio, rekor) = (
+            ocx_oci::endpoint::validate_sigstore_url("https://fulcio.example", "fulcio").expect("a url"),
+            ocx_oci::endpoint::validate_sigstore_url("https://rekor.example", "rekor").expect("a url"),
+        );
+        let endpoints = SigningEndpoints {
+            fulcio_url: &fulcio,
+            rekor_url: &rekor,
+            token: None,
+            trusted_hosts: &[],
+        };
+        sign_statement(
+            catalog,
+            "c/index.json",
+            INDEX_CATALOG_PREDICATE_TYPE,
+            &serde_json::json!({ "registry": WIRED_NAMESPACE }),
+            &signer,
+            &endpoints,
+        )
+        .await
+        .expect("a key signer signs")
+        .bundle
+    }
+
+    /// Builds the one index source for a served, signed catalog through the production wiring and reads its catalog.
+    async fn fetch_wired_catalog(
+        publisher_pem: &str,
+        state: &Path,
+    ) -> (
+        ocx_index::error::Result<ocx_index::CatalogIndex>,
+        ocx_package_manager::AutoVerifyInput,
+    ) {
+        let expires = (chrono::Utc::now() + chrono::Duration::days(30)).format("%Y-%m-%dT%H:%M:%SZ");
+        let catalog = format!(r#"{{"format_version":1,"packages":{{}},"expires":"{expires}"}}"#).into_bytes();
+        let signature = sign_fixture_catalog(&catalog).await;
+        let address = serve_routes(std::collections::HashMap::from([
+            ("/config.json", br#"{"format_version":1}"#.to_vec()),
+            ("/c/index.json", catalog),
+            ("/c/index.json.sigstore.json", signature),
+        ]))
+        .await;
+
+        let entry: ocx_config::RegistryConfig = toml::from_str(&format!(
+            "index = \"http://{address}\"\ntrusted_hosts = [\"127.0.0.1\"]\nindex_signature = \"enforce\"\n\
+             index_publishers = [{{ kind = \"key\", key_pem = {} }}]\n",
+            serde_json::to_string(publisher_pem).expect("a string serialises")
+        ))
+        .expect("the registry table parses");
+        let config = ocx_config::Config {
+            registries: Some(std::collections::HashMap::from([(WIRED_NAMESPACE.to_owned(), entry)])),
+            ..Default::default()
+        };
+        let instances = ocx_trust::SigstoreInstances::default();
+        let state = StateStore::new(state);
+        let index_check =
+            IndexCheckPosture::new(false, Some(instances.clone()), state.clone()).expect("default rekor url is valid");
+        let sources = Context::build_index_sources(
+            true,
+            &config,
+            None,
+            &std::collections::BTreeMap::new(),
+            &ocx_oci::MirrorMap::default(),
+            &[address.to_string()],
+            &ocx_console::progress::ProgressManager::disabled(),
+            &ExtraRoots::default(),
+            &index_check,
+        )
+        .expect("the sources build");
+        let [source] = sources.as_slice() else {
+            panic!("one index-bearing namespace builds one source, got {}", sources.len());
+        };
+        let auto_verify = build_auto_verify(
+            Vec::new(),
+            config,
+            Some(instances),
+            &ocx_oci::ClientBuilder::new().build(),
+            false,
+            state,
+            false,
+        )
+        .expect("auto-verify builds from the same instances");
+        (source.fetch_catalog_strict().await, auto_verify)
+    }
+
+    /// The real `IndexTrust` sits behind the wiring: a catalog the listed key signed is read.
+    #[tokio::test]
+    async fn the_wired_check_accepts_a_catalog_signed_by_a_listed_key() {
+        let state = tempfile::tempdir().expect("a state dir");
+
+        let (catalog, auto_verify) = fetch_wired_catalog(GOLDEN_PUBLIC_KEY, state.path()).await;
+
+        catalog.expect("a listed key's catalog verifies under enforce");
+        assert!(
+            auto_verify.sigstore_trust.is_some(),
+            "auto-verify is built from the instances the index check uses"
+        );
+    }
+
+    /// And the same catalog under a signer list that does not name its key is refused, not read.
+    #[tokio::test]
+    async fn the_wired_check_refuses_a_catalog_signed_by_an_unlisted_key_under_enforce() {
+        let state = tempfile::tempdir().expect("a state dir");
+
+        let (catalog, _) = fetch_wired_catalog(UNLISTED_PUBLIC_KEY, state.path()).await;
+
+        let error = catalog.expect_err("an unlisted key's catalog is refused under enforce");
+        assert!(
+            matches!(
+                ocx_index::error::coalesced_cause(&error),
+                ocx_index::error::Error::Trust(ocx_index::trust_error::IndexTrustError::SignatureInvalid { .. })
+            ),
+            "refused as an invalid signature, got: {error}"
+        );
+    }
+
+    fn test_index_check(skip: bool) -> IndexCheckPosture {
+        IndexCheckPosture::new(skip, None, StateStore::new("/ocx/state")).expect("default rekor url is valid")
+    }
+
+    fn check_mode_of(config: &ocx_config::Config, skip: bool) -> Option<ocx_config::IndexSignatureMode> {
+        let built = Context::build_index_sources(
+            true,
+            config,
+            None,
+            &std::collections::BTreeMap::new(),
+            &ocx_oci::MirrorMap::default(),
+            &[],
+            &ocx_console::progress::ProgressManager::disabled(),
+            &ExtraRoots::default(),
+            &test_index_check(skip),
+        )
+        .expect("builds");
+        built[0].catalog_check_mode()
+    }
+
+    fn ocx_sh_with(extra: &str) -> ocx_config::Config {
+        let entry: ocx_config::RegistryConfig =
+            toml::from_str(&format!("index = \"https://index.ocx.sh\"\n{extra}")).expect("parses");
+        let mut registries = std::collections::HashMap::new();
+        registries.insert(ocx_oci::OCX_SH_REGISTRY.to_string(), entry);
+        ocx_config::Config {
+            registries: Some(registries),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn ocx_sh_source_carries_a_warn_check_by_default() {
+        assert_eq!(
+            check_mode_of(&ocx_sh_with(""), false),
+            Some(ocx_config::IndexSignatureMode::Warn)
+        );
+    }
+
+    #[test]
+    fn index_signature_off_attaches_no_check() {
+        assert_eq!(check_mode_of(&ocx_sh_with("index_signature = \"off\"\n"), false), None);
+    }
+
+    /// `OCX_NO_VERIFY` is held by the posture and resolved per command; it no longer keeps a check off the source.
+    #[test]
+    fn the_env_opt_out_still_builds_the_check_and_each_command_resolves_it() {
+        let config = ocx_sh_with("");
+        let posture = test_index_check(true);
+        let built = Context::build_index_sources(
+            true,
+            &config,
+            None,
+            &std::collections::BTreeMap::new(),
+            &ocx_oci::MirrorMap::default(),
+            &[],
+            &ocx_console::progress::ProgressManager::disabled(),
+            &ExtraRoots::default(),
+            &posture,
+        )
+        .expect("builds");
+        let mode = |flag| posture.resolved(&built, flag)[0].catalog_check_mode();
+        assert_eq!(
+            built[0].catalog_check_mode(),
+            Some(ocx_config::IndexSignatureMode::Warn)
+        );
+        assert_eq!(mode(None), None, "the env opt-out alone skips the check");
+        assert_eq!(
+            mode(Some(true)),
+            Some(ocx_config::IndexSignatureMode::Warn),
+            "--verify wins over the env opt-out"
+        );
+        assert_eq!(mode(Some(false)), None);
+    }
+
+    fn enforce_ocx_sh() -> ocx_config::Config {
+        let mut config = config_with_compiled_default();
+        config
+            .registries
+            .as_mut()
+            .and_then(|registries| registries.get_mut(ocx_oci::OCX_SH_REGISTRY))
+            .expect("the compiled default entry")
+            .index_signature = Some(ocx_config::IndexSignatureMode::Enforce);
+        config
+    }
+
+    /// Enforce and warn sources both keep their verifier when the command's check is on, and lose it when off.
+    #[test]
+    fn resolved_keeps_the_verifier_of_an_enforce_or_warn_source_only_when_the_check_is_on() {
+        let enforce = ocx_config::IndexSignatureMode::Enforce;
+        let warn = ocx_config::IndexSignatureMode::Warn;
+        for (config, mode) in [(enforce_ocx_sh(), enforce), (ocx_sh_with(""), warn)] {
+            let posture = test_index_check(true);
+            let built = Context::build_index_sources(
+                true,
+                &config,
+                None,
+                &std::collections::BTreeMap::new(),
+                &ocx_oci::MirrorMap::default(),
+                &[],
+                &ocx_console::progress::ProgressManager::disabled(),
+                &ExtraRoots::default(),
+                &posture,
+            )
+            .expect("builds");
+            let kept = |flag| posture.resolved(&built, flag)[0].catalog_check_mode();
+            assert_eq!(kept(Some(true)), Some(mode), "--verify beats the env opt-out");
+            assert_eq!(kept(None), None, "the env opt-out drops it");
+            assert_eq!(kept(Some(false)), None, "--no-verify drops it");
+            let on = test_index_check(false);
+            assert_eq!(on.resolved(&built, None)[0].catalog_check_mode(), Some(mode));
+            assert_eq!(on.resolved(&built, Some(false))[0].catalog_check_mode(), None);
+            assert!(
+                posture.bypass_warning_due(None, &built, &[]),
+                "env opt-out with a source warns"
+            );
+            assert!(!posture.bypass_warning_due(Some(true), &built, &[]));
+            assert!(on.bypass_warning_due(Some(false), &built, &[]));
+            assert!(!on.bypass_warning_due(None, &built, &[]));
+        }
+    }
+
+    fn build_online_with_local_mirror(
+        config: &ocx_config::Config,
+        online: bool,
+    ) -> anyhow::Result<Vec<ocx_index::OcxIndex>> {
+        Context::build_index_sources(
+            online,
+            config,
+            Some(&local_mirror_table(
+                ocx_oci::OCX_SH_REGISTRY,
+                Some("https://artifactory.corp/ocx-remote"),
+                None,
+            )),
+            &std::collections::BTreeMap::new(),
+            &ocx_oci::MirrorMap::default(),
+            &[],
+            &ocx_console::progress::ProgressManager::disabled(),
+            &ExtraRoots::default(),
+            &test_index_check(false),
+        )
+    }
+
+    /// The refusal moved to the first read of the namespace: building the sources no longer fails, so a
+    /// command that never reads an index still runs.
+    #[test]
+    fn enforce_through_a_mirror_builds_no_source_and_does_not_fail_the_build() {
+        let built = build_online_with_local_mirror(&enforce_ocx_sh(), true).expect("the build does not refuse");
+        assert!(built.is_empty());
+    }
+
+    #[test]
+    fn enforce_through_a_mirror_does_not_refuse_offline() {
+        let built = build_online_with_local_mirror(&enforce_ocx_sh(), false).expect("offline builds no sources");
+        assert!(built.is_empty());
+    }
+
+    #[test]
+    fn the_mirror_suppression_warning_says_the_catalog_signature_is_not_checked() {
+        let message = mirror_suppression_warning("ocx.sh");
+        assert!(message.contains("index catalog signature is not checked"), "{message}");
+        assert!(message.contains("[mirrors.\"ocx.sh\"]"), "{message}");
+    }
+
+    #[test]
+    fn warn_through_a_mirror_builds_nothing_and_does_not_refuse() {
+        let built = build_online_with_local_mirror(&config_with_compiled_default(), true).expect("warn continues");
+        assert!(built.is_empty());
+    }
+
+    #[test]
+    fn enforce_without_any_signer_list_fails_the_build() {
+        let config = {
+            let entry: ocx_config::RegistryConfig =
+                toml::from_str("index = \"https://idx.corp.example\"\nindex_signature = \"enforce\"\n").unwrap();
+            let mut registries = std::collections::HashMap::new();
+            registries.insert("corp.example".to_string(), entry);
+            ocx_config::Config {
+                registries: Some(registries),
+                ..Default::default()
+            }
+        };
+        let error = Context::build_index_sources(
+            true,
+            &config,
+            None,
+            &std::collections::BTreeMap::new(),
+            &ocx_oci::MirrorMap::default(),
+            &[],
+            &ocx_console::progress::ProgressManager::disabled(),
+            &ExtraRoots::default(),
+            &test_index_check(false),
+        )
+        .err()
+        .expect("enforce needs a list");
+        assert!(format!("{error:?}").contains("corp.example"), "{error:?}");
     }
 
     #[test]
@@ -2170,6 +2644,7 @@ mod tests {
             &[],
             &ocx_console::progress::ProgressManager::disabled(),
             &roots,
+            &test_index_check(false),
         )
         .unwrap();
 
@@ -2417,6 +2892,7 @@ mod tests {
             &[],
             &ocx_console::progress::ProgressManager::disabled(),
             &ExtraRoots::default(),
+            &test_index_check(false),
         )
         .unwrap()
     }
@@ -2558,8 +3034,12 @@ mod tests {
             client: ocx_oci::ClientBuilder::new().build(),
         });
 
-        let (mode, sources) =
-            Context::chain_mode_and_sources(Some(&oci_index), &index_sources, ocx_index::ChainMode::Default);
+        let (mode, sources) = Context::chain_mode_and_sources(
+            Some(&oci_index),
+            &index_sources,
+            Vec::new(),
+            ocx_index::ChainMode::Default,
+        );
 
         assert_eq!(mode, ocx_index::ChainMode::Default);
         assert_eq!(
@@ -2576,7 +3056,8 @@ mod tests {
         let client = ocx_oci::ClientBuilder::new().build();
         let oci_index = ocx_index::OciIndex::new(ocx_index::OciIndexConfig { client });
 
-        let (mode, sources) = Context::chain_mode_and_sources(Some(&oci_index), &[], ocx_index::ChainMode::Default);
+        let (mode, sources) =
+            Context::chain_mode_and_sources(Some(&oci_index), &[], Vec::new(), ocx_index::ChainMode::Default);
 
         assert_eq!(mode, ocx_index::ChainMode::Default);
         assert_eq!(
@@ -2786,6 +3267,7 @@ mod tests {
                 enforce_required: false,
                 onboarding: false,
                 tolerate_vanished_received_config,
+                tolerate_retired_snapshot: false,
             },
             telemetry,
         )

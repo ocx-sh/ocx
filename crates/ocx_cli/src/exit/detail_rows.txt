@@ -4,6 +4,7 @@ ambiguous_extra_ca_certs	ConfigError	Both extra_ca_certs and extra_ca_certs_pem 
 ambiguous_extra_ca_certs	ConfigError	Both extra_ca_certs and extra_ca_certs_pem are declared
 ambiguous_host_leaf	DataError	ocx.lock pins several platforms this host could run, none preferred
 ambiguous_trust_root	ConfigError	The payload declares both trusted_root and trusted_root_json
+ambiguous_trust_root	ConfigError	The payload declares both trusted_root and trusted_root_json
 announce_failed	Failure	Announcing failed with an unclassified cause
 any_pin_not_advertised_as_any	DataError	A dependency pinned as `any` is not published for any platform
 any_pin_provenance_unavailable	Failure	Verifying an `any` pin's provenance failed with an unclassified cause
@@ -173,17 +174,29 @@ group_holds_direct_binding	ConfigError	A group table holds a binding outside its
 host_resolution_failed	TempFail	A registry host could not be resolved
 identity_mismatch	PermissionDenied	The certificate identity does not match the required signer
 identity_token_file_permissive	PermissionDenied	The identity token file is readable by group or other
+index_catalog_expired	PolicyBlocked	The index catalog's validity window has ended
+index_catalog_rollback	DataError	The index catalog is older than one already verified
+index_catalog_through_mirror	ConfigError	The signed index catalog cannot be checked through a registry mirror, so index_signature enforce has nothing to check
 index_dispatch_digest_mismatch	DataError	A dispatch object does not hash to the digest its root claims
 index_http_failed	Unavailable	An index request failed
 index_http_transient	TempFail	An index request failed in a way a retry may clear
 index_manifest_not_found	NotFound	The registry has no manifest for a tag the index update walked
 index_named_by_digest	UsageError	The source names an image index by digest, which cannot merge into the target
+index_package_not_in_catalog	NotFound	The signed catalog lists no entry for the package
 index_path_invalid	Failure	A local index path is invalid
+index_publisher_mismatch	PermissionDenied	The index catalog is signed by a signer that is not trusted
+index_publishers_invalid	ConfigError	An index_publishers entry is malformed
+index_publishers_missing	ConfigError	Index signature enforcement is on with no publishers to check against
+index_publishers_unrecognized	Unsupported	No index publisher entry is of a kind this build understands
 index_resolution_blocked	PolicyBlocked	A local policy refused resolving through the index
+index_root_digest_mismatch	DataError	A package root differs from the digest its signed catalog lists
 index_root_missing_field	Failure	The committed root document lacks a required field
+index_root_not_found	NotFound	A package the signed catalog lists is not served
 index_root_not_object	Failure	The committed root document is not a JSON object
 index_root_parse	Failure	The committed root document is not valid JSON
 index_serialization	DataError	An index document could not be serialized
+index_signature_invalid	DataError	The index catalog's signature does not verify
+index_signature_not_found	NotFound	The index serves no signature for its catalog
 index_singleflight_failed	Failure	A shared index operation failed with an unclassified cause
 index_source_failed	Failure	An index source failed with an unclassified cause
 index_source_not_published	ConfigError	The registry is not a published index source, so it has no catalog to regenerate
@@ -464,6 +477,12 @@ shim_names_not_enumerable	DataError	The package's interface names cannot be enum
 short_blob_read	TempFail	The registry ended a blob download early
 sidecar_requires_signature	UsageError	A sidecar signature format was requested without a signing identity
 signature_invalid	DataError	The signature does not verify over the subject digest
+sigstore_authority_invalid	ConfigError	A Sigstore authority is not a valid host and port
+sigstore_authority_invalid	ConfigError	A Sigstore authority is not a valid host and port
+sigstore_rekor_url_missing	ConfigError	A Sigstore table has no rekor_url to upload a signature to
+sigstore_table_key_mismatch	ConfigError	A Sigstore table's fulcio_url names another authority than its key
+sigstore_table_key_mismatch	ConfigError	A Sigstore table's fulcio_url names another authority than its key
+sigstore_trusted_root_missing	ConfigError	A private Sigstore instance has no trusted root configured
 simple_signing_claim_unsupported	DataError	The simple signing payload declares an unsupported claim type
 singleflight_abandoned	Failure	The leader of shared in-flight work stopped without a result
 singleflight_capacity_exceeded	TempFail	Too many distinct operations were in flight at once
@@ -532,6 +551,8 @@ trust_policy_invalid	ConfigError	A trust policy entry is malformed
 trust_root_load	ConfigError	Trust material failed to load
 trust_root_unavailable	ConfigError	The trust root could not be loaded
 trust_root_unreadable	IoError	A trust root file named by the operator could not be read
+trust_sigstore_retired	ConfigError	A config file declares the retired [trust.sigstore] table
+trust_sigstore_retired	ConfigError	A config file declares the retired [trust.sigstore] table
 trusted_root_invalid	ConfigError	The named file is not a usable Sigstore trusted root
 trusted_root_read_failed	IoError	Reading the trusted root the payload names failed
 unclaimed_package	NotFound	The package has no index entry to announce into

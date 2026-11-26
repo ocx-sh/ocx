@@ -31,6 +31,9 @@ pub struct IndexCatalog {
     /// Registries to list repositories from (defaults to OCX_DEFAULT_REGISTRY).
     #[arg(value_name = "REGISTRY")]
     registries: Vec<String>,
+
+    #[clap(flatten)]
+    verify: crate::options::CatalogVerify,
 }
 
 impl IndexCatalog {
@@ -41,9 +44,10 @@ impl IndexCatalog {
             self.registries.clone()
         };
 
+        let chain = context.default_index_for_run(self.verify.explicit());
         let mut repositories = Vec::new();
         for registry in &registries {
-            let repos = context.default_index().list_repositories(registry).await?;
+            let repos = chain.list_repositories(registry).await?;
             repositories.extend(repos.into_iter().map(|r| ocx_oci::Repository::new(registry, r)));
         }
         repositories.sort();
@@ -62,7 +66,7 @@ impl IndexCatalog {
         for (index, repo) in repositories.iter().enumerate() {
             let identifier = ocx_oci::PackageRef::new_registry(repo.repository(), repo.registry());
             let display_name = repo.to_string();
-            let context = context.clone();
+            let chain = chain.clone();
             // Acquired before the spawn, or thousands of repositories become thousands of live tasks.
             let permit = std::sync::Arc::clone(&permits)
                 .acquire_owned()
@@ -71,8 +75,7 @@ impl IndexCatalog {
             join_set.spawn(async move {
                 // Dropped however the task ends (panic or `abort_all`), so no permit is stranded.
                 let _permit = permit;
-                let result = context
-                    .default_index()
+                let result = chain
                     .list_tags(&identifier)
                     .await
                     .map_err(anyhow::Error::from)

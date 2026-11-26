@@ -254,7 +254,16 @@ acceptance_suite(
         # excludes `tests/test_*.py`, so without this entry an edit to
         # `attest()` would leave this target's verdict cached (the tag guard
         # charges an importer with the sibling file and everything it reads).
-        "tests/test_auto_verify.py": ["tests/test_attest.py"],
+        "tests/test_auto_verify.py": ["tests/test_attest.py"] + _PROJECT_TOOLCHAIN,
+        # `src/index_signing.py` mints cosign keys through the project toolchain
+        # (`tests/fixtures/cosign.py`), which reads the root `ocx.toml` and its lock.
+        "tests/test_attest.py": _PROJECT_TOOLCHAIN,
+        "tests/test_index_sign.py": _PROJECT_TOOLCHAIN,
+        "tests/test_offline_verify.py": _PROJECT_TOOLCHAIN,
+        "tests/test_push.py": _PROJECT_TOOLCHAIN,
+        "tests/test_sign_platforms.py": _PROJECT_TOOLCHAIN,
+        "tests/test_sigstore_instances.py": _PROJECT_TOOLCHAIN,
+        "tests/test_trust_root_distribution.py": _PROJECT_TOOLCHAIN,
         "tests/test_bench_smoke.py": [":bench_inputs"],
         "tests/test_catalog_readme.py": ["//:packaging/ocx/CATALOG.md"],
         # `test/tests/fixtures/cosign.py` runs `ocx --project <root>/ocx.toml`,
@@ -272,6 +281,14 @@ acceptance_suite(
         "tests/test_publisher_trust.py": ["tests/test_attest.py"] + _PROJECT_TOOLCHAIN,
         # The previous release comes from the same toolchain lookup.
         "tests/test_publisher_trust_previous.py": _PROJECT_TOOLCHAIN,
+        # The previous release and cosign come from the same toolchain lookup.
+        "tests/test_index_signature.py": _PROJECT_TOOLCHAIN,
+        # `src/index_signing.py` mints cosign keys through the project toolchain.
+        "tests/test_index_signature_posture.py": _PROJECT_TOOLCHAIN,
+        # `src/index_signing.py` mints cosign keys through the project toolchain.
+        "tests/test_progress_channel.py": _PROJECT_TOOLCHAIN,
+        # Imports the `attest` and `cyclonedx_predicate` helpers from a sibling.
+        "tests/test_package_sbom_dependencies.py": ["tests/test_attest.py"] + _PROJECT_TOOLCHAIN,
         "tests/test_doc_scripts.py": _PROJECT_TOOLCHAIN + [
             ":recording_sources",
             "//test/doc_scripts:doc_script_sources",
@@ -306,7 +323,7 @@ acceptance_suite(
         "tests/test_lazy_loading.py": ["tests/test_patches.py"],
         "tests/test_project_env.py": ["//crates/ocx_schema:ocx_schema_bin"],
         "tests/test_purge.py": ["tests/test_assembly.py"],
-        "tests/test_push_sign_order.py": ["tests/test_push.py"],
+        "tests/test_push_sign_order.py": ["tests/test_push.py"] + _PROJECT_TOOLCHAIN,
         "tests/test_scenarios_smoke.py": [":scenario_scripts"],
         "tests/test_schema.py": ["//website:src/public/schemas/metadata/v1.json"],
         "tests/test_state_providers.py": _PROJECT_TOOLCHAIN + [":recording_sources"],

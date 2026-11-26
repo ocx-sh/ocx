@@ -16,6 +16,9 @@ pub struct IndexUpdate {
     /// Packages to refresh; a bare name resolves against the default registry.
     #[clap(required = true, num_args = 1.., value_name = "PACKAGE")]
     packages: Vec<options::Identifier>,
+
+    #[clap(flatten)]
+    verify: options::CatalogVerify,
 }
 
 impl IndexUpdate {
@@ -33,12 +36,14 @@ impl IndexUpdate {
         let oci_index = ocx_index::Index::from_remote(remote_index.clone());
         // Index-bearing namespaces refresh through their index source, the rest against the registry
         // (`adr_index_indirection.md` § `[registries."<ns>"] index`).
-        let index_sources = context.index_sources();
+        let index_sources = context.index_sources_for_run(self.verify.explicit());
+        let refusals = context.index_refusals_for_run(self.verify.explicit());
 
         let packages = options::Identifier::transform_all(self.packages.clone(), context.default_registry())?;
 
         if let Some(error) =
-            index_common::refresh_packages(context.local_index(), index_sources, &oci_index, &packages).await
+            index_common::refresh_packages(context.local_index(), &index_sources, &refusals, &oci_index, &packages)
+                .await
         {
             return Err(error);
         }
@@ -71,6 +76,17 @@ mod tests {
     }
 
     // ── grammar ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn verify_is_accepted_beside_no_verify_with_the_last_flag_winning() {
+        parse(&["update", "--verify", "cmake"]).expect("`--verify` checks the catalog even under `OCX_NO_VERIFY`");
+        parse(&["update", "--no-verify", "--verify", "cmake"]).expect("POSIX last-wins");
+    }
+
+    #[test]
+    fn no_verify_is_accepted() {
+        parse(&["update", "--no-verify", "cmake"]).expect("`--no-verify` skips the catalog check");
+    }
 
     #[test]
     fn at_least_one_package_is_required() {

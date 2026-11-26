@@ -108,6 +108,7 @@ An absent `scope` is a catch-all, so the tolerance cuts both ways. A policy whos
 | `identity` | string | XOR with `identity_regexp` | Exact expected certificate SAN, byte-equal |
 | `identity_regexp` | string | XOR with `identity` | Regex the SAN must match in full, see [Regex identities][in-depth-signing-regex] |
 | `oidc_issuer` | string | yes | Exact expected OIDC issuer URL, byte-equal. No regex form, because issuer URLs are stable |
+| `sigstore` | string | no | The host of a `[sigstore."<host>"]` table in `config.toml`. The certificate must chain to that instance's Fulcio. Absent means the public instance. An entry naming a host with no local table matches nobody |
 
 Set exactly one of `identity` and `identity_regexp`. Both or neither is a configuration error. A keyless signer without `oidc_issuer` is a parse error. OCX rejects one with neither identity field when the policy compiles, and never treats it as "trust anything".
 
@@ -140,7 +141,7 @@ signers = [
 ]
 ```
 
-Mixing `keyless` and `key` entries in one policy is legal. It is how a fleet migrates between signing models without touching scope. A relative key reference resolves against the directory of the `config.toml` that declared it. This is plain path resolution, the same one `[trust.sigstore] trusted_root` uses, not a containment check. The failure codes follow what failed, as `ocx package sign --key` does for the same file:
+Mixing `keyless` and `key` entries in one policy is legal. It is how a fleet migrates between signing models without touching scope. A relative key reference resolves against the directory of the `config.toml` that declared it. This is plain path resolution, the same one `trusted_root` in a [`[sigstore."<host>"]` table][config-sigstore] uses, not a containment check. The failure codes follow what failed, as `ocx package sign --key` does for the same file:
 
 | Condition | Exit |
 |-----------|------|
@@ -179,6 +180,7 @@ A package can also declare its own signers in its root document. [List publisher
 [cosign]: https://docs.sigstore.dev/cosign/overview/
 [cmd-config-push]: ../reference/command-line/config.md#config-push
 [config-trust]: ../reference/configuration.md#keys-trust
+[config-sigstore]: ../reference/configuration.md#keys-sigstore
 [config-trust-scope]: ../reference/configuration.md#keys-trust-policy-scope
 [config-trust-builder]: ../reference/configuration.md#keys-trust-policy-builder
 [config-trust-signers]: ../reference/configuration.md#keys-trust-policy-signers

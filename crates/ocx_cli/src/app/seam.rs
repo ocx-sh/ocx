@@ -768,6 +768,7 @@ mod tests {
                 enforce_required: false,
                 onboarding: false,
                 tolerate_vanished_received_config: false,
+                tolerate_retired_snapshot: false,
             },
             Some(&mut slot),
         )

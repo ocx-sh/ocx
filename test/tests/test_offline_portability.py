@@ -36,6 +36,9 @@ from src import (
 )
 from src.registry import fetch_platform_manifest_digest
 
+# The registry routed to the fixture index sets `index_signature = "off"`: this module does not test the
+# catalog signature check (test_index_signature.py does), so it expects no signature request and no WARN.
+
 # ---------------------------------------------------------------------------
 # Store-copy helpers
 # ---------------------------------------------------------------------------
@@ -282,7 +285,7 @@ def test_index_update_subtree_carries_every_file_a_recursive_mirror_would(
 
     registry_host = ocx.registry.split(":", 1)[0]
     (ocx.ocx_home / "config.toml").write_text(
-        f'[registries."ocx.sh"]\nindex = "{index_server.base_url}"\ntrusted_hosts = ["{registry_host}"]\n'
+        f'[registries."ocx.sh"]\nindex = "{index_server.base_url}"\nindex_signature = "off"\ntrusted_hosts = ["{registry_host}"]\n'
     )
     ocx.env["OCX_INSECURE_REGISTRIES"] = f"{ocx.registry},{index_server.host}"
 
@@ -450,6 +453,7 @@ def test_indirected_install_from_copied_store_without_index_configuration(
     (ocx.ocx_home / "config.toml").write_text(
         f'[registries."{indirected_namespace}"]\n'
         f'index = "{index_server.base_url}"\n'
+        f'index_signature = "off"\n'
         f'trusted_hosts = ["127.0.0.1"]\n'
     )
     ocx.env["OCX_INSECURE_REGISTRIES"] = (

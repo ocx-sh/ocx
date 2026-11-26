@@ -907,10 +907,9 @@ impl VerifyPipeline {
         // Refused up front, or a missing CT log key surfaces as an opaque SCT failure per candidate.
         let keyless_reachable = ctx.policies.is_empty()
             || ctx.policies.iter().any(|policy| {
-                policy
-                    .backends
-                    .iter()
-                    .any(|backend| matches!(backend, PolicyBackend::Keyless(_)))
+                policy.backends.iter().any(
+                    |backend| matches!(backend, PolicyBackend::Keyless(k) if k.instance == ctx.trust_root.instance()),
+                )
             });
         if !candidates.is_empty() && keyless_reachable && ctx.trust_root.ctfe_key_map().is_empty() {
             return Err(VerifyErrorKind::TrustRootLoad(TrustRootLoadReason::NoCtLogKey));
@@ -1394,7 +1393,7 @@ impl VerifyPipeline {
                 }
 
                 // The matched subset, not a boolean: the builder pin is decided per satisfied policy.
-                let matched_policies = matching_policies(&leaf_der, ctx.policies)?;
+                let matched_policies = matching_policies(&leaf_der, ctx.policies, &ctx.trust_root.instance())?;
 
                 if let Some(verified) = verified_envelope.as_ref() {
                     dsse::enforce_builder_pin(&matched_policies, &verified.attestation)?;
@@ -1547,6 +1546,174 @@ impl VerifyPipeline {
             .list_referrers_with_fallback(image, subject_digest, artifact_type)
             .await
             .map_err(map_client_error)
+    }
+}
+
+/// What a detached statement's signature established, as [`verify_detached_statement`] reports it.
+pub(crate) struct DetachedVerified {
+    /// Position, within the policy's backends, of the entry that matched.
+    pub signer_index: usize,
+    pub signer: crate::sign::SignerIdentity,
+    pub tlog_index: Option<u64>,
+}
+
+/// The largest signature file a detached statement may carry.
+pub(crate) const MAX_DETACHED_BUNDLE_BYTES: usize = 256 * 1024;
+
+/// Verify `bundle_bytes` as a DSSE-wrapped in-toto Statement over `payload`, for [`crate::detached::verify_statement`].
+///
+/// `mode` picks which statements the bundle may carry; the public entry point always passes the attestation mode, so
+/// an image signature cannot stand in for a detached statement.
+// A trust-root-only seam: no network, so a Rekor key the root does not pin is a refusal and never a fetch.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one statement, its expectations, the signer set and the trust root"
+)]
+pub(crate) async fn verify_detached_statement(
+    payload: &[u8],
+    bundle_bytes: &[u8],
+    subject_name: &str,
+    predicate_type: &str,
+    predicate_check: &(dyn Fn(&serde_json::Value) -> bool + Sync),
+    signers: &ocx_trust::CompiledPolicy,
+    trust_root: &TrustRoot,
+    mode: &VerifyContentMode,
+) -> Result<DetachedVerified, VerifyErrorKind> {
+    let bundle = parse_bundle(bundle_bytes, MAX_DETACHED_BUNDLE_BYTES).ok_or(VerifyErrorKind::BundleParseFailed)?;
+    let parts = BundleParts::from_bundle(&bundle, mode)?;
+
+    let payload_digest = ocx_oci::Algorithm::Sha256.hash(payload);
+    let expected_type = PredicateType::Uri(predicate_type.to_owned());
+    // Payload type, `_type`, binding of the digest and the predicate type, all before any key is consulted.
+    let envelope = dsse::verify_envelope(&bundle, &payload_digest, Some(&expected_type))?;
+
+    // `binds_subject` accepts any one matching subject among several; a detached statement names exactly one.
+    let statement = crate::attest::statement::parse(&envelope.attestation.payload)?;
+    let [subject] = statement.subject.as_slice() else {
+        return Err(VerifyErrorKind::StatementSubjectMismatch {
+            expected: "exactly one subject".to_owned(),
+            actual: format!("{} subjects", statement.subject.len()),
+        });
+    };
+    if subject.name != subject_name {
+        return Err(VerifyErrorKind::StatementSubjectMismatch {
+            expected: format!("subject {subject_name:?}"),
+            actual: format!("subject {:?}", subject.name),
+        });
+    }
+    let predicate: serde_json::Value =
+        serde_json::from_str(statement.predicate.get()).map_err(|_| VerifyErrorKind::BundleParseFailed)?;
+    if !predicate_check(&predicate) {
+        return Err(VerifyErrorKind::PredicateTypeMismatch {
+            expected: format!("{predicate_type} with a predicate this verifier accepts"),
+            actual: "a predicate this verifier refuses".to_owned(),
+        });
+    }
+
+    let policies = std::slice::from_ref(signers);
+    match parts {
+        BundleParts::Keyless { leaf_der, tlog } => {
+            if trust_root.ctfe_key_map().is_empty() {
+                return Err(VerifyErrorKind::TrustRootLoad(TrustRootLoadReason::NoCtLogKey));
+            }
+            let verifier = Verifier::new(RekorConfiguration::default(), trust_root.clone()).map_err(|e| {
+                VerifyErrorKind::TrustRootLoad(TrustRootLoadReason::AssetReadFailed {
+                    source: Box::new(std::io::Error::other(format!("trust root unusable: {e}"))),
+                })
+            })?;
+            verifier
+                .verify(payload, bundle, &PolicyDeferredToOcx, true)
+                .await
+                .map_err(map_verification_error)?;
+
+            let pem = trust_root
+                .rekor_public_key_pem_for(&tlog.log_id_hex)
+                .ok_or(VerifyErrorKind::OfflineNoPinnedRekorKey)?;
+            verify_rekor_entry(&pem, &tlog)?;
+            dsse::verify_tlog_binding(
+                &tlog.canonicalized_body,
+                &envelope.attestation.payload,
+                &envelope.signatures,
+            )?;
+
+            let instance = trust_root.instance();
+            matching_policies(&leaf_der, policies, &instance)?;
+            let signer_index = signers
+                .backends
+                .iter()
+                .position(|backend| {
+                    let single = ocx_trust::CompiledPolicy {
+                        builder: None,
+                        backends: vec![backend.clone()],
+                    };
+                    matching_policies(&leaf_der, std::slice::from_ref(&single), &instance).is_ok()
+                })
+                .ok_or(VerifyErrorKind::IdentityMismatch)?;
+
+            let cert = parse_certificate(&leaf_der)?;
+            tlog::verify_integrated_time_within_certificate(
+                SigningInstant::TransparencyLog(i64::try_from(tlog.integrated_time).unwrap_or(i64::MAX)),
+                &cert,
+            )?;
+            let (Some(certificate_identity), Some(certificate_oidc_issuer)) =
+                (subject_identity(&cert), oidc_issuer(&cert))
+            else {
+                return Err(VerifyErrorKind::IdentityMismatch);
+            };
+            Ok(DetachedVerified {
+                signer_index,
+                signer: crate::sign::SignerIdentity::Keyless {
+                    certificate_identity,
+                    certificate_oidc_issuer,
+                },
+                tlog_index: Some(tlog.log_index),
+            })
+        }
+        BundleParts::Key { hint, tlog } => {
+            let signature = &envelope
+                .signatures
+                .first()
+                .ok_or(VerifyErrorKind::SignatureInvalid)?
+                .sig;
+            let pae = crate::attest::dsse::pae(crate::attest::DSSE_PAYLOAD_TYPE, &envelope.attestation.payload);
+            identity::matching_key_policies(&pae, signature, policies)?;
+            let signer_index = signers
+                .backends
+                .iter()
+                .position(|backend| {
+                    let single = ocx_trust::CompiledPolicy {
+                        builder: None,
+                        backends: vec![backend.clone()],
+                    };
+                    identity::matching_key_policies(&pae, signature, std::slice::from_ref(&single)).is_ok()
+                })
+                .ok_or(VerifyErrorKind::SignatureInvalid)?;
+
+            // Optional under a key, as on the package path; checked in full only where the trust root pins the log.
+            let tlog_index = match tlog {
+                Some(entry) => match trust_root.rekor_public_key_pem_for(&entry.log_id_hex) {
+                    Some(pem) => {
+                        verify_rekor_entry(&pem, &entry)?;
+                        dsse::verify_tlog_binding(
+                            &entry.canonicalized_body,
+                            &envelope.attestation.payload,
+                            &envelope.signatures,
+                        )?;
+                        Some(entry.log_index)
+                    }
+                    None => None,
+                },
+                None => None,
+            };
+            Ok(DetachedVerified {
+                signer_index,
+                signer: crate::sign::SignerIdentity::Key {
+                    public_key_hint: hint,
+                    key_backend: KeyBackendKind::File,
+                },
+                tlog_index,
+            })
+        }
     }
 }
 
@@ -2180,24 +2347,8 @@ async fn cache_sidecar_trust_material(ctx: &VerifyContext<'_>, rekor_keys: &Reko
 ///
 /// Best-effort: a cache-write failure never fails a valid verify.
 async fn cache_trust_material(ctx: &VerifyContext<'_>, rekor_key_pem: String) {
-    let cache_key = super::trust_cache::cache_key_for_rekor(ctx.rekor_url);
-    let der_certs = ctx.trust_root.der_certs().to_vec();
-    // Without the CT log keys, an offline verify off this entry cannot check the SCT.
-    let ctfe_keys = ctx.trust_root.ctfe_key_map().clone();
-
-    // Skip a content-equal rewrite, or every use slides the 24h TTL and a batch stampedes the file.
-    if let Ok(Some(existing)) = TrustRootCache::from_cache(&cache_key, &ctx.state).await
-        && existing.fulcio_der_certs == der_certs
-        && existing.ctfe_keys == ctfe_keys
-        && existing.rekor_public_key_pem.as_deref() == Some(rekor_key_pem.as_str())
-    {
-        return;
-    }
-
-    let entry = TrustRootCache::new(cache_key, der_certs, ctfe_keys, rekor_key_pem);
-    if let Err(e) = entry.write_cache(&ctx.state).await {
-        tracing::debug!("trust-root cache write skipped: {e}");
-    }
+    let public_key = super::trust_cache::cache_key_for_rekor(ctx.rekor_url);
+    TrustRootCache::store_material(ctx.trust_root, rekor_key_pem, &public_key, &ctx.state).await;
 }
 
 /// Fetch the subject manifest and prove it hashes to the resolved digest, or a registry can swap
@@ -4245,6 +4396,7 @@ mod tests {
         let policies = [ocx_trust::CompiledPolicy {
             builder: None,
             backends: vec![ocx_trust::PolicyBackend::Keyless(ocx_trust::CompiledKeyless {
+                instance: ocx_trust::SigstoreAuthority::public(),
                 identity: Some(ocx_trust::IdentityRule::Exact(GOLDEN_IDENTITY.to_string())),
                 issuer: GOLDEN_ISSUER.to_string(),
                 claims: Vec::new(),
@@ -4387,6 +4539,7 @@ mod tests {
         ocx_trust::CompiledPolicy {
             builder: None,
             backends: vec![ocx_trust::PolicyBackend::Keyless(ocx_trust::CompiledKeyless {
+                instance: ocx_trust::SigstoreAuthority::public(),
                 identity: Some(ocx_trust::IdentityRule::Exact(GOLDEN_IDENTITY.to_string())),
                 issuer: GOLDEN_ISSUER.to_string(),
                 claims: Vec::new(),
@@ -4533,6 +4686,182 @@ mod tests {
             &RekorKeyMemo::default(),
         )
         .await
+    }
+
+    fn golden_keyless_policy_on(instance: &str) -> ocx_trust::CompiledPolicy {
+        let mut policy = golden_keyless_policy();
+        let ocx_trust::PolicyBackend::Keyless(keyless) = &mut policy.backends[0] else {
+            panic!("the golden policy is keyless");
+        };
+        keyless.instance = ocx_trust::SigstoreAuthority::parse(instance).expect("a valid authority");
+        policy
+    }
+
+    fn golden_environment(trust_root: TrustRoot) -> GoldenEnvironment {
+        GoldenEnvironment {
+            trust_root,
+            offline: true,
+            transparency: crate::verify::Transparency::Verify,
+            rekor_url: Url::parse("http://127.0.0.1:3000").expect("rekor url"),
+        }
+    }
+
+    /// A candidate verified against instance A's trust root is judged by A's entries only: the same identity under an
+    /// entry that names B is refused (77), and the same bytes pass once the root is B's.
+    #[tokio::test]
+    async fn a_candidate_is_matched_only_against_entries_of_the_instance_whose_root_verified_it() {
+        let annotated = golden_referrer_field("/annotations/dev.sigstore.bundle.predicateType");
+        let policy = [golden_keyless_policy_on("fulcio.corp.example")];
+        let public_root = TrustRoot::load_trusted_root_json(GOLDEN_TRUSTED_ROOT.as_bytes()).expect("root");
+        let refused = verify_golden_candidate_in(
+            GOLDEN_KEYLESS_BUNDLE,
+            &annotated,
+            &policy,
+            &golden_environment(public_root.clone()),
+        )
+        .await;
+        assert!(
+            matches!(refused, Err(VerifyErrorKind::IdentityMismatch)),
+            "got {refused:?}"
+        );
+
+        let corp_root = public_root.for_instance(ocx_trust::SigstoreAuthority::parse("fulcio.corp.example").unwrap());
+        let admitted = verify_golden_candidate_in(
+            GOLDEN_KEYLESS_BUNDLE,
+            &annotated,
+            &policy,
+            &golden_environment(corp_root),
+        )
+        .await;
+        assert!(
+            matches!(admitted, Ok(CandidateOutcome::Verified { .. })),
+            "got {admitted:?}"
+        );
+    }
+
+    async fn detached_golden(
+        bundle: &str,
+        policy: &ocx_trust::CompiledPolicy,
+        trust_root: &TrustRoot,
+        mode: &VerifyContentMode,
+    ) -> Result<DetachedVerified, VerifyErrorKind> {
+        verify_detached_statement(
+            GOLDEN_SUBJECT_MANIFEST.as_bytes(),
+            bundle.as_bytes(),
+            "",
+            COSIGN_SIGN_PREDICATE_TYPE,
+            &|_| true,
+            policy,
+            trust_root,
+            mode,
+        )
+        .await
+    }
+
+    fn golden_root() -> TrustRoot {
+        TrustRoot::load_trusted_root_json(GOLDEN_TRUSTED_ROOT.as_bytes()).expect("the committed trust root loads")
+    }
+
+    /// The detached path runs the real keyless chain: cosign's own capture verifies offline, against the committed
+    /// root, with its log entry checked, and the matching entry and signer are reported.
+    #[tokio::test]
+    async fn a_keyless_detached_statement_verifies_through_the_chain_and_the_log() {
+        let verified = detached_golden(
+            GOLDEN_KEYLESS_BUNDLE,
+            &golden_keyless_policy(),
+            &golden_root(),
+            &VerifyContentMode::Signature,
+        )
+        .await
+        .expect("cosign's keyless signature verifies");
+        assert_eq!(verified.signer_index, 0);
+        assert_eq!(verified.tlog_index, Some(golden_log_index()));
+        assert!(matches!(
+            verified.signer,
+            crate::sign::SignerIdentity::Keyless { ref certificate_identity, .. } if certificate_identity == GOLDEN_IDENTITY
+        ));
+    }
+
+    fn golden_log_index() -> u64 {
+        let bundle: serde_json::Value = serde_json::from_str(GOLDEN_KEYLESS_BUNDLE).expect("golden bundle is JSON");
+        bundle["verificationMaterial"]["tlogEntries"][0]["logIndex"]
+            .as_str()
+            .and_then(|index| index.parse().ok())
+            .or_else(|| bundle["verificationMaterial"]["tlogEntries"][0]["logIndex"].as_u64())
+            .expect("the capture carries a log index")
+    }
+
+    /// The public entry point reads attestation content only: the same bytes, the same identity, still no catalog
+    /// signature.
+    #[tokio::test]
+    async fn an_image_signature_is_not_read_in_the_attestation_mode_the_public_entry_uses() {
+        let result = detached_golden(
+            GOLDEN_KEYLESS_BUNDLE,
+            &golden_keyless_policy(),
+            &golden_root(),
+            &VerifyContentMode::Attestation { predicate_type: None },
+        )
+        .await;
+        assert!(
+            matches!(result, Err(VerifyErrorKind::NoUsableBundle)),
+            "{:?}",
+            result.err()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_keyless_detached_statement_is_judged_by_the_entries_of_its_own_instance() {
+        let result = detached_golden(
+            GOLDEN_KEYLESS_BUNDLE,
+            &golden_keyless_policy_on("fulcio.corp.example"),
+            &golden_root(),
+            &VerifyContentMode::Signature,
+        )
+        .await;
+        assert!(
+            matches!(result, Err(VerifyErrorKind::IdentityMismatch)),
+            "{:?}",
+            result.err()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_keyless_detached_statement_without_a_log_entry_is_refused() {
+        let result = detached_golden(
+            &without_tlog_entries(GOLDEN_KEYLESS_BUNDLE),
+            &golden_keyless_policy(),
+            &golden_root(),
+            &VerifyContentMode::Signature,
+        )
+        .await;
+        assert!(
+            matches!(result, Err(VerifyErrorKind::RekorSetInvalid)),
+            "{:?}",
+            result.err()
+        );
+    }
+
+    /// No network is reached to fetch a log key: a trust root that pins none is a refusal.
+    #[tokio::test]
+    async fn a_trust_root_pinning_no_log_key_refuses_a_keyless_detached_statement() {
+        let root = golden_root();
+        let keyless_root = TrustRoot::from_material(
+            root.der_certs().to_vec(),
+            root.ctfe_key_map().clone(),
+            std::collections::BTreeMap::new(),
+        );
+        let result = detached_golden(
+            GOLDEN_KEYLESS_BUNDLE,
+            &golden_keyless_policy(),
+            &keyless_root,
+            &VerifyContentMode::Signature,
+        )
+        .await;
+        assert!(
+            matches!(result, Err(VerifyErrorKind::OfflineNoPinnedRekorKey)),
+            "{:?}",
+            result.err()
+        );
     }
 
     /// **S-003.** cosign's own key-mode DSSE image signature verifies through
@@ -7439,6 +7768,7 @@ mod tests {
         let policies = [ocx_trust::CompiledPolicy {
             builder: None,
             backends: vec![ocx_trust::PolicyBackend::Keyless(ocx_trust::CompiledKeyless {
+                instance: ocx_trust::SigstoreAuthority::public(),
                 identity: Some(ocx_trust::IdentityRule::Exact(GOLDEN_IDENTITY.to_string())),
                 issuer: GOLDEN_ISSUER.to_string(),
                 claims: Vec::new(),

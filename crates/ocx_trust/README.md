@@ -1,6 +1,6 @@
 # ocx_trust
 
-Signer-identity policy: `[[trust.policy]]` model, tiered resolution (`resolve_tiered`), `CompiledPolicy`/`IdentityRule`, `SigstoreTrust` config type.
+Signer-identity policy: `[[trust.policy]]` model, tiered resolution (`resolve_tiered`), `CompiledPolicy`/`IdentityRule`, the `[sigstore."<host>"]` instance tables.
 
 **Tier:** ecosystem
 

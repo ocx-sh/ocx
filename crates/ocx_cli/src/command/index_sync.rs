@@ -8,6 +8,7 @@ use ocx_index;
 
 use crate::api::data::index::{CatalogPreview, CatalogPreviewEntry};
 use crate::command::index_common;
+use crate::options;
 
 /// Refreshes every package one or more registries' own catalogs name, through `update`'s refresh
 /// loop, so one bounded ceiling covers a run over any number of registries.
@@ -23,6 +24,9 @@ pub struct IndexSync {
     /// refuse it.
     #[clap(long)]
     dry_run: bool,
+
+    #[clap(flatten)]
+    verify: options::CatalogVerify,
 }
 
 impl IndexSync {
@@ -40,7 +44,8 @@ impl IndexSync {
         let oci_index = ocx_index::Index::from_remote(remote_index.clone());
         // Index-bearing namespaces refresh through their index source, the rest against the registry
         // (`adr_index_indirection.md`).
-        let index_sources = context.index_sources();
+        let index_sources = &context.index_sources_for_run(self.verify.explicit());
+        let refusals = &context.index_refusals_for_run(self.verify.explicit());
 
         // Deduplicated before any fetch, or a repeat refreshes twice and blocks on the first's lock; the
         // registry list, not the packages, so the dry-run preview and the wet path agree.
@@ -51,7 +56,7 @@ impl IndexSync {
         let mut enumerated = Vec::with_capacity(registries.len());
         let mut failures: Vec<(usize, anyhow::Error)> = Vec::new();
         for (input_index, registry) in registries.iter().enumerate() {
-            match enumerate_catalog(index_sources, &oci_index, registry).await {
+            match enumerate_catalog(index_sources, refusals, &oci_index, registry).await {
                 Ok(packages) => {
                     // Logged: a pull token without catalog scope often answers an empty listing, not 401.
                     if packages.is_empty() {
@@ -89,7 +94,7 @@ impl IndexSync {
             .collect();
 
         let refresh_failure =
-            index_common::refresh_packages(context.local_index(), index_sources, &oci_index, &packages).await;
+            index_common::refresh_packages(context.local_index(), index_sources, refusals, &oci_index, &packages).await;
 
         // Enumeration failure outranks refresh failure: that registry contributed no work at all.
         if let Some(error) = index_common::first_failure(failures).or(refresh_failure) {
@@ -111,9 +116,17 @@ impl IndexSync {
 /// empty-set success.
 async fn enumerate_catalog(
     index_sources: &[ocx_index::OcxIndex],
+    refusals: &[ocx_index::Index],
     oci_index: &ocx_index::Index,
     registry: &str,
 ) -> anyhow::Result<Vec<String>> {
+    // Ahead of the derived branch, which would list the registry through the mirror that hid its index.
+    if let Some(refusal) = refusals.iter().find(|source| source.serves_registry(registry)) {
+        return Err(refusal.list_repositories(registry).await.err().map_or_else(
+            || anyhow::anyhow!("a refusing index source listed '{registry}'"),
+            anyhow::Error::from,
+        ));
+    }
     let mut packages = match index_sources.iter().find(|source| source.serves_registry(registry)) {
         // `_strict`: an absent catalog is an error, never an empty one; read as empty, sync would exit 0
         // having refreshed nothing.
@@ -171,6 +184,17 @@ mod tests {
     }
 
     // ── grammar ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn verify_is_accepted_beside_no_verify_with_the_last_flag_winning() {
+        parse(&["sync", "--verify", "ocx.sh"]).expect("`--verify` checks the catalog even under `OCX_NO_VERIFY`");
+        parse(&["sync", "--no-verify", "--verify", "ocx.sh"]).expect("POSIX last-wins");
+    }
+
+    #[test]
+    fn no_verify_is_accepted() {
+        parse(&["sync", "--no-verify", "ocx.sh"]).expect("`--no-verify` skips the catalog check");
+    }
 
     #[test]
     fn a_registry_is_required() {

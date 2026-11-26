@@ -158,6 +158,8 @@ rust_test(
     ] + ["--skip=" + case for case in _SKIPPED],
     compile_data = [
         "//test:sigstore/keys/fulcio-ca.crt.pem",
+        "//test:tests/fixtures/golden/keys/cosign.key",
+        "//test:tests/fixtures/golden/keys/cosign.pub",
     ],
     crate = ":ocx_cli",
     data = glob(

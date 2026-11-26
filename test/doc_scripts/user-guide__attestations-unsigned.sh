@@ -9,7 +9,8 @@ set -euo pipefail
 # The setup:signing provider has already published acme/mytool, brought up
 # the local Sigstore stack, written a [[trust.policy]] pin SCOPED TO THIS
 # PACKAGE in config.toml, and put the dex identity token in
-# OCX_IDENTITY_TOKEN and the stack's CA in OCX_SIGSTORE_TRUSTED_ROOT.
+# OCX_IDENTITY_TOKEN and the stack's CA in OCX_SIGSTORE_TRUSTED_ROOT, which
+# only `package sbom` reads here (attest needs no root).
 # sbom.json (CycloneDX) and spdx.json (SPDX-JSON) are both written by the
 # provider (recordings/setups.py) before this region runs (CA5: the recorder
 # only replays cast-region lines).

@@ -17,6 +17,7 @@ pub mod export;
 pub mod forge_report;
 pub mod import;
 pub mod index;
+pub mod index_sign;
 pub mod install;
 pub mod lock;
 pub mod login;

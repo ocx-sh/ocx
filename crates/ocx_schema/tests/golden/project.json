@@ -287,18 +287,6 @@
             "$ref": "#/$defs/TrustPolicy"
           },
           "default": []
-        },
-        "sigstore": {
-          "description": "Sigstore trust material for a self-hosted stack (`[trust.sigstore]`).\n\nRead from the operator `config.toml` tiers only. The project `ocx.toml`\nalso accepts a `[trust]` table, but its `sigstore` sub-table is never\nconsulted.",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/SigstoreTrust"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
         }
       }
     },
@@ -422,6 +410,10 @@
         }
       ]
     },
+    "SigstoreAuthority": {
+      "description": "A Sigstore instance name: the lowercase `host[:port]` of its Fulcio, without scheme or path. A `:443` port is dropped.",
+      "type": "string"
+    },
     "KeylessMatcher": {
       "description": "A `kind = \"keyless\"` signer: which Sigstore identity may sign.\n\nExactly one of `identity` / `identity_regexp` must be set — both or neither\nis a configuration error — and `oidc_issuer` must be present.",
       "type": "object",
@@ -456,6 +448,17 @@
           "additionalProperties": {
             "type": "string"
           }
+        },
+        "sigstore": {
+          "description": "The Sigstore instance this signer trusts, named by the authority of its Fulcio (`host[:port]`).\n\nAbsent means the public instance, `fulcio.sigstore.dev`. The matching `[sigstore.\"<authority>\"]` table\nsupplies the trust root.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SigstoreAuthority"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       }
     },
@@ -475,52 +478,6 @@
           "description": "Verbatim SPKI PEM.\n\nMutually exclusive with `key`.",
           "type": [
             "string",
-            "null"
-          ],
-          "default": null
-        }
-      }
-    },
-    "SigstoreTrust": {
-      "description": "The `[trust.sigstore]` sub-table: where verification gets its trust root\nwhen the stack is self-hosted rather than the Sigstore public good.\n\nEvery field is optional and the whole sub-table may be absent — omitting it\nreproduces the public-good behaviour exactly.",
-      "type": "object",
-      "properties": {
-        "trusted_root": {
-          "description": "Path to a Sigstore trusted-root JSON, or a directory holding\n`trusted_root.json`.\n\nA relative path resolves against the directory of the `config.toml`\nthat declared it. It is rewritten to absolute at load time, so the same\nvalue names the same file whatever the working directory.\nMutually exclusive with `trusted_root_json`.",
-          "type": [
-            "string",
-            "null"
-          ],
-          "default": null
-        },
-        "trusted_root_json": {
-          "description": "The trusted-root document inlined verbatim.\n\nThis is the form a fleet receives: `ocx config push` reads a path-form\n`trusted_root` at publish time and inlines it here. Mutually exclusive\nwith `trusted_root`.",
-          "type": [
-            "string",
-            "null"
-          ],
-          "default": null
-        },
-        "fulcio_url": {
-          "description": "Default Fulcio base URL for `ocx package sign` when `--fulcio-url` is\nomitted.",
-          "type": [
-            "string",
-            "null"
-          ],
-          "default": null
-        },
-        "rekor_url": {
-          "description": "Default Rekor base URL for `ocx package sign` / `verify` when\n`--rekor-url` is omitted.",
-          "type": [
-            "string",
-            "null"
-          ],
-          "default": null
-        },
-        "rekor_upload": {
-          "description": "Fleet-wide default for uploading a key-mode signature to the transparency log, when neither\n`--rekor-upload` nor `--no-rekor-upload` is given.\n\nAbsent means off; keyless signing always uploads and ignores this field.",
-          "type": [
-            "boolean",
             "null"
           ],
           "default": null

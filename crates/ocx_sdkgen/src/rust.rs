@@ -777,7 +777,7 @@ fn use_statement(path: &str, names: &[&str]) -> String {
     let mut out = format!("use {path}::{{\n");
     let mut line = String::from("   ");
     for name in names {
-        if line.len() + 1 + name.len() + 1 > LINE_WIDTH {
+        if line.len() + 1 + name.len() + 1 >= LINE_WIDTH {
             out.push_str(&line);
             out.push('\n');
             line = String::from("   ");

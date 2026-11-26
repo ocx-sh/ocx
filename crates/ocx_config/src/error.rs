@@ -242,6 +242,88 @@ pub enum Error {
         summary = "A [blobs] path is relative where only an absolute one is accepted"
     )]
     BlobPathRelative { path: PathBuf },
+    /// A config file still carries the retired `[trust.sigstore]` table.
+    #[error(
+        "{} declares `[trust.sigstore]`, which is no longer read; move its keys to `[sigstore.\"<fulcio host>\"]` \
+         (the host of its fulcio_url, or \"fulcio.sigstore.dev\"), and add `sigstore = \"<fulcio host>\"` to each \
+         keyless signer that trusted it",
+        path.display()
+    )]
+    #[exit(
+        ConfigError,
+        slug = "trust_sigstore_retired",
+        summary = "A config file declares the retired [trust.sigstore] table"
+    )]
+    TrustSigstoreRetired { path: PathBuf },
+
+    /// A `[sigstore."<authority>"]` key, or a keyless signer's `sigstore` value, is not a valid authority.
+    #[error("invalid Sigstore authority")]
+    #[exit(
+        ConfigError,
+        slug = "sigstore_authority_invalid",
+        summary = "A Sigstore authority is not a valid host and port"
+    )]
+    SigstoreAuthorityInvalid(#[source] ocx_trust::SigstoreAuthorityError),
+
+    /// Two `[sigstore."<key>"]` keys of one file spell the same authority, so one table would silently replace the other.
+    #[error("[sigstore.\"{first}\"] and [sigstore.\"{second}\"] name the same Sigstore authority: keep one table")]
+    #[exit(
+        ConfigError,
+        slug = "sigstore_authority_invalid",
+        summary = "A Sigstore authority is not a valid host and port"
+    )]
+    SigstoreAuthorityDuplicate { first: String, second: String },
+
+    /// One `[sigstore."<authority>"]` table sets both `trusted_root` and `trusted_root_json`.
+    #[error(
+        "{} declares both trusted_root and trusted_root_json in [sigstore.\"{authority}\"]: keep one (trusted_root \
+         names a local file; trusted_root_json is the inline document `ocx config push` publishes)",
+        path.display()
+    )]
+    #[exit(
+        ConfigError,
+        slug = "ambiguous_trust_root",
+        summary = "The payload declares both trusted_root and trusted_root_json"
+    )]
+    AmbiguousTrustRoot { path: PathBuf, authority: String },
+
+    /// A `[sigstore."<authority>"]` table whose `fulcio_url` names a different authority than its key.
+    #[error("[sigstore.\"{authority}\"] sets fulcio_url `{fulcio_url}`, whose authority differs from the table key")]
+    #[exit(
+        ConfigError,
+        slug = "sigstore_table_key_mismatch",
+        summary = "A Sigstore table's fulcio_url names another authority than its key"
+    )]
+    SigstoreTableKeyMismatch { authority: String, fulcio_url: String },
+
+    /// Signing with a Rekor upload against a table that sets no `rekor_url`.
+    #[error("[sigstore.\"{authority}\"] sets no rekor_url, so a signature cannot be uploaded to its transparency log")]
+    #[exit(
+        ConfigError,
+        slug = "sigstore_rekor_url_missing",
+        summary = "A Sigstore table has no rekor_url to upload a signature to"
+    )]
+    SigstoreRekorUrlMissing { authority: String },
+
+    /// `index_signature = "enforce"` on a registry with no signer list.
+    #[error(
+        "[registries.\"{registry}\"] sets index_signature = \"enforce\" but names no signers; set index_publishers"
+    )]
+    #[exit(
+        ConfigError,
+        slug = "index_publishers_missing",
+        summary = "Index signature enforcement is on with no publishers to check against"
+    )]
+    IndexPublishersMissing { registry: String },
+
+    /// An `index_publishers` entry that cannot be what its author meant.
+    #[error("[registries.\"{registry}\"] index_publishers is invalid: {reason}")]
+    #[exit(
+        ConfigError,
+        slug = "index_publishers_invalid",
+        summary = "An index_publishers entry is malformed"
+    )]
+    IndexPublishersInvalid { registry: String, reason: String },
 }
 
 /// [`Result`](std::result::Result) over this tier's own [`Error`].

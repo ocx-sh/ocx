@@ -48,6 +48,7 @@ from pathlib import Path
 import pytest
 
 from src.helpers import make_package
+from src.index_signing import assert_retired_table_refused, stack_table
 from src.registry import (
     fetch_manifest_digest,
     fetch_manifest_from_registry,
@@ -206,10 +207,9 @@ def arm_push_signing(
     goes on the runner. The fixture is function-scoped, so the mutation dies
     with the test.
 
-    Keyless goes through ``[trust.sigstore]``: ``push`` carries no endpoint
-    flags until OCX-C-5 lands, so the config tier is the only way to point its
-    keyless signing at the local stack (the shape
-    ``test_attest.py::test_push_with_sbom_reaches_the_stack_through_trust_sigstore_config``
+    Keyless goes through the stack's ``[sigstore."<authority>"]`` table, selected
+    by ``--fulcio-url`` (the shape
+    ``test_attest.py::test_push_with_sbom_reaches_the_stack_through_its_sigstore_table``
     already pins). Bullet (b) is the flag-borne half of the same journey.
 
     ``make_package`` returns a ``PackageInfo``, not the push report, so there is
@@ -223,11 +223,8 @@ def arm_push_signing(
         ocx.env[KEY_VARIABLE] = COSIGN_KEY.read_text()
         flags += ["--key", f"env://{KEY_VARIABLE}"]
     else:
-        (Path(ocx.env["OCX_HOME"]) / "config.toml").write_text(
-            "[trust.sigstore]\n"
-            f'fulcio_url = "{stack.fulcio_url}"\n'
-            f'rekor_url = "{stack.rekor_url}"\n'
-        )
+        (Path(ocx.env["OCX_HOME"]) / "config.toml").write_text(stack_table(stack))
+        flags += ["--fulcio-url", stack.fulcio_url]
         ocx.env["OCX_IDENTITY_TOKEN"] = identity_token.read_text().strip()
         ocx.env["OCX_NO_PROJECT"] = "1"
     return flags
@@ -463,10 +460,9 @@ def test_push_sign_against_local_fulcio_and_rekor_signs_and_verifies(
     mode, alongside `--rekor-upload`; that pairing is OCX-C-5's own unit-test
     row, not an acceptance shape.)
 
-    **No `[trust.sigstore]` config is written here**, deliberately — that is the
-    whole discriminator. (a) reaches the same stack through the config tier
-    because push had no endpoint flags; this row proves the flags carry the
-    endpoints on their own. The local dex mints the token below and builtin
+    **No `[sigstore."<authority>"]` table is written here**, deliberately — that is
+    the whole discriminator. (a) reaches the same stack through the table; this
+    row proves the flags carry the endpoints on their own. The local dex mints the token below and builtin
     public Fulcio would reject it, so a run that ignored the flags and fell
     through to the builtin default could not reach exit 0.
     """
@@ -719,3 +715,7 @@ def test_sign_dash_p_on_a_bare_manifest_yields_the_documented_error(
     assert_unsigned(
         ocx.registry, pkg.repo, platform_digest, "the refused bare manifest"
     )
+
+
+def test_the_retired_trust_sigstore_spelling_is_refused_by_a_signing_push(ocx: OcxRunner) -> None:
+    assert_retired_table_refused(ocx)

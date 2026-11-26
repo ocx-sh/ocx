@@ -3214,6 +3214,13 @@ pub enum ErrorDetail {
     IdentityMismatch,
     /// The identity token file is readable by group or other
     IdentityTokenFilePermissive,
+    /// The index catalog's validity window has ended
+    IndexCatalogExpired,
+    /// The index catalog is older than one already verified
+    IndexCatalogRollback,
+    /// The signed index catalog cannot be checked through a registry mirror, so index_signature
+    /// enforce has nothing to check
+    IndexCatalogThroughMirror,
     /// A dispatch object does not hash to the digest its root claims
     IndexDispatchDigestMismatch,
     /// An index request failed
@@ -3224,18 +3231,36 @@ pub enum ErrorDetail {
     IndexManifestNotFound,
     /// The source names an image index by digest, which cannot merge into the target
     IndexNamedByDigest,
+    /// The signed catalog lists no entry for the package
+    IndexPackageNotInCatalog,
     /// A local index path is invalid
     IndexPathInvalid,
+    /// The index catalog is signed by a signer that is not trusted
+    IndexPublisherMismatch,
+    /// An index_publishers entry is malformed
+    IndexPublishersInvalid,
+    /// Index signature enforcement is on with no publishers to check against
+    IndexPublishersMissing,
+    /// No index publisher entry is of a kind this build understands
+    IndexPublishersUnrecognized,
     /// A local policy refused resolving through the index
     IndexResolutionBlocked,
+    /// A package root differs from the digest its signed catalog lists
+    IndexRootDigestMismatch,
     /// The committed root document lacks a required field
     IndexRootMissingField,
+    /// A package the signed catalog lists is not served
+    IndexRootNotFound,
     /// The committed root document is not a JSON object
     IndexRootNotObject,
     /// The committed root document is not valid JSON
     IndexRootParse,
     /// An index document could not be serialized
     IndexSerialization,
+    /// The index catalog's signature does not verify
+    IndexSignatureInvalid,
+    /// The index serves no signature for its catalog
+    IndexSignatureNotFound,
     /// A shared index operation failed with an unclassified cause
     IndexSingleflightFailed,
     /// An index source failed with an unclassified cause
@@ -3761,6 +3786,14 @@ pub enum ErrorDetail {
     SidecarRequiresSignature,
     /// The signature does not verify over the subject digest
     SignatureInvalid,
+    /// A Sigstore authority is not a valid host and port
+    SigstoreAuthorityInvalid,
+    /// A Sigstore table has no rekor_url to upload a signature to
+    SigstoreRekorUrlMissing,
+    /// A Sigstore table's fulcio_url names another authority than its key
+    SigstoreTableKeyMismatch,
+    /// A private Sigstore instance has no trusted root configured
+    SigstoreTrustedRootMissing,
     /// The simple signing payload declares an unsupported claim type
     SimpleSigningClaimUnsupported,
     /// The leader of shared in-flight work stopped without a result
@@ -3891,6 +3924,8 @@ pub enum ErrorDetail {
     TrustRootUnavailable,
     /// A trust root file named by the operator could not be read
     TrustRootUnreadable,
+    /// A config file declares the retired \[trust.sigstore\] table
+    TrustSigstoreRetired,
     /// The named file is not a usable Sigstore trusted root
     TrustedRootInvalid,
     /// Reading the trusted root the payload names failed
@@ -4137,17 +4172,29 @@ impl ErrorDetail {
             Self::HostResolutionFailed => "host_resolution_failed",
             Self::IdentityMismatch => "identity_mismatch",
             Self::IdentityTokenFilePermissive => "identity_token_file_permissive",
+            Self::IndexCatalogExpired => "index_catalog_expired",
+            Self::IndexCatalogRollback => "index_catalog_rollback",
+            Self::IndexCatalogThroughMirror => "index_catalog_through_mirror",
             Self::IndexDispatchDigestMismatch => "index_dispatch_digest_mismatch",
             Self::IndexHttpFailed => "index_http_failed",
             Self::IndexHttpTransient => "index_http_transient",
             Self::IndexManifestNotFound => "index_manifest_not_found",
             Self::IndexNamedByDigest => "index_named_by_digest",
+            Self::IndexPackageNotInCatalog => "index_package_not_in_catalog",
             Self::IndexPathInvalid => "index_path_invalid",
+            Self::IndexPublisherMismatch => "index_publisher_mismatch",
+            Self::IndexPublishersInvalid => "index_publishers_invalid",
+            Self::IndexPublishersMissing => "index_publishers_missing",
+            Self::IndexPublishersUnrecognized => "index_publishers_unrecognized",
             Self::IndexResolutionBlocked => "index_resolution_blocked",
+            Self::IndexRootDigestMismatch => "index_root_digest_mismatch",
             Self::IndexRootMissingField => "index_root_missing_field",
+            Self::IndexRootNotFound => "index_root_not_found",
             Self::IndexRootNotObject => "index_root_not_object",
             Self::IndexRootParse => "index_root_parse",
             Self::IndexSerialization => "index_serialization",
+            Self::IndexSignatureInvalid => "index_signature_invalid",
+            Self::IndexSignatureNotFound => "index_signature_not_found",
             Self::IndexSingleflightFailed => "index_singleflight_failed",
             Self::IndexSourceFailed => "index_source_failed",
             Self::IndexSourceNotPublished => "index_source_not_published",
@@ -4409,6 +4456,10 @@ impl ErrorDetail {
             Self::ShortBlobRead => "short_blob_read",
             Self::SidecarRequiresSignature => "sidecar_requires_signature",
             Self::SignatureInvalid => "signature_invalid",
+            Self::SigstoreAuthorityInvalid => "sigstore_authority_invalid",
+            Self::SigstoreRekorUrlMissing => "sigstore_rekor_url_missing",
+            Self::SigstoreTableKeyMismatch => "sigstore_table_key_mismatch",
+            Self::SigstoreTrustedRootMissing => "sigstore_trusted_root_missing",
             Self::SimpleSigningClaimUnsupported => "simple_signing_claim_unsupported",
             Self::SingleflightAbandoned => "singleflight_abandoned",
             Self::SingleflightCapacityExceeded => "singleflight_capacity_exceeded",
@@ -4474,6 +4525,7 @@ impl ErrorDetail {
             Self::TrustRootLoad => "trust_root_load",
             Self::TrustRootUnavailable => "trust_root_unavailable",
             Self::TrustRootUnreadable => "trust_root_unreadable",
+            Self::TrustSigstoreRetired => "trust_sigstore_retired",
             Self::TrustedRootInvalid => "trusted_root_invalid",
             Self::TrustedRootReadFailed => "trusted_root_read_failed",
             Self::UnclaimedPackage => "unclaimed_package",
@@ -4683,17 +4735,29 @@ impl ErrorDetail {
             "host_resolution_failed" => Self::HostResolutionFailed,
             "identity_mismatch" => Self::IdentityMismatch,
             "identity_token_file_permissive" => Self::IdentityTokenFilePermissive,
+            "index_catalog_expired" => Self::IndexCatalogExpired,
+            "index_catalog_rollback" => Self::IndexCatalogRollback,
+            "index_catalog_through_mirror" => Self::IndexCatalogThroughMirror,
             "index_dispatch_digest_mismatch" => Self::IndexDispatchDigestMismatch,
             "index_http_failed" => Self::IndexHttpFailed,
             "index_http_transient" => Self::IndexHttpTransient,
             "index_manifest_not_found" => Self::IndexManifestNotFound,
             "index_named_by_digest" => Self::IndexNamedByDigest,
+            "index_package_not_in_catalog" => Self::IndexPackageNotInCatalog,
             "index_path_invalid" => Self::IndexPathInvalid,
+            "index_publisher_mismatch" => Self::IndexPublisherMismatch,
+            "index_publishers_invalid" => Self::IndexPublishersInvalid,
+            "index_publishers_missing" => Self::IndexPublishersMissing,
+            "index_publishers_unrecognized" => Self::IndexPublishersUnrecognized,
             "index_resolution_blocked" => Self::IndexResolutionBlocked,
+            "index_root_digest_mismatch" => Self::IndexRootDigestMismatch,
             "index_root_missing_field" => Self::IndexRootMissingField,
+            "index_root_not_found" => Self::IndexRootNotFound,
             "index_root_not_object" => Self::IndexRootNotObject,
             "index_root_parse" => Self::IndexRootParse,
             "index_serialization" => Self::IndexSerialization,
+            "index_signature_invalid" => Self::IndexSignatureInvalid,
+            "index_signature_not_found" => Self::IndexSignatureNotFound,
             "index_singleflight_failed" => Self::IndexSingleflightFailed,
             "index_source_failed" => Self::IndexSourceFailed,
             "index_source_not_published" => Self::IndexSourceNotPublished,
@@ -4955,6 +5019,10 @@ impl ErrorDetail {
             "short_blob_read" => Self::ShortBlobRead,
             "sidecar_requires_signature" => Self::SidecarRequiresSignature,
             "signature_invalid" => Self::SignatureInvalid,
+            "sigstore_authority_invalid" => Self::SigstoreAuthorityInvalid,
+            "sigstore_rekor_url_missing" => Self::SigstoreRekorUrlMissing,
+            "sigstore_table_key_mismatch" => Self::SigstoreTableKeyMismatch,
+            "sigstore_trusted_root_missing" => Self::SigstoreTrustedRootMissing,
             "simple_signing_claim_unsupported" => Self::SimpleSigningClaimUnsupported,
             "singleflight_abandoned" => Self::SingleflightAbandoned,
             "singleflight_capacity_exceeded" => Self::SingleflightCapacityExceeded,
@@ -5020,6 +5088,7 @@ impl ErrorDetail {
             "trust_root_load" => Self::TrustRootLoad,
             "trust_root_unavailable" => Self::TrustRootUnavailable,
             "trust_root_unreadable" => Self::TrustRootUnreadable,
+            "trust_sigstore_retired" => Self::TrustSigstoreRetired,
             "trusted_root_invalid" => Self::TrustedRootInvalid,
             "trusted_root_read_failed" => Self::TrustedRootReadFailed,
             "unclaimed_package" => Self::UnclaimedPackage,
@@ -6027,6 +6096,50 @@ impl Unknowns for IndexFinding {
             }
             Self::Unknown(_) => out.push(pointer.clone()),
         }
+    }
+}
+
+/// What `ocx index sign` wrote.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct IndexSignReport {
+    /// The catalog file that was rewritten with its new `expires`.
+    pub catalog_path: AbsolutePath,
+    /// The detached signature file beside it.
+    pub signature_path: AbsolutePath,
+    /// Digest of the catalog bytes the signature covers.
+    pub catalog_digest: Digest,
+    /// When the catalog stops being trusted.
+    pub expires_at: Timestamp,
+    /// Signing mechanism used: `"keyless-fulcio"`, or the key backend's own slug under a key.
+    pub signer: String,
+    /// Certificate SAN (identity) embedded in the Fulcio cert. Absent under a key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub certificate_identity: Option<String>,
+    /// Certificate OIDC issuer URL embedded in the Fulcio cert. Absent under a key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub certificate_oidc_issuer: Option<String>,
+    /// Which key model produced this signature.
+    pub key_backend: KeyBackendKind,
+    /// The signing key's cosign hint, in key mode only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_key_hint: Option<String>,
+    /// The Rekor log index; absent when no upload happened.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tlog_index: Option<i64>,
+}
+
+impl Unknowns for IndexSignReport {
+    fn collect_unknowns(&self, pointer: &mut String, out: &mut Vec<String>) {
+        field(pointer, out, "catalog_path", &self.catalog_path);
+        field(pointer, out, "signature_path", &self.signature_path);
+        field(pointer, out, "catalog_digest", &self.catalog_digest);
+        field(pointer, out, "expires_at", &self.expires_at);
+        field(pointer, out, "signer", &self.signer);
+        field(pointer, out, "certificate_identity", &self.certificate_identity);
+        field(pointer, out, "certificate_oidc_issuer", &self.certificate_oidc_issuer);
+        field(pointer, out, "key_backend", &self.key_backend);
+        field(pointer, out, "public_key_hint", &self.public_key_hint);
+        field(pointer, out, "tlog_index", &self.tlog_index);
     }
 }
 
@@ -9076,6 +9189,8 @@ impl Unknowns for Reason {
 /// One candidate that was examined and refused.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RefusedEntry {
+    /// The package whose candidate was refused.
+    pub package: PackageRef,
     /// The referrer's digest as the registry listed it. Absent when no well-formed digest names the
     /// candidate: a budget-stop row, or a registry listing a malformed digest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -9089,6 +9204,7 @@ pub struct RefusedEntry {
 
 impl Unknowns for RefusedEntry {
     fn collect_unknowns(&self, pointer: &mut String, out: &mut Vec<String>) {
+        field(pointer, out, "package", &self.package);
         field(pointer, out, "referrer_digest", &self.referrer_digest);
         field(pointer, out, "reason", &self.reason);
         field(pointer, out, "reason_kind", &self.reason_kind);
@@ -9349,6 +9465,8 @@ impl Unknowns for RunSummary {
 /// One verified attestation.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SbomEntry {
+    /// The package whose attestation this is.
+    pub package: PackageRef,
     /// predicateType. Read out of the **signed** payload when `verified`; derived from the
     /// referrer's `artifactType` otherwise, since an unsigned referrer states its type nowhere
     /// else.
@@ -9381,6 +9499,7 @@ pub struct SbomEntry {
 
 impl Unknowns for SbomEntry {
     fn collect_unknowns(&self, pointer: &mut String, out: &mut Vec<String>) {
+        field(pointer, out, "package", &self.package);
         field(pointer, out, "predicate_type", &self.predicate_type);
         field(pointer, out, "verified", &self.verified);
         field(pointer, out, "shadowed", &self.shadowed);

@@ -147,11 +147,7 @@ const CONFIG_SEE: &[(&str, &str, &str)] = &[
         "Trust signers with a policy",
         "../guides/pin-signer-identity.mdx",
     ),
-    (
-        "trust.sigstore",
-        "Self-hosted Sigstore",
-        "../guides/self-hosted-sigstore.mdx",
-    ),
+    ("sigstore", "Self-hosted Sigstore", "../guides/self-hosted-sigstore.mdx"),
     (
         "trust",
         "Trust signers with a policy",

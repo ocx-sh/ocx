@@ -77,6 +77,9 @@ from src.toolchain_fixtures import (
     trampoline_name,
 )
 
+# The registry routed to the fixture index sets `index_signature = "off"`: this module does not test the
+# catalog signature check (test_index_signature.py does), so it expects no signature request and no WARN.
+
 pytestmark = pytest.mark.command("pull")
 
 EXIT_SUCCESS = 0
@@ -126,6 +129,7 @@ def _write_index_config(ocx: OcxRunner, server: static_index.StaticIndexServer) 
     (Path(ocx.env["OCX_HOME"]) / "config.toml").write_text(
         f'[registries."ocx.sh"]\n'
         f'index = "{server.base_url}"\n'
+        f'index_signature = "off"\n'
         f'trusted_hosts = ["{registry_host}", "127.0.0.1"]\n'
     )
     ocx.env["OCX_INSECURE_REGISTRIES"] = f"{ocx.registry},{server.host}"
@@ -338,6 +342,7 @@ def test_a_pulled_toolchain_runs_through_its_trampoline_with_both_remotes_dead(
     (Path(ocx.env["OCX_HOME"]) / "config.toml").write_text(
         f'[registries."ocx.sh"]\n'
         f'index = "http://{dead_endpoint}"\n'
+        f'index_signature = "off"\n'
         f'trusted_hosts = ["{registry_host}", "127.0.0.1"]\n'
         f'\n[mirrors."{ocx.registry}"]\n'
         f'registry = "http://{dead_endpoint}"\n'
@@ -644,6 +649,7 @@ def test_the_lock_pins_platform_leaves_so_an_image_index_digest_never_arrives(
     (Path(ocx.env["OCX_HOME"]) / "config.toml").write_text(
         f'[registries."ocx.sh"]\n'
         f'index = "http://{dead_endpoint}"\n'
+        f'index_signature = "off"\n'
         f'trusted_hosts = ["{registry_host}", "127.0.0.1"]\n'
         f'\n[mirrors."{ocx.registry}"]\n'
         f'registry = "http://{dead_endpoint}"\n'

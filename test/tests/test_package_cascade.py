@@ -27,6 +27,9 @@ from src.helpers import make_package
 from src.registry import fetch_manifest_digest, fetch_manifest_raw, put_manifest
 from src.runner import OcxRunner, PackageInfo
 
+# The registry routed to the fixture index sets `index_signature = "off"`: this module does not test the
+# catalog signature check (test_index_signature.py does), so it expects no signature request and no WARN.
+
 pytestmark = pytest.mark.command("package_cascade*")
 
 # ---------------------------------------------------------------------------
@@ -345,7 +348,7 @@ def _configure_index_source(ocx: OcxRunner, server: static_index.StaticIndexServ
     config_path = Path(ocx.env["OCX_HOME"]) / "config.toml"
     registry_host = ocx.registry.split(":", 1)[0]
     config_path.write_text(
-        f'[registries."ocx.sh"]\nindex = "{server.base_url}"\ntrusted_hosts = ["{registry_host}"]\n'
+        f'[registries."ocx.sh"]\nindex = "{server.base_url}"\nindex_signature = "off"\ntrusted_hosts = ["{registry_host}"]\n'
     )
     ocx.env["OCX_INSECURE_REGISTRIES"] = f"{ocx.registry},{server.host}"
 

@@ -117,6 +117,7 @@ static VALUE_TYPES: &[(TypeOf, ValueType)] = &[
     ),
     (TypeId::of::<ocx_announce::forge::RepoCoordinate>, ValueType::String),
     (TypeId::of::<ocx_oci::layer_ref::LayerRef>, ValueType::String),
+    (TypeId::of::<ocx_trust::SigstoreAuthority>, ValueType::String),
     (TypeId::of::<u8>, ValueType::Integer),
     (TypeId::of::<u16>, ValueType::Integer),
     (TypeId::of::<u32>, ValueType::Integer),

@@ -26,18 +26,47 @@ The recording below signs a published package, verifies it against a pinned iden
 
 OCX verifies [Fulcio][fulcio] certificates against a trust root. It verifies the [Rekor][rekor] Signed Entry Timestamp against Rekor's public key. Against public Sigstore this needs no configuration, because the material arrives over [TUF][sigstore-tuf].
 
-Against a self-hosted stack the material has to come from somewhere you control. OCX resolves it through six steps, and the first hit wins:
+Against a self-hosted stack the material has to come from somewhere you control. OCX resolves it through six steps, and the first hit wins. The steps scope to one Sigstore instance, described in [Sigstore instances](#sigstore-instances):
 
-1. **`--sigstore-trusted-root <PATH>`** on `ocx package verify`. It names a Sigstore [trusted-root][sigstore-tuf] JSON, or a directory holding `trusted_root.json`, by a bare path or a `file://` one.
-2. **[`OCX_SIGSTORE_TRUSTED_ROOT`][env-sigstore-trusted-root]** holds the same value as an environment variable. The flag wins.
-3. **[`[trust.sigstore]`][config-trust-sigstore]** in the operator `config.toml` sets `trusted_root` or `trusted_root_json`. `trusted_root` is a bare path or a `file://` one, relative to that config file. `trusted_root_json` is the document inlined. A fleet uses this step, because a `config.toml` can itself be distributed.
-4. **`$OCX_HOME/sigstore/trusted-root.json`** is a convention path. Drop the file there and nothing needs configuring.
+1. **`--sigstore-trusted-root <PATH>`** on `ocx package verify` and `ocx package sbom`. It names a Sigstore [trusted-root][sigstore-tuf] JSON, or a directory holding `trusted_root.json`, by a bare path or a `file://` one.
+2. **[`OCX_SIGSTORE_TRUSTED_ROOT`][env-sigstore-trusted-root]** is the environment form of that flag, and the flag wins. Only `ocx package verify` and `ocx package sbom` read steps 1 and 2.
+3. **[`[sigstore."<fulcio host>"]`][config-sigstore]** in the operator `config.toml` sets `trusted_root` or `trusted_root_json` for that instance. `trusted_root` is a bare path or a `file://` one, relative to that config file. `trusted_root_json` is the document inlined. A fleet uses this step, because a `config.toml` can itself be distributed.
+4. **`$OCX_HOME/sigstore/trusted-root.json`** is a convention path for the public instance. Another instance reads `$OCX_HOME/sigstore/instances/<host>_<port>/trusted-root.json`, with the port always written. Drop the file there and nothing needs configuring.
 5. **The trust-root cache.** A successful online verify writes the Fulcio CA, the CT log keys and the Rekor key it used to `$OCX_HOME/state/trust_root/<rekor-authority>.json`, with a 24-hour TTL. A later verify against the same Rekor instance reuses them, including under [`--offline`][env-offline]. See [Air-gapped verification][guide-verify-offline].
-6. **The public-good root over TUF.** With no override, no configured root and no cache, OCX fetches and verifies the [Sigstore TUF][sigstore-tuf] trust root. It uses the `tough`-backed client in [sigstore-rs][sigstore-rs], dialed over OCX's shared Sigstore HTTP client with extra CA roots. The TUF metadata caches under `$OCX_HOME/state/tuf/`. This is the default for public Sigstore, and it needs network, so `--offline` never reaches it.
+6. **The public-good root over TUF.** For the public instance only: with no override, no configured root and no cache, OCX fetches and verifies the [Sigstore TUF][sigstore-tuf] trust root. It uses the `tough`-backed client in [sigstore-rs][sigstore-rs], dialed over OCX's shared Sigstore HTTP client with extra CA roots. The TUF metadata caches under `$OCX_HOME/state/tuf/`. This is the default for public Sigstore, and it needs network, so `--offline` never reaches it.
+
+A private instance with none of steps 1 to 5 fails with exit 78 (`sigstore_trusted_root_missing`). The flag and the variable replace only the root of the instance the run selected: the instance `--sigstore` names, else the public instance.
+
+Every other path starts at step 3: install-time verification, policy roots and the index catalog check. Each takes a Sigstore instance's root from that instance's `[sigstore."<fulcio host>"]` table, its convention file, the cache, then TUF for the public instance. An air-gapped host puts the root in the convention file or a table, and that serves installs and the index check alike.
 
 Steps 1 to 3 are operator-named. A file that does not exist is an error, not a fall-through. Step 4 is a convention. Absent, it falls through to the cache, but present and unreadable, it fails.
 
 Step 6 dials `tuf-repo-cdn.sigstore.dev` through the shared Sigstore client and its address guard. A split-horizon DNS that answers that public name with a private address is refused (exit 78) rather than dialed. Pin a `trusted_root` (rung 3) on such a host.
+
+### Sigstore instances \{#sigstore-instances\}
+
+A Sigstore instance is one Fulcio CA with its Rekor log and CT log. OCX names an instance by the host of its Fulcio, such as `fulcio.sigstore.dev` for public Sigstore.
+
+One `config.toml` table per instance holds its trust material and endpoints: `[sigstore."fulcio.corp.example"]`. A table sets `trusted_root` or `trusted_root_json`, `fulcio_url`, `rekor_url` and `rekor_upload`. The public instance is built in. A table under its host overrides it field by field.
+
+A keyless signer entry takes a `sigstore` field naming the table its certificates chain to. With no field, the entry means the public instance. The field is valid on index `publishers`, on `index_publishers` and on `[[trust.policy]]` signers, and not on a `key` entry. An entry naming a host with no local table matches nobody.
+
+```toml
+[sigstore."fulcio.corp.example"]
+trusted_root = "corp-trusted-root.json"
+
+[[trust.policy]]
+scope   = "ghcr.io/acme/*"
+signers = [
+  { kind = "keyless", sigstore = "fulcio.corp.example",
+                      identity = "ci@acme.example",
+                      oidc_issuer = "https://oidc.corp.example" },
+]
+```
+
+`ocx package sign`, `attest`, `push` and `ocx index sign` pick the table by the host of `--fulcio-url`. Without the flag they use the public instance. Key mode has no Fulcio, so it picks the table whose `rekor_url` host equals `--rekor-url`'s, and without the flag the public one.
+
+A `config.toml` that still carries `[trust.sigstore]` is refused with exit 78 (`trust_sigstore_retired`).
 
 Offline verify requires a pinned Rekor key. That is why the trust material has to be a full trusted-root JSON and not a bare CA certificate. With no cached or supplied trust material offline, verify fails with exit 81 (`PolicyBlocked`, slug `offline_mode`) and names the remedy. It never silently skips verification.
 
@@ -50,6 +79,100 @@ A Fulcio certificate carries an embedded Signed Certificate Timestamp, and the v
 
 A Sigstore trusted-root JSON carries the anchors, the CT log keys and the pinned Rekor key together. That is the only shape any step accepts. Produce one for a self-hosted stack with `cosign trusted-root create`, or with `test/sigstore/generate-trusted-root.py` in this repository.
 :::
+
+## Index Signatures \{#index-signatures\}
+
+A signed package proves who built it. It does not prove that the index told you the right package root. An attacker who controls the index host could serve a root that points at other content.
+
+An index maintainer closes that gap by signing the catalog, `c/index.json`. The catalog maps each package to the digest of its root document. A signature over the catalog therefore covers every root the index serves.
+
+### What is signed \{#index-signatures-what\}
+
+[`ocx index sign <DIR>`][cmd-index-sign] writes two files. It sets `expires` in `c/index.json`, then signs those exact bytes into `c/index.json.sigstore.json`. The signature is a DSSE envelope in a Sigstore bundle, over an in-toto statement whose subject is `c/index.json`. The statement names the registry the index serves, so one identity that signs two indexes cannot have one catalog accepted for the other.
+
+The command writes both files by atomic rename. A symlink at either path is replaced by a regular file, not written through.
+
+Signing is keyless unless you pass `--key`. The command takes the signing flags of `ocx package sign`, and requires `--registry`.
+
+### What the client checks \{#index-signatures-check\}
+
+When a command reads a catalog or a package root from a remote index, OCX fetches the signature and checks four things:
+
+- the signature is valid and its signer is on the signer list.
+- the catalog has not expired.
+- the catalog's `expires` is not lower than one already verified for that source.
+- each root's sha256 digest equals the one the catalog lists for that package.
+
+Roots already committed to the local index are not checked again. A committed resolve makes no request.
+
+A verified catalog check also seeds the Sigstore trust-root cache under `$OCX_HOME/state/trust_root/`, the way `ocx package verify` does. It writes only after the signature verified. It writes only for the public instance's root fetched over TUF, never an operator-named root. The root must pin exactly one transparency-log key. Offline runs never write it.
+
+A root that entered the local index while the mode was `warn`, `off` or skipped is not re-checked when the mode later becomes `enforce`. After switching, run [`ocx index update`][cmd-index-update] with those packages. It fetches each root again through the checked source and commits it only if the check passes, so a root that fails is refused. Run [`ocx index sync`][cmd-index-sync] with the registry to re-read every package of that registry.
+
+To start over, delete the registry's subtree of the local index: `<index home>/ocx.sh/`, where the index home is `--index`, then `OCX_INDEX`, then `$OCX_HOME/index`. The next read fetches the roots again.
+
+The `index_signature` key of `[registries."<registry>"]` selects the mode:
+
+| Mode | A failed check |
+|------|----------------|
+| `off` | Nothing extra is fetched or checked |
+| `warn` | One warning per source per process, and the command continues |
+| `enforce` | The command fails with the slug of the failure |
+
+Under `enforce`, an absent signature or catalog exits 79 (`index_signature_not_found`). An oversized signature exits 65 (`index_signature_invalid`). An oversized catalog exits 69 (`index_http_failed`). Under `warn`, a catalog that could not be fetched keeps the transport's exit, for example 75 (`index_http_transient`) for a transient failure.
+
+The signer list is `index_publishers` when set, and it replaces the built-in list. The default mode is `warn` when a list exists and `off` otherwise, so `ocx.sh` defaults to `warn` and other registries to `off`. `enforce` is opt-in. `enforce` with no list fails with exit 78 (`index_publishers_missing`). An entry in `index_publishers` takes the same fields as a keyless or key signer, `sigstore` included.
+
+### Expiry \{#index-signatures-expiry\}
+
+`expires` sits inside the signed bytes. A signed catalog with no `expires` counts as expired, so a replayed catalog is never valid forever. A catalog whose `expires` is more than 400 days ahead is refused. The client also keeps the highest `expires` it has verified per source and refuses a lower one.
+
+Each failure maps to a slug: `index_catalog_expired` exits 81, `index_signature_invalid` and `index_catalog_rollback` exit 65. `index_expiry = "ignore"` lets an expired catalog pass, and it does not lift the 400-day bound. `ocx index sign` defaults to 30 days. `--expires-in-days` accepts 0 to 366, and the client refuses an `expires` more than 400 days ahead.
+
+### The built-in `ocx.sh` signer \{#index-signatures-ocx-sh\}
+
+For the registry `ocx.sh`, OCX carries one signer: the `render-deploy.yml` workflow of the `ocx-sh/index` repository on `refs/heads/main`, issued by GitHub Actions. It applies to `ocx.sh` whatever index URL the registry is routed to, so a mirror is never a trust point. The default mode for `ocx.sh` is `warn`.
+
+A registry-role mirror for `ocx.sh` (`[mirrors."ocx.sh"] registry = ...`) does not use the compiled-in index, so the catalog is not checked. Under `warn` a warning says so. Under `enforce` the first read of that registry's index refuses with exit 78 (`index_catalog_through_mirror`). Examples are `ocx index sync`, `ocx index catalog --remote`, and a resolve of a package not yet in the local index.
+
+Commands that read no index are not refused, such as running an installed package, `ocx clean` and `ocx self activate`. The flag `--no-verify` or `OCX_NO_VERIFY` clears the refusal.
+
+### Skipping the checks \{#index-signatures-skip\}
+
+`--no-verify`, `--verify` and `OCX_NO_VERIFY` cover both the package signature check and the index catalog check. The flag wins, with the last one on the command line taking effect. Next comes `OCX_NO_VERIFY`, and the default is checked.
+
+[`ocx index update`][cmd-index-update], [`ocx index sync`][cmd-index-sync], `ocx index catalog`, `ocx index list`, `ocx package install` and `ocx package pull` take the flags. The two listing commands matter with `--remote`.
+
+Every other command honours only the variable. A skipped check prints one warning and leaves the recorded expiry high-water mark untouched.
+
+### The rollback record \{#index-signatures-record\}
+
+The client keeps the highest `expires` it has verified per index source in `$OCX_HOME/state/index_catalog/`. Each source has one file named by a sha256 key, holding `{"expires_high_water": "<RFC 3339 time>"}`. See [Storage][storage-state].
+
+Delete a source's file, or the directory, to reset it. Rollback protection then restarts from the next verified catalog. A catalog signed with a large `--expires-in-days` makes every later, shorter-lived catalog read as a rollback. Delete the file to recover.
+
+### Sign your own index \{#index-signatures-own\}
+
+Sign after your pipeline renders the catalog and before it uploads the site. In a GitHub Actions workflow with `id-token: write`:
+
+<ShellSession>
+
+```sh
+ocx index sign --registry registry.corp.example ./site
+```
+
+</ShellSession>
+
+Run the signing step on every change, and on a schedule shorter than the expiry window, so the catalog never expires while unchanged. Then publish the signer through `index_publishers` in each client's `config.toml`:
+
+```toml
+[registries."registry.corp.example"]
+index_signature = "enforce"
+index_publishers = [
+  { kind = "keyless", identity = "https://github.com/acme/index/.github/workflows/deploy.yml@refs/heads/main",
+                      oidc_issuer = "https://token.actions.githubusercontent.com" },
+]
+```
 
 ## Referrers Capability Cache \{#referrers-cache\}
 
@@ -125,7 +248,7 @@ The `awskms`, `gcpkms`, `azurekms`, `hashivault` and `k8s` schemes are recognise
 Keyless and key mode diverge on one thing: whether the signature is recorded in [Rekor][rekor].
 
 - **Keyless** is always recorded. `--no-rekor-upload` here is a usage error (exit 64, `rekor_upload_required_for_keyless`) rather than a silent no-op. A Fulcio certificate is valid for about ten minutes. The Rekor timestamp is the only lasting proof the signature happened inside that window. Skipping it would leave a signature that nothing can show was made while the certificate was live.
-- **A key** is off by default. Pass `--rekor-upload` to record it. To opt a fleet in once, set `rekor_upload = true` under `[trust.sigstore]` in `config.toml`. That config key applies to key mode only, since keyless recording is not optional in the first place.
+- **A key** is off by default. Pass `--rekor-upload` to record it. To opt a fleet in once, set `rekor_upload = true` in the instance table of `config.toml`. That config key applies to key mode only, since keyless recording is not optional in the first place.
 
 This is a deliberate divergence from [cosign][cosign], which uploads to Rekor by default under `cosign sign --key` too. `rekor_url` defaults to the *public* Rekor either way.
 
@@ -335,7 +458,11 @@ That gate has its own scope limitations, distinct from the cryptographic ones ab
 
 [env-identity-token]: ../reference/environment.md#ocx-identity-token
 [env-sigstore-trusted-root]: ../reference/environment.md#ocx-sigstore-trusted-root
-[config-trust-sigstore]: ../reference/configuration.md#keys-trust-sigstore
+[storage-state]: ./storage.mdx#index-catalog-record
+[config-sigstore]: ../reference/configuration.md#keys-sigstore
+[cmd-index-sign]: ../reference/command-line/index-commands.md#index-sign
+[cmd-index-update]: ../reference/command-line/index-commands.md#index-update
+[cmd-index-sync]: ../reference/command-line/index-commands.md#index-sync
 [in-depth-self-hosted-sigstore]: ../guides/self-hosted-sigstore.mdx
 [in-depth-cosign-parity]: ./cosign-parity.mdx
 [in-depth-cosign-interop]: ./cosign-parity.mdx#cosign-interop

@@ -293,4 +293,71 @@ mod tests {
             );
         }
     }
+
+    /// Reds on: an index-trust slug filed under another code than the variant exits with, or a variant
+    /// that stops reporting its slug.
+    #[test]
+    fn index_trust_details_follow_the_code_each_error_exits_with() {
+        use crate::exit::tests::assert_detail;
+        use ocx_index::IndexTrustError as Trust;
+
+        let registry = || "ocx.sh".to_owned();
+        let package = || "cmake".to_owned();
+        let instant = || chrono::DateTime::from_timestamp(1_800_000_000, 0).expect("a valid instant");
+        assert_detail(
+            &Trust::SignatureNotFound { registry: registry() },
+            "index_signature_not_found",
+        );
+        assert_detail(
+            &Trust::SignatureInvalid {
+                registry: registry(),
+                reason: "bad".to_owned(),
+            },
+            "index_signature_invalid",
+        );
+        assert_detail(
+            &Trust::PublisherMismatch { registry: registry() },
+            "index_publisher_mismatch",
+        );
+        assert_detail(
+            &Trust::PublishersUnrecognized { registry: registry() },
+            "index_publishers_unrecognized",
+        );
+        assert_detail(
+            &Trust::CatalogExpired {
+                registry: registry(),
+                expires: None,
+            },
+            "index_catalog_expired",
+        );
+        assert_detail(
+            &Trust::CatalogRollback {
+                registry: registry(),
+                served: instant(),
+                recorded: instant(),
+            },
+            "index_catalog_rollback",
+        );
+        assert_detail(
+            &Trust::RootDigestMismatch {
+                registry: registry(),
+                package: package(),
+            },
+            "index_root_digest_mismatch",
+        );
+        assert_detail(
+            &Trust::PackageNotInCatalog {
+                registry: registry(),
+                package: package(),
+            },
+            "index_package_not_in_catalog",
+        );
+        assert_detail(
+            &Trust::RootNotFound {
+                registry: registry(),
+                package: package(),
+            },
+            "index_root_not_found",
+        );
+    }
 }

@@ -459,8 +459,9 @@ pub fn manager_with_verify_flag(
     context: &crate::app::Context,
     verify: &crate::options::SignatureVerify,
 ) -> ocx_package_manager::PackageManager {
-    let manager = context.manager().clone();
-    let opted_out = !verify.resolve(context.no_verify());
+    let opted_out = !context.verify_enabled(verify.explicit());
+    // One seam: the same flag decides the index catalog check.
+    let manager = context.manager_with_catalog_check(verify.explicit());
     let auto_verify = manager
         .auto_verify()
         .cloned()

@@ -62,10 +62,11 @@ pub(super) fn log_derived_enumeration(registry: &str) {
 pub(super) async fn refresh_packages(
     local_index: &ocx_index::LocalIndex,
     index_sources: &[ocx_index::OcxIndex],
+    refusals: &[ocx_index::Index],
     oci_index: &ocx_index::Index,
     packages: &[ocx_oci::PackageRef],
 ) -> Option<anyhow::Error> {
-    let failures = refresh_each(local_index, index_sources, oci_index, packages).await;
+    let failures = refresh_each(local_index, index_sources, refusals, oci_index, packages).await;
     for (input_index, error) in &failures {
         log_failure("Failed to update index for", &packages[*input_index].to_string(), error);
     }
@@ -79,7 +80,7 @@ pub(super) async fn refresh_pushed_tags(
     oci_index: &ocx_index::Index,
     packages: &[ocx_oci::PackageRef],
 ) {
-    for (input_index, error) in refresh_each(local_index, &[], oci_index, packages).await {
+    for (input_index, error) in refresh_each(local_index, &[], &[], oci_index, packages).await {
         log::debug!(
             "the local index still pins the old digest of '{}': {}",
             sanitize_for_terminal(&packages[input_index].to_string()),
@@ -92,6 +93,7 @@ pub(super) async fn refresh_pushed_tags(
 async fn refresh_each(
     local_index: &ocx_index::LocalIndex,
     index_sources: &[ocx_index::OcxIndex],
+    refusals: &[ocx_index::Index],
     oci_index: &ocx_index::Index,
     packages: &[ocx_oci::PackageRef],
 ) -> Vec<(usize, anyhow::Error)> {
@@ -100,8 +102,12 @@ async fn refresh_each(
         .map(|(input_index, identifier)| async move {
             // `jurisdiction`, not a namespace comparison, so routing cannot disagree with the chain's
             // own resolve verdict.
-            let mut selected = None;
-            for source in index_sources {
+            // A refused namespace has no index source, so without this the registry would answer it.
+            let mut selected = refusals
+                .iter()
+                .find(|source| source.serves_registry(identifier.registry()))
+                .cloned();
+            for source in index_sources.iter().filter(|_| selected.is_none()) {
                 if source.jurisdiction(identifier) != ocx_index::Jurisdiction::Outside {
                     selected = Some(ocx_index::Index::from_source(source.clone()));
                     break;
@@ -236,17 +242,17 @@ mod tests {
         // under a NON-`index` name; the measurement in the acceptance suite is what covers
         // that, and covers this guard's whole failure mode besides.
         //
-        // Two exemptions, both fan-outs the ceiling does not govern: `index_catalog.rs`
-        // lists tags per repository (`JoinSet`), `index_list.rs` reads local
-        // roots (`join_all`). Neither refreshes, so neither multiplies the
-        // per-package ceiling — read-only is the whole reason, and it is not
-        // "unbounded is fine here": `index_catalog.rs` carries its own bound on
+        // Three exemptions, none a fan-out the ceiling governs: `index_catalog.rs`
+        // lists tags per repository (`JoinSet`), `index_list.rs` reads local roots
+        // (`join_all`), `index_sign.rs` offloads two writes (`spawn_blocking`).
+        // None refreshes, so none multiplies the per-package ceiling; that is
+        // not "unbounded is fine here": `index_catalog.rs` carries its own bound on
         // its own permit class (`CATALOG_TAG_CONCURRENCY`), deliberately not
         // this module's, so an inner fan-out can never contend with an ancestor
         // holding the same class. The list is asserted non-vacuous below: a
         // rename that empties it fails here rather than silently exempting
         // nothing.
-        let exempt = ["index_common.rs", "index_catalog.rs", "index_list.rs"];
+        let exempt = ["index_common.rs", "index_catalog.rs", "index_list.rs", "index_sign.rs"];
         let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/command");
         let mut scanned = Vec::new();
         let mut seen_exempt = Vec::new();
@@ -374,8 +380,7 @@ mod tests {
         assert_eq!(
             body.matches("log::warn!").count(),
             2,
-            "two warn sites in this module: the piggyback's failure and the empty-enumeration \
-             notice, each rendering its foreign half through a sanitizer"
+            "two warn sites in this module: the piggyback's failure and the empty-enumeration notice"
         );
         assert!(
             body.contains("sanitize_error_chain(&error)"),

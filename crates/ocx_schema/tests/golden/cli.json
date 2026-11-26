@@ -1997,6 +1997,64 @@
                 "trailing_var_arg": false,
                 "stdin_secret": false,
                 "help": "Registries to list repositories from (defaults to OCX_DEFAULT_REGISTRY)"
+              },
+              {
+                "id": "verify",
+                "long": "verify",
+                "value": {
+                  "type": "switch"
+                },
+                "required": false,
+                "required_unless": [],
+                "num_args": {
+                  "min": 0,
+                  "max": 0
+                },
+                "global": false,
+                "hidden": false,
+                "default": [
+                  "false"
+                ],
+                "requires": [],
+                "conflicts": [],
+                "overrides": [
+                  "no_verify"
+                ],
+                "require_equals": false,
+                "allow_hyphen_values": false,
+                "last": false,
+                "trailing_var_arg": false,
+                "stdin_secret": false,
+                "help": "Check the signed index catalog even when `OCX_NO_VERIFY` is set"
+              },
+              {
+                "id": "no_verify",
+                "long": "no-verify",
+                "value": {
+                  "type": "switch"
+                },
+                "required": false,
+                "required_unless": [],
+                "num_args": {
+                  "min": 0,
+                  "max": 0
+                },
+                "global": false,
+                "hidden": false,
+                "default": [
+                  "false"
+                ],
+                "requires": [],
+                "conflicts": [],
+                "overrides": [
+                  "verify"
+                ],
+                "require_equals": false,
+                "allow_hyphen_values": false,
+                "last": false,
+                "trailing_var_arg": false,
+                "stdin_secret": false,
+                "help": "Skip the signed index catalog check for this run"
               }
             ],
             "groups": [],
@@ -2100,6 +2158,64 @@
                 "trailing_var_arg": false,
                 "stdin_secret": false,
                 "help": "Package identifiers to list the available versions for"
+              },
+              {
+                "id": "verify",
+                "long": "verify",
+                "value": {
+                  "type": "switch"
+                },
+                "required": false,
+                "required_unless": [],
+                "num_args": {
+                  "min": 0,
+                  "max": 0
+                },
+                "global": false,
+                "hidden": false,
+                "default": [
+                  "false"
+                ],
+                "requires": [],
+                "conflicts": [],
+                "overrides": [
+                  "no_verify"
+                ],
+                "require_equals": false,
+                "allow_hyphen_values": false,
+                "last": false,
+                "trailing_var_arg": false,
+                "stdin_secret": false,
+                "help": "Check the signed index catalog even when `OCX_NO_VERIFY` is set"
+              },
+              {
+                "id": "no_verify",
+                "long": "no-verify",
+                "value": {
+                  "type": "switch"
+                },
+                "required": false,
+                "required_unless": [],
+                "num_args": {
+                  "min": 0,
+                  "max": 0
+                },
+                "global": false,
+                "hidden": false,
+                "default": [
+                  "false"
+                ],
+                "requires": [],
+                "conflicts": [],
+                "overrides": [
+                  "verify"
+                ],
+                "require_equals": false,
+                "allow_hyphen_values": false,
+                "last": false,
+                "trailing_var_arg": false,
+                "stdin_secret": false,
+                "help": "Skip the signed index catalog check for this run"
               }
             ],
             "groups": [],
@@ -2144,6 +2260,64 @@
                 "trailing_var_arg": false,
                 "stdin_secret": false,
                 "help": "Packages to refresh; a bare name resolves against the default registry"
+              },
+              {
+                "id": "verify",
+                "long": "verify",
+                "value": {
+                  "type": "switch"
+                },
+                "required": false,
+                "required_unless": [],
+                "num_args": {
+                  "min": 0,
+                  "max": 0
+                },
+                "global": false,
+                "hidden": false,
+                "default": [
+                  "false"
+                ],
+                "requires": [],
+                "conflicts": [],
+                "overrides": [
+                  "no_verify"
+                ],
+                "require_equals": false,
+                "allow_hyphen_values": false,
+                "last": false,
+                "trailing_var_arg": false,
+                "stdin_secret": false,
+                "help": "Check the signed index catalog even when `OCX_NO_VERIFY` is set"
+              },
+              {
+                "id": "no_verify",
+                "long": "no-verify",
+                "value": {
+                  "type": "switch"
+                },
+                "required": false,
+                "required_unless": [],
+                "num_args": {
+                  "min": 0,
+                  "max": 0
+                },
+                "global": false,
+                "hidden": false,
+                "default": [
+                  "false"
+                ],
+                "requires": [],
+                "conflicts": [],
+                "overrides": [
+                  "verify"
+                ],
+                "require_equals": false,
+                "allow_hyphen_values": false,
+                "last": false,
+                "trailing_var_arg": false,
+                "stdin_secret": false,
+                "help": "Skip the signed index catalog check for this run"
               }
             ],
             "groups": [],
@@ -2219,6 +2393,64 @@
                 "trailing_var_arg": false,
                 "stdin_secret": false,
                 "help": "Print the packages this would refresh and refresh none; nothing is written, not even `config.json`, and no `[patches]` sync runs"
+              },
+              {
+                "id": "verify",
+                "long": "verify",
+                "value": {
+                  "type": "switch"
+                },
+                "required": false,
+                "required_unless": [],
+                "num_args": {
+                  "min": 0,
+                  "max": 0
+                },
+                "global": false,
+                "hidden": false,
+                "default": [
+                  "false"
+                ],
+                "requires": [],
+                "conflicts": [],
+                "overrides": [
+                  "no_verify"
+                ],
+                "require_equals": false,
+                "allow_hyphen_values": false,
+                "last": false,
+                "trailing_var_arg": false,
+                "stdin_secret": false,
+                "help": "Check the signed index catalog even when `OCX_NO_VERIFY` is set"
+              },
+              {
+                "id": "no_verify",
+                "long": "no-verify",
+                "value": {
+                  "type": "switch"
+                },
+                "required": false,
+                "required_unless": [],
+                "num_args": {
+                  "min": 0,
+                  "max": 0
+                },
+                "global": false,
+                "hidden": false,
+                "default": [
+                  "false"
+                ],
+                "requires": [],
+                "conflicts": [],
+                "overrides": [
+                  "verify"
+                ],
+                "require_equals": false,
+                "allow_hyphen_values": false,
+                "last": false,
+                "trailing_var_arg": false,
+                "stdin_secret": false,
+                "help": "Skip the signed index catalog check for this run"
               }
             ],
             "groups": [],
@@ -2264,6 +2496,330 @@
                 "trailing_var_arg": false,
                 "stdin_secret": false,
                 "help": "Registries whose local catalog is rebuilt from the package roots on disk"
+              }
+            ],
+            "groups": [],
+            "commands": []
+          },
+          {
+            "path": [
+              "index",
+              "sign"
+            ],
+            "version": 1,
+            "summary": "Sign a local index catalog",
+            "hidden": false,
+            "external_subcommands": false,
+            "output": [
+              {
+                "type": "report",
+                "root": "IndexSignReport"
+              }
+            ],
+            "args": [
+              {
+                "id": "registry",
+                "long": "registry",
+                "value": {
+                  "type": "string"
+                },
+                "required": true,
+                "required_unless": [],
+                "num_args": {
+                  "min": 1,
+                  "max": 1
+                },
+                "global": false,
+                "hidden": false,
+                "default": [],
+                "requires": [],
+                "conflicts": [],
+                "overrides": [],
+                "require_equals": false,
+                "allow_hyphen_values": false,
+                "last": false,
+                "trailing_var_arg": false,
+                "stdin_secret": false,
+                "help": "Registry the index serves, for example `ocx.sh`"
+              },
+              {
+                "id": "expires_in_days",
+                "long": "expires-in-days",
+                "value": {
+                  "type": "integer"
+                },
+                "required": false,
+                "required_unless": [],
+                "num_args": {
+                  "min": 1,
+                  "max": 1
+                },
+                "global": false,
+                "hidden": false,
+                "default": [
+                  "30"
+                ],
+                "requires": [],
+                "conflicts": [],
+                "overrides": [],
+                "require_equals": false,
+                "allow_hyphen_values": false,
+                "last": false,
+                "trailing_var_arg": false,
+                "stdin_secret": false,
+                "help": "Days until the signed catalog expires (0-366)"
+              },
+              {
+                "id": "fulcio_url",
+                "long": "fulcio-url",
+                "value": {
+                  "type": "string"
+                },
+                "required": false,
+                "required_unless": [],
+                "num_args": {
+                  "min": 1,
+                  "max": 1
+                },
+                "global": false,
+                "hidden": false,
+                "default": [],
+                "requires": [],
+                "conflicts": [
+                  "key"
+                ],
+                "overrides": [],
+                "require_equals": false,
+                "allow_hyphen_values": false,
+                "last": false,
+                "trailing_var_arg": false,
+                "stdin_secret": false,
+                "help": "Fulcio CA endpoint (the keyless certificate issuer)"
+              },
+              {
+                "id": "rekor_url",
+                "long": "rekor-url",
+                "value": {
+                  "type": "string"
+                },
+                "required": false,
+                "required_unless": [],
+                "num_args": {
+                  "min": 1,
+                  "max": 1
+                },
+                "global": false,
+                "hidden": false,
+                "default": [],
+                "requires": [],
+                "conflicts": [],
+                "overrides": [],
+                "require_equals": false,
+                "allow_hyphen_values": false,
+                "last": false,
+                "trailing_var_arg": false,
+                "stdin_secret": false,
+                "help": "Rekor transparency-log endpoint"
+              },
+              {
+                "id": "identity_token_file",
+                "long": "identity-token-file",
+                "value": {
+                  "type": "path"
+                },
+                "required": false,
+                "required_unless": [],
+                "num_args": {
+                  "min": 1,
+                  "max": 1
+                },
+                "global": false,
+                "hidden": false,
+                "default": [],
+                "requires": [],
+                "conflicts": [
+                  "identity_token_stdin",
+                  "key"
+                ],
+                "overrides": [],
+                "require_equals": false,
+                "allow_hyphen_values": false,
+                "last": false,
+                "trailing_var_arg": false,
+                "stdin_secret": false,
+                "help": "Read the OIDC identity token from this file (highest precedence)"
+              },
+              {
+                "id": "identity_token_stdin",
+                "long": "identity-token-stdin",
+                "value": {
+                  "type": "switch"
+                },
+                "required": false,
+                "required_unless": [],
+                "num_args": {
+                  "min": 0,
+                  "max": 0
+                },
+                "global": false,
+                "hidden": false,
+                "default": [
+                  "false"
+                ],
+                "requires": [],
+                "conflicts": [
+                  "identity_token_file",
+                  "key"
+                ],
+                "overrides": [],
+                "require_equals": false,
+                "allow_hyphen_values": false,
+                "last": false,
+                "trailing_var_arg": false,
+                "stdin_secret": true,
+                "help": "Read the OIDC identity token from stdin (second precedence)"
+              },
+              {
+                "id": "no_tty",
+                "long": "no-tty",
+                "value": {
+                  "type": "switch"
+                },
+                "required": false,
+                "required_unless": [],
+                "num_args": {
+                  "min": 0,
+                  "max": 0
+                },
+                "global": false,
+                "hidden": false,
+                "default": [
+                  "false"
+                ],
+                "requires": [],
+                "conflicts": [
+                  "key"
+                ],
+                "overrides": [],
+                "require_equals": false,
+                "allow_hyphen_values": false,
+                "last": false,
+                "trailing_var_arg": false,
+                "stdin_secret": false,
+                "help": "Suppress the interactive browser OAuth fallback (CI / headless)"
+              },
+              {
+                "id": "key",
+                "long": "key",
+                "value": {
+                  "type": "string"
+                },
+                "required": false,
+                "required_unless": [],
+                "num_args": {
+                  "min": 1,
+                  "max": 1
+                },
+                "global": false,
+                "hidden": false,
+                "default": [],
+                "requires": [],
+                "conflicts": [
+                  "fulcio_url",
+                  "identity_token_file",
+                  "identity_token_stdin",
+                  "no_tty"
+                ],
+                "overrides": [],
+                "require_equals": false,
+                "allow_hyphen_values": false,
+                "last": false,
+                "trailing_var_arg": false,
+                "stdin_secret": false,
+                "help": "Sign or verify with a key pair instead of keyless Sigstore"
+              },
+              {
+                "id": "rekor_upload",
+                "long": "rekor-upload",
+                "value": {
+                  "type": "switch"
+                },
+                "required": false,
+                "required_unless": [],
+                "num_args": {
+                  "min": 0,
+                  "max": 0
+                },
+                "global": false,
+                "hidden": false,
+                "default": [
+                  "false"
+                ],
+                "requires": [],
+                "conflicts": [],
+                "overrides": [
+                  "no_rekor_upload"
+                ],
+                "require_equals": false,
+                "allow_hyphen_values": false,
+                "last": false,
+                "trailing_var_arg": false,
+                "stdin_secret": false,
+                "help": "Record the signature in the Rekor transparency log"
+              },
+              {
+                "id": "no_rekor_upload",
+                "long": "no-rekor-upload",
+                "value": {
+                  "type": "switch"
+                },
+                "required": false,
+                "required_unless": [],
+                "num_args": {
+                  "min": 0,
+                  "max": 0
+                },
+                "global": false,
+                "hidden": false,
+                "default": [
+                  "false"
+                ],
+                "requires": [],
+                "conflicts": [],
+                "overrides": [
+                  "rekor_upload"
+                ],
+                "require_equals": false,
+                "allow_hyphen_values": false,
+                "last": false,
+                "trailing_var_arg": false,
+                "stdin_secret": false,
+                "help": "Skip the Rekor entry"
+              },
+              {
+                "id": "dir",
+                "position": 1,
+                "value": {
+                  "type": "path"
+                },
+                "required": true,
+                "required_unless": [],
+                "num_args": {
+                  "min": 1,
+                  "max": 1
+                },
+                "global": false,
+                "hidden": false,
+                "default": [],
+                "requires": [],
+                "conflicts": [],
+                "overrides": [],
+                "require_equals": false,
+                "allow_hyphen_values": false,
+                "last": false,
+                "trailing_var_arg": false,
+                "stdin_secret": false,
+                "help": "Index directory holding `c/index.json`"
               }
             ],
             "groups": [],
@@ -8820,7 +9376,7 @@
               "package",
               "sbom"
             ],
-            "version": 2,
+            "version": 3,
             "summary": "List or extract the SBOM attestations a published package carries",
             "hidden": false,
             "external_subcommands": false,
@@ -8881,6 +9437,7 @@
                 "default": [],
                 "requires": [],
                 "conflicts": [
+                  "dependencies",
                   "summary"
                 ],
                 "overrides": [],
@@ -8964,6 +9521,7 @@
                   "certificate_oidc_issuer"
                 ],
                 "conflicts": [
+                  "dependencies",
                   "key",
                   "no_verify"
                 ],
@@ -8994,6 +9552,7 @@
                   "certificate_identity"
                 ],
                 "conflicts": [
+                  "dependencies",
                   "key",
                   "no_verify"
                 ],
@@ -9004,6 +9563,99 @@
                 "trailing_var_arg": false,
                 "stdin_secret": false,
                 "help": "Expected certificate OIDC issuer (exact match)"
+              },
+              {
+                "id": "sigstore",
+                "long": "sigstore",
+                "value": {
+                  "type": "string"
+                },
+                "required": false,
+                "required_unless": [],
+                "num_args": {
+                  "min": 1,
+                  "max": 1
+                },
+                "global": false,
+                "hidden": false,
+                "default": [],
+                "requires": [
+                  "certificate_identity",
+                  "certificate_oidc_issuer",
+                  "dependencies",
+                  "key",
+                  "no_verify"
+                ],
+                "conflicts": [],
+                "overrides": [],
+                "require_equals": false,
+                "allow_hyphen_values": false,
+                "last": false,
+                "trailing_var_arg": false,
+                "stdin_secret": false,
+                "help": "Sigstore instance the signer used, named by the host of its Fulcio (`host[:port]`)"
+              },
+              {
+                "id": "dependencies",
+                "long": "dependencies",
+                "value": {
+                  "type": "switch"
+                },
+                "required": false,
+                "required_unless": [],
+                "num_args": {
+                  "min": 0,
+                  "max": 0
+                },
+                "global": false,
+                "hidden": false,
+                "default": [
+                  "false"
+                ],
+                "requires": [],
+                "conflicts": [
+                  "certificate_identity",
+                  "certificate_oidc_issuer",
+                  "output"
+                ],
+                "overrides": [
+                  "no_dependencies"
+                ],
+                "require_equals": false,
+                "allow_hyphen_values": false,
+                "last": false,
+                "trailing_var_arg": false,
+                "stdin_secret": false,
+                "help": "Cover the named package and every package in its dependency closure"
+              },
+              {
+                "id": "no_dependencies",
+                "long": "no-dependencies",
+                "value": {
+                  "type": "switch"
+                },
+                "required": false,
+                "required_unless": [],
+                "num_args": {
+                  "min": 0,
+                  "max": 0
+                },
+                "global": false,
+                "hidden": false,
+                "default": [
+                  "false"
+                ],
+                "requires": [],
+                "conflicts": [],
+                "overrides": [
+                  "dependencies"
+                ],
+                "require_equals": false,
+                "allow_hyphen_values": false,
+                "last": false,
+                "trailing_var_arg": false,
+                "stdin_secret": false,
+                "help": "Cover the named package alone"
               },
               {
                 "id": "key",
@@ -10273,6 +10925,35 @@
                 "trailing_var_arg": false,
                 "stdin_secret": false,
                 "help": "Expected certificate OIDC issuer (exact match)"
+              },
+              {
+                "id": "sigstore",
+                "long": "sigstore",
+                "value": {
+                  "type": "string"
+                },
+                "required": false,
+                "required_unless": [],
+                "num_args": {
+                  "min": 1,
+                  "max": 1
+                },
+                "global": false,
+                "hidden": false,
+                "default": [],
+                "requires": [
+                  "certificate_identity",
+                  "certificate_oidc_issuer",
+                  "key"
+                ],
+                "conflicts": [],
+                "overrides": [],
+                "require_equals": false,
+                "allow_hyphen_values": false,
+                "last": false,
+                "trailing_var_arg": false,
+                "stdin_secret": false,
+                "help": "Sigstore instance the signer used, named by the host of its Fulcio (`host[:port]`)"
               },
               {
                 "id": "key",
@@ -15300,7 +15981,7 @@
       "name": "OCX_NO_VERIFY",
       "value": "bool",
       "visibility": "public",
-      "summary": " Boolean — skip the policy-gated auto-verify on install/pull; `--no-verify` wins. Forwarded to child OCX.",
+      "summary": " Boolean — skip the policy-gated auto-verify and the signed index catalog check; `--verify` and `--no-verify` win. Forwarded to child OCX.",
       "secret": false,
       "accepts_reference": false,
       "propagation": "user_input",
@@ -15463,7 +16144,7 @@
       "name": "OCX_SIGSTORE_TRUSTED_ROOT",
       "value": "path",
       "visibility": "public",
-      "summary": " Path (bare or `file://`) to a Sigstore trusted-root JSON document, or a directory holding",
+      "summary": " Sigstore trusted root for `ocx package verify` and `ocx package sbom`, the only commands that read it.",
       "secret": false,
       "accepts_reference": false,
       "propagation": "user_input",

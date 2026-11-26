@@ -106,6 +106,7 @@ ocx_exit::families!(
     ::ocx_oci::auth::error::AuthError,
     // ocx_index
     ::ocx_index::error::Error,
+    ::ocx_index::IndexTrustError,
     // ocx_announce
     ::ocx_announce::claim::ClaimError,
     ::ocx_announce::announce::AnnounceError,

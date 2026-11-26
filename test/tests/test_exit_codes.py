@@ -661,8 +661,8 @@ def test_a_character_device_trusted_root_is_refused_by_the_regular_file_guard(
     a test suite may enter to prove a point. The exit code is the contract
     either way, and the guard does not know which device it refused.
 
-    The env var, not the flag, because it is the entry point the auto-verify
-    hook uses; the flag half is a row in the sweep above.
+    The env var, as the environment form of the flag `package verify` reads;
+    install-time verification takes its root from `config.toml` or the home.
     """
     device = Path("/dev/null")
     if not device.exists():

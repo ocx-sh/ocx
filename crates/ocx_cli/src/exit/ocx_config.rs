@@ -165,6 +165,63 @@ mod tests {
         }
     }
 
+    /// Reds on: a Sigstore-table or index-publisher config slug filed under another code than the error exits with.
+    #[test]
+    fn sigstore_and_index_config_details_follow_the_code_each_error_exits_with() {
+        use crate::exit::tests::assert_detail;
+        use ocx_config::error::Error as ConfigError;
+
+        let path = || PathBuf::from("/etc/ocx/config.toml");
+        let authority = || "fulcio.example".to_owned();
+        assert_detail(
+            &ConfigError::TrustSigstoreRetired { path: path() },
+            "trust_sigstore_retired",
+        );
+        let invalid = ocx_trust::SigstoreAuthority::parse("").expect_err("an empty authority is invalid");
+        assert_detail(
+            &ConfigError::SigstoreAuthorityInvalid(invalid),
+            "sigstore_authority_invalid",
+        );
+        assert_detail(
+            &ConfigError::SigstoreAuthorityDuplicate {
+                first: "LOCALHOST:5555".to_owned(),
+                second: "localhost:5555".to_owned(),
+            },
+            "sigstore_authority_invalid",
+        );
+        assert_detail(
+            &ConfigError::AmbiguousTrustRoot {
+                path: path(),
+                authority: authority(),
+            },
+            "ambiguous_trust_root",
+        );
+        assert_detail(
+            &ConfigError::SigstoreTableKeyMismatch {
+                authority: authority(),
+                fulcio_url: "https://other.example".to_owned(),
+            },
+            "sigstore_table_key_mismatch",
+        );
+        assert_detail(
+            &ConfigError::SigstoreRekorUrlMissing { authority: authority() },
+            "sigstore_rekor_url_missing",
+        );
+        assert_detail(
+            &ConfigError::IndexPublishersMissing {
+                registry: "ocx.sh".to_owned(),
+            },
+            "index_publishers_missing",
+        );
+        assert_detail(
+            &ConfigError::IndexPublishersInvalid {
+                registry: "ocx.sh".to_owned(),
+                reason: "bad".to_owned(),
+            },
+            "index_publishers_invalid",
+        );
+    }
+
     /// Reds on: a config slug, chosen by origin or io kind or delegated, filed under another code
     /// than the error exits with.
     #[test]
@@ -411,7 +468,9 @@ mod tests {
             ManagedConfigPublishError::InvalidToml {
                 source: ocx_config::error::ParseFailure::from_message("a bare `=` is not valid TOML"),
             },
-            ManagedConfigPublishError::AmbiguousTrustRoot,
+            ManagedConfigPublishError::AmbiguousTrustRoot {
+                authority: "localhost:5555".to_owned(),
+            },
             ManagedConfigPublishError::AmbiguousExtraCaCerts,
             ManagedConfigPublishError::ManagedConfigKeyByPath,
             ManagedConfigPublishError::ExtraCaCertsPemInvalid {

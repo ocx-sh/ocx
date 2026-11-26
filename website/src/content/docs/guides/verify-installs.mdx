@@ -111,9 +111,15 @@ Auto-verify reads only the operator `config.toml` tier. Unlike [`ocx package ver
 
 Sometimes you need to skip the check, for example for a mirror with no referrers support or a package you are debugging. Pass `--no-verify` for one invocation, or set [`OCX_NO_VERIFY`][env-no-verify] for a CI-wide opt-out. The `--verify` flag re-enables the check for one invocation even when the variable is set, because the flag always wins. Either bypass prints one `warning:` line per invocation, so a skipped check is visible on stderr.
 
+These switches also cover the index catalog signature check. The flag wins, then `OCX_NO_VERIFY`, then the default of checked. `ocx index update`, `index sync`, `index catalog` and `index list` take the flags too, the last two with `--remote`.
+
+Every other command honours only the variable. A skipped check leaves the recorded expiry high-water mark untouched.
+
 ### Verify under `--offline`
 
-Under [`--offline`][arg-offline], a policy-covered install needs its trust material locally. Supply a [Sigstore trusted-root JSON][env-sigstore-trusted-root], or rely on the cache a prior online verify wrote to `$OCX_HOME/state/trust_root/`. Offline never reaches the TUF fetch. With neither available, the install fails closed with exit `81` (`PolicyBlocked`, slug `offline_mode`) instead of installing something it could not check. This is the same rule that [verifying without network access](#supply-chain-offline) describes for the standalone command.
+Under [`--offline`][arg-offline], a policy-covered install needs its trust material locally. Put a Sigstore trusted-root JSON at `$OCX_HOME/sigstore/trusted-root.json` or in a [`[sigstore."<host>"]` table][in-depth-self-hosted-sigstore], or rely on the cache a prior online verify wrote to `$OCX_HOME/state/trust_root/`. Offline never reaches the TUF fetch. With neither available, the install fails closed with exit `81` (`PolicyBlocked`, slug `offline_mode`) instead of installing something it could not check. This is the same rule that [verifying without network access](#supply-chain-offline) describes for the standalone command.
+
+An index catalog check that verified also seeds that cache. It writes only after the signature verified, only for the public root fetched over TUF, and only when that root pins one transparency-log key. It never writes offline.
 
 :::tip[Learn more]
 [Command-line reference: `package install`][cmd-package-install] and [`package pull`][cmd-package-pull] hold the full auto-verify contract, options table and exit codes.

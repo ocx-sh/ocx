@@ -168,15 +168,26 @@ def write_package(
     )
 
 
-def write_catalog(fixture_root: Path, entries: dict[str, str], *, format_version: int = 1) -> None:
+def write_catalog(
+    fixture_root: Path,
+    entries: dict[str, str],
+    *,
+    format_version: int = 1,
+    expires: str | None = None,
+) -> None:
     """Writes `c/index.json` (● `{"format_version": N, "packages": {...}}`).
 
     The envelope is the served wire — `index.ocx.sh` emits the version pin
-    alongside the listing, the same shape `config.json` carries.
+    alongside the listing, the same shape `config.json` carries. `expires` is
+    the optional RFC 3339 `...Z` member a signed catalog carries; `ocx index
+    sign` sets it itself, so tests pass it only to hand-write a pre-signed
+    document.
     """
     path = fixture_root / "c" / "index.json"
     path.parent.mkdir(parents=True, exist_ok=True)
-    document = {"format_version": format_version, "packages": entries}
+    document: dict[str, object] = {"format_version": format_version, "packages": entries}
+    if expires is not None:
+        document["expires"] = expires
     path.write_text(json.dumps(document, sort_keys=True, separators=(",", ":")))
 
 
@@ -256,13 +267,19 @@ class _StaticIndexHandler(http.server.SimpleHTTPRequestHandler):
             self.send_error(transient)
             return
 
+        if (scripted := self.server.take_scripted_body(self.path)) is not None:
+            self._send_body(scripted, if_none_match)
+            return
+
         local_path = Path(self.translate_path(self.path))
         if not local_path.is_file():
             self.server.requests.append(RequestRecord(self.command, self.path, if_none_match, 404))
             self.send_error(404)
             return
 
-        body = local_path.read_bytes()
+        self._send_body(local_path.read_bytes(), if_none_match)
+
+    def _send_body(self, body: bytes, if_none_match: str | None) -> None:
         etag = hashlib.sha256(body).hexdigest()
         if if_none_match == etag:
             self.server.requests.append(RequestRecord(self.command, self.path, if_none_match, 304))
@@ -345,6 +362,11 @@ class StaticIndexServer(http.server.ThreadingHTTPServer):
         # Path -> (chunks, gap_seconds): serve this file's body in pieces with a
         # pause between them, so the transfer is slow without ever stalling.
         self.slow_bodies: dict[str, tuple[int, float]] = {}
+        # Path -> bodies answered in request order instead of the file on disk;
+        # the last one repeats. `[stale, current]` is a CDN that has not caught
+        # up yet; one list per path, filled together, is a deploy that switches
+        # generations between two requests.
+        self.scripted_bodies: dict[str, list[bytes]] = {}
         self._transient_lock = threading.Lock()
         # Seconds each request is held inside the handler. A static file is
         # served far faster than a client can fan out, so with no hold the peak
@@ -363,6 +385,29 @@ class StaticIndexServer(http.server.ThreadingHTTPServer):
         with self._transient_lock:
             pending = self.transient_refusals.get(path)
             return pending.pop(0) if pending else None
+
+    def take_scripted_body(self, path: str) -> bytes | None:
+        """The next scripted body for `path`, or `None` when none is scripted.
+        The last body stays queued, so every later request sees it too."""
+        with self._transient_lock:
+            queue = self.scripted_bodies.get(path)
+            if not queue:
+                return None
+            return queue.pop(0) if len(queue) > 1 else queue[0]
+
+    def serve_stale_first(self, path: str, stale: bytes) -> None:
+        """Answer the first request for `path` with `stale`, every later one
+        with the file now on disk — the CDN-lag shape of a signature that
+        belongs to the previous catalog."""
+        self.scripted_bodies[path] = [stale, (self.root / path.lstrip("/")).read_bytes()]
+
+    def paths(self, prefix: str = "") -> list[str]:
+        """Every request path seen so far (GET and HEAD) under `prefix`, in order."""
+        return [record.path for record in self.requests if record.path.startswith(prefix)]
+
+    def count(self, path: str) -> int:
+        """How many requests named exactly `path`."""
+        return self.paths().count(path)
 
     @property
     def peak_in_flight(self) -> int:

@@ -11,6 +11,7 @@ set -euo pipefail
 # the [[trust.policy]] pin, and put the dex identity token in
 # OCX_IDENTITY_TOKEN and the stack's CA in OCX_SIGSTORE_TRUSTED_ROOT — the two
 # channels a CI job uses, which is why the lines below carry neither flag.
+# Only `package sbom` reads the CA variable; attest needs no root.
 # $FULCIO / $REKOR address the stack; the docs page carries the concrete
 # values.
 

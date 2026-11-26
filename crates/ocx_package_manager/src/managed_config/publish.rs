@@ -77,14 +77,64 @@ pub enum ManagedConfigPublishError {
     )]
     ContainsManagedSection,
 
+    /// The payload carries the retired `[trust.sigstore]` table, which no consumer reads.
+    #[error(
+        "managed config payload declares `[trust.sigstore]`, which is no longer read; move its keys to \
+         `[sigstore.\"<fulcio host>\"]` (the host of its fulcio_url, or \"fulcio.sigstore.dev\"), and add \
+         `sigstore = \"<fulcio host>\"` to each keyless signer that trusted it"
+    )]
+    #[exit(
+        ConfigError,
+        slug = "trust_sigstore_retired",
+        summary = "A config file declares the retired [trust.sigstore] table"
+    )]
+    TrustSigstoreRetired,
+
+    /// A `[sigstore."<authority>"]` key, or a keyless signer's `sigstore` value, is not a valid authority.
+    #[error("managed config payload names an invalid Sigstore authority")]
+    #[exit(
+        ConfigError,
+        slug = "sigstore_authority_invalid",
+        summary = "A Sigstore authority is not a valid host and port"
+    )]
+    SigstoreAuthorityInvalid {
+        #[source]
+        source: ocx_trust::SigstoreAuthorityError,
+    },
+
+    /// Two `[sigstore."<key>"]` keys of the payload spell the same authority.
+    #[error(
+        "managed config payload names one Sigstore authority twice: [sigstore.\"{first}\"] and \
+         [sigstore.\"{second}\"]; keep one table"
+    )]
+    #[exit(
+        ConfigError,
+        slug = "sigstore_authority_invalid",
+        summary = "A Sigstore authority is not a valid host and port"
+    )]
+    SigstoreAuthorityDuplicate { first: String, second: String },
+
+    /// A `[sigstore."<authority>"]` table whose `fulcio_url` names another authority than its key.
+    #[error(
+        "managed config payload: [sigstore.\"{authority}\"] sets fulcio_url `{fulcio_url}`, whose authority differs from the table key"
+    )]
+    #[exit(
+        ConfigError,
+        slug = "sigstore_table_key_mismatch",
+        summary = "A Sigstore table's fulcio_url names another authority than its key"
+    )]
+    SigstoreTableKeyMismatch { authority: String, fulcio_url: String },
+
     /// Both `trusted_root` and `trusted_root_json`: which one wins is not predictable from the file.
-    #[error("managed config payload declares both trusted_root and trusted_root_json in [trust.sigstore]: keep one")]
+    #[error(
+        "managed config payload declares both trusted_root and trusted_root_json in [sigstore.\"{authority}\"]: keep one"
+    )]
     #[exit(
         ConfigError,
         slug = "ambiguous_trust_root",
         summary = "The payload declares both trusted_root and trusted_root_json"
     )]
-    AmbiguousTrustRoot,
+    AmbiguousTrustRoot { authority: String },
 
     /// Both `extra_ca_certs` and `extra_ca_certs_pem`, for the same reason as [`Self::AmbiguousTrustRoot`].
     #[error("managed config payload declares both extra_ca_certs and extra_ca_certs_pem: keep one")]
@@ -112,7 +162,7 @@ pub enum ManagedConfigPublishError {
         source: ocx_trust::TrustPolicyError,
     },
 
-    #[error("failed to read trusted root '{}' named by [trust.sigstore] trusted_root", path.display())]
+    #[error("failed to read trusted root '{}' named by a [sigstore] table trusted_root", path.display())]
     #[exit(with = read_failure, rows((NotFound, slug = "managed_config_input_not_found", summary = "A file the managed-config payload names does not exist"), (PermissionDenied, slug = "permission_denied", summary = "The operating system refused access to a file or directory"), (IoError, slug = "trusted_root_read_failed", summary = "Reading the trusted root the payload names failed")))]
     TrustedRootReadFailed {
         path: PathBuf,
@@ -253,6 +303,23 @@ fn names_a_path(key: &ocx_trust::KeyMatcher) -> bool {
         .is_some_and(|reference| reference.as_path().is_some())
 }
 
+/// The publish-side spelling of a Sigstore table refusal the config loader raises.
+fn sigstore_table_refusal(error: ocx_config::error::Error) -> ManagedConfigPublishError {
+    use ocx_config::error::Error;
+    match error {
+        Error::SigstoreAuthorityInvalid(source) => ManagedConfigPublishError::SigstoreAuthorityInvalid { source },
+        Error::SigstoreAuthorityDuplicate { first, second } => {
+            ManagedConfigPublishError::SigstoreAuthorityDuplicate { first, second }
+        }
+        Error::SigstoreTableKeyMismatch { authority, fulcio_url } => {
+            ManagedConfigPublishError::SigstoreTableKeyMismatch { authority, fulcio_url }
+        }
+        other => ManagedConfigPublishError::InvalidToml {
+            source: ocx_config::error::ParseFailure::from_message(other.to_string()),
+        },
+    }
+}
+
 // ── Pure validation ───────────────────────────────────────────────────────────
 
 /// Validates a managed-config payload purely over its bytes and returns it as text.
@@ -262,6 +329,7 @@ fn names_a_path(key: &ocx_trust::KeyMatcher) -> bool {
 /// [`ManagedConfigPublishError::PayloadTooLarge`],
 /// [`ManagedConfigPublishError::InvalidToml`],
 /// [`ManagedConfigPublishError::ContainsManagedSection`],
+/// [`ManagedConfigPublishError::TrustSigstoreRetired`],
 /// [`ManagedConfigPublishError::AmbiguousTrustRoot`],
 /// [`ManagedConfigPublishError::AmbiguousExtraCaCerts`],
 /// [`ManagedConfigPublishError::ManagedConfigKeyByPath`],
@@ -276,18 +344,28 @@ pub fn validate_managed_config_payload(bytes: &[u8]) -> Result<&str, ManagedConf
     let text = std::str::from_utf8(bytes).map_err(|utf8_error| ManagedConfigPublishError::InvalidToml {
         source: ocx_config::error::ParseFailure::from_message(utf8_error.to_string()),
     })?;
+    // Ahead of the typed parse, which would drop the table silently.
+    if ocx_config::loader::ConfigLoader::declares_retired_trust_sigstore(text) {
+        return Err(ManagedConfigPublishError::TrustSigstoreRetired);
+    }
+    ocx_config::loader::ConfigLoader::check_sigstore_authorities(text).map_err(sigstore_table_refusal)?;
     let parsed: ocx_config::Config = toml::from_str(text).map_err(|source| ManagedConfigPublishError::InvalidToml {
         source: ocx_config::error::ParseFailure::new(&source, text),
     })?;
+    parsed.validate_sigstore_tables().map_err(sigstore_table_refusal)?;
 
     if parsed.managed.is_some() {
         return Err(ManagedConfigPublishError::ContainsManagedSection);
     }
-    if let Some(sigstore) = parsed.trust.as_ref().and_then(|trust| trust.sigstore.as_ref())
-        && sigstore.trusted_root.is_some()
-        && sigstore.trusted_root_json.is_some()
+    if let Some((authority, _)) = parsed
+        .sigstore
+        .iter()
+        .flat_map(|tables| tables.iter())
+        .find(|(_, table)| table.trusted_root.is_some() && table.trusted_root_json.is_some())
     {
-        return Err(ManagedConfigPublishError::AmbiguousTrustRoot);
+        return Err(ManagedConfigPublishError::AmbiguousTrustRoot {
+            authority: authority.to_string(),
+        });
     }
     if parsed.extra_ca_certs.is_some() && parsed.extra_ca_certs_pem.is_some() {
         return Err(ManagedConfigPublishError::AmbiguousExtraCaCerts);
@@ -311,11 +389,18 @@ pub fn validate_managed_config_payload(bytes: &[u8]) -> Result<&str, ManagedConf
     Ok(text)
 }
 
-/// The path-form trust root a payload declares, if any.
+/// Every path-form trust root a payload declares, with the instance whose table declares it.
 #[must_use]
-pub fn declared_trusted_root(text: &str) -> Option<PathBuf> {
-    let parsed: ocx_config::Config = toml::from_str(text).ok()?;
-    parsed.trust?.sigstore?.trusted_root
+pub fn declared_trusted_roots(text: &str) -> Vec<(ocx_trust::SigstoreAuthority, PathBuf)> {
+    let Ok(parsed) = toml::from_str::<ocx_config::Config>(text) else {
+        return Vec::new();
+    };
+    parsed
+        .sigstore
+        .iter()
+        .flat_map(|tables| tables.iter())
+        .filter_map(|(authority, table)| Some((authority.clone(), table.trusted_root.clone()?)))
+        .collect()
 }
 
 /// The path-form `extra_ca_certs` a payload declares, if any.
@@ -363,29 +448,40 @@ fn guard_inlined_payload_size(bytes: &[u8]) -> Result<(), ManagedConfigPublishEr
     Ok(())
 }
 
-/// Replaces a path-form `[trust.sigstore] trusted_root` with `trusted_root_json`,
-/// leaving the rest of the document byte-identical; a payload without one is returned unchanged.
+/// Replaces the path-form `trusted_root` of the `[sigstore."<authority>"]` table with `trusted_root_json`,
+/// leaving the rest of the document byte-identical; a payload without that table or key is returned unchanged.
 ///
 /// # Errors
 ///
 /// [`ManagedConfigPublishError::InvalidToml`] when the payload is not TOML.
-pub fn inline_trusted_root(text: &str, json: &str) -> Result<String, ManagedConfigPublishError> {
+pub fn inline_trusted_root(
+    text: &str,
+    authority: &ocx_trust::SigstoreAuthority,
+    json: &str,
+) -> Result<String, ManagedConfigPublishError> {
     let mut document =
         text.parse::<toml_edit::DocumentMut>()
             .map_err(|error| ManagedConfigPublishError::InvalidToml {
                 source: ocx_config::error::ParseFailure::from_message(error.message()),
             })?;
-    let Some(sigstore) = document
-        .get_mut("trust")
-        .and_then(|trust| trust.get_mut("sigstore"))
+    let Some(tables) = document
+        .get_mut("sigstore")
         .and_then(toml_edit::Item::as_table_like_mut)
     else {
         return Ok(text.to_string());
     };
-    if sigstore.remove("trusted_root").is_none() {
+    // The key as written may differ from the normalised authority (`Fulcio.Example:443`).
+    let Some(table) = tables
+        .iter_mut()
+        .find(|(key, _)| ocx_trust::SigstoreAuthority::parse(key).is_ok_and(|parsed| parsed == *authority))
+        .and_then(|(_, item)| item.as_table_like_mut())
+    else {
+        return Ok(text.to_string());
+    };
+    if table.remove("trusted_root").is_none() {
         return Ok(text.to_string());
     }
-    sigstore.insert("trusted_root_json", toml_edit::value(json));
+    table.insert("trusted_root_json", toml_edit::value(json));
     Ok(document.to_string())
 }
 
@@ -498,33 +594,30 @@ pub async fn publish_managed_config(
 ) -> Result<PushOutcome, ManagedConfigPublishError> {
     let bytes = read_candidate_payload(config_path).await?;
     let text = validate_managed_config_payload(&bytes)?;
-    let text = match declared_trusted_root(text) {
-        None => text.to_string(),
-        Some(declared) => {
-            // Through the loader's `FileReference` grammar, or `file:///x` is read as a file of that name.
-            let path = anchor_declared_path(&declared, config_path);
-            // Verification's own size cap, so a root publish accepts is never too large for a consumer.
-            let json = read_bounded_async(&path, ocx_sign::verify::MAX_TRUSTED_ROOT_BYTES)
-                .await
-                .map_err(|refused| ManagedConfigPublishError::TrustedRootReadFailed {
-                    path: path.clone(),
-                    source: refused.into_io_error(),
-                })?;
-            // Verification's own loader, so a published root is one every consumer can build.
-            ocx_sign::verify::TrustRoot::load_trusted_root_json(&json).map_err(|kind| {
-                ManagedConfigPublishError::TrustedRootInvalid {
-                    path: path.clone(),
-                    detail: kind.to_string(),
-                }
+    let mut text = text.to_string();
+    for (authority, declared) in declared_trusted_roots(&text) {
+        // Through the loader's `FileReference` grammar, or `file:///x` is read as a file of that name.
+        let path = anchor_declared_path(&declared, config_path);
+        // Verification's own size cap, so a root publish accepts is never too large for a consumer.
+        let json = read_bounded_async(&path, ocx_sign::verify::MAX_TRUSTED_ROOT_BYTES)
+            .await
+            .map_err(|refused| ManagedConfigPublishError::TrustedRootReadFailed {
+                path: path.clone(),
+                source: refused.into_io_error(),
             })?;
-            let json =
-                std::str::from_utf8(&json).map_err(|utf8_error| ManagedConfigPublishError::TrustedRootInvalid {
-                    path: path.clone(),
-                    detail: utf8_error.to_string(),
-                })?;
-            inline_trusted_root(text, json)?
-        }
-    };
+        // Verification's own loader, so a published root is one every consumer can build.
+        ocx_sign::verify::TrustRoot::load_trusted_root_json(&json).map_err(|kind| {
+            ManagedConfigPublishError::TrustedRootInvalid {
+                path: path.clone(),
+                detail: kind.to_string(),
+            }
+        })?;
+        let json = std::str::from_utf8(&json).map_err(|utf8_error| ManagedConfigPublishError::TrustedRootInvalid {
+            path: path.clone(),
+            detail: utf8_error.to_string(),
+        })?;
+        text = inline_trusted_root(&text, &authority, json)?;
+    }
     let text = match declared_extra_ca_certs(&text) {
         None => {
             // A bad root published here breaks every consumer command, `config update` included.
@@ -652,6 +745,61 @@ mod tests {
         assert!(matches!(err, ManagedConfigPublishError::ContainsManagedSection));
     }
 
+    /// `ocx config push` and `ocx config test` both validate through here, so a leftover
+    /// `[trust.sigstore]` never reaches a fleet in any TOML form.
+    #[test]
+    fn validate_rejects_the_retired_trust_sigstore_table_in_every_form() {
+        for payload in [
+            "[trust.sigstore]\nrekor_upload = false\n",
+            "trust.sigstore.rekor_upload = false\n",
+            "trust = { sigstore = { rekor_upload = false } }\n",
+            "[[trust.sigstore]]\nrekor_upload = false\n",
+        ] {
+            let err = validate_managed_config_payload(payload.as_bytes()).expect_err(payload);
+            assert!(
+                matches!(err, ManagedConfigPublishError::TrustSigstoreRetired),
+                "{payload}: {err:?}"
+            );
+            let message = err.to_string();
+            assert!(
+                message.contains("[sigstore.\"") && message.contains("sigstore = \""),
+                "{message}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_rejects_an_invalid_sigstore_authority_and_a_mismatched_fulcio_url() {
+        let invalid = validate_managed_config_payload(b"[sigstore.\"https://fulcio.example\"]\n").expect_err("scheme");
+        assert!(
+            matches!(invalid, ManagedConfigPublishError::SigstoreAuthorityInvalid { .. }),
+            "{invalid:?}"
+        );
+        let mismatch = validate_managed_config_payload(
+            b"[sigstore.\"fulcio.a.example\"]\nfulcio_url = \"https://fulcio.b.example\"\n",
+        )
+        .expect_err("mismatch");
+        assert!(
+            matches!(mismatch, ManagedConfigPublishError::SigstoreTableKeyMismatch { .. }),
+            "{mismatch:?}"
+        );
+        validate_managed_config_payload(
+            b"[sigstore.\"fulcio.a.example\"]\nfulcio_url = \"https://fulcio.a.example\"\n",
+        )
+        .expect("a table naming its own authority publishes");
+    }
+
+    #[test]
+    fn validate_rejects_two_keys_spelling_one_sigstore_authority_as_config_loading_does() {
+        let duplicate =
+            validate_managed_config_payload(b"[sigstore.\"localhost:5555\"]\n[sigstore.\"LOCALHOST:5555\"]\n")
+                .expect_err("two spellings of one authority");
+        assert!(
+            matches!(duplicate, ManagedConfigPublishError::SigstoreAuthorityDuplicate { .. }),
+            "{duplicate:?}"
+        );
+    }
+
     #[test]
     fn validate_rejects_invalid_toml() {
         let err = validate_managed_config_payload(b"not = [valid").expect_err("invalid TOML must be rejected");
@@ -706,42 +854,50 @@ mod tests {
     #[test]
     fn validate_rejects_both_trust_root_spellings() {
         let toml = r#"
-[trust.sigstore]
+[sigstore."fulcio.sigstore.dev"]
 trusted_root = "sigstore/trusted-root.json"
 trusted_root_json = "{}"
 "#;
         let error = validate_managed_config_payload(toml.as_bytes()).expect_err("XOR is enforced");
-        assert!(matches!(error, ManagedConfigPublishError::AmbiguousTrustRoot));
+        assert!(
+            matches!(error, ManagedConfigPublishError::AmbiguousTrustRoot { authority } if authority == "fulcio.sigstore.dev")
+        );
     }
 
     #[test]
     fn validate_accepts_either_trust_root_spelling_alone() {
         for toml in [
-            "[trust.sigstore]\ntrusted_root = \"sigstore/trusted-root.json\"\n",
-            "[trust.sigstore]\ntrusted_root_json = \"{}\"\n",
+            "[sigstore.\"fulcio.sigstore.dev\"]\ntrusted_root = \"sigstore/trusted-root.json\"\n",
+            "[sigstore.\"fulcio.sigstore.dev\"]\ntrusted_root_json = \"{}\"\n",
         ] {
             validate_managed_config_payload(toml.as_bytes()).expect("one spelling alone is fine");
         }
     }
 
+    fn public() -> ocx_trust::SigstoreAuthority {
+        ocx_trust::SigstoreAuthority::public()
+    }
+
     #[test]
-    fn declared_trusted_root_finds_the_path_form_only() {
-        assert_eq!(
-            declared_trusted_root("[trust.sigstore]\ntrusted_root = \"sigstore/trusted-root.json\"\n"),
-            Some(PathBuf::from("sigstore/trusted-root.json"))
+    fn declared_trusted_roots_finds_every_path_form_and_no_inline_one() {
+        let declared = declared_trusted_roots(
+            "[sigstore.\"fulcio.sigstore.dev\"]\ntrusted_root = \"sigstore/trusted-root.json\"\n\
+             [sigstore.\"fulcio.corp.example:5555\"]\ntrusted_root = \"corp.json\"\n\
+             [sigstore.\"fulcio.inline.example\"]\ntrusted_root_json = \"{}\"\n",
         );
-        assert_eq!(
-            declared_trusted_root("[trust.sigstore]\ntrusted_root_json = \"{}\"\n"),
-            None,
-            "an already-inline payload needs no read"
-        );
-        assert_eq!(declared_trusted_root("[registry]\ndefault = \"ghcr.io\"\n"), None);
+        assert_eq!(declared.len(), 2, "{declared:?}");
+        assert!(declared.contains(&(public(), PathBuf::from("sigstore/trusted-root.json"))));
+        assert!(declared.contains(&(
+            ocx_trust::SigstoreAuthority::parse("fulcio.corp.example:5555").unwrap(),
+            PathBuf::from("corp.json")
+        )));
+        assert!(declared_trusted_roots("[registry]\ndefault = \"ghcr.io\"\n").is_empty());
     }
 
     #[test]
     fn inline_trusted_root_swaps_the_path_for_the_document() {
-        let payload = "[trust.sigstore]\ntrusted_root = \"sigstore/trusted-root.json\"\nrekor_url = \"https://rekor.corp.example\"\n";
-        let rewritten = inline_trusted_root(payload, "{\"mediaType\":\"x\"}").expect("rewrite");
+        let payload = "[sigstore.\"fulcio.sigstore.dev\"]\ntrusted_root = \"sigstore/trusted-root.json\"\nrekor_url = \"https://rekor.corp.example\"\n";
+        let rewritten = inline_trusted_root(payload, &public(), "{\"mediaType\":\"x\"}").expect("rewrite");
 
         assert!(
             !rewritten.contains("trusted_root ="),
@@ -761,12 +917,38 @@ trusted_root_json = "{}"
         let parsed = validate_managed_config_payload(rewritten.as_bytes()).expect("rewritten payload is publishable");
         let sigstore = toml::from_str::<ocx_config::Config>(parsed)
             .expect("parses")
-            .trust
-            .expect("trust")
             .sigstore
-            .expect("sigstore");
+            .expect("sigstore")
+            .get(&public())
+            .cloned()
+            .expect("public table");
         assert_eq!(sigstore.trusted_root, None);
         assert_eq!(sigstore.trusted_root_json.as_deref(), Some("{\"mediaType\":\"x\"}"));
+    }
+
+    /// Only the named instance's table is rewritten, found by authority even when its key is spelled unnormalised.
+    #[test]
+    fn inline_trusted_root_rewrites_only_the_named_table() {
+        let payload = "[sigstore.\"fulcio.sigstore.dev\"]\ntrusted_root = \"a.json\"\n\
+                       [sigstore.\"Fulcio.Corp.Example:5555\"]\ntrusted_root = \"b.json\"\n";
+        let corp = ocx_trust::SigstoreAuthority::parse("fulcio.corp.example:5555").unwrap();
+        let rewritten = inline_trusted_root(payload, &corp, "{\"b\":1}").expect("rewrite");
+        let tables = toml::from_str::<ocx_config::Config>(&rewritten)
+            .expect("parses")
+            .sigstore
+            .expect("tables");
+        assert_eq!(
+            tables.get(&corp).and_then(|t| t.trusted_root_json.clone()).as_deref(),
+            Some("{\"b\":1}")
+        );
+        assert_eq!(tables.get(&corp).and_then(|t| t.trusted_root.clone()), None);
+        let public_table = tables.get(&public()).expect("public table");
+        assert_eq!(
+            public_table.trusted_root,
+            Some(PathBuf::from("a.json")),
+            "the other table is untouched"
+        );
+        assert_eq!(public_table.trusted_root_json, None);
     }
 
     #[test]
@@ -775,8 +957,8 @@ trusted_root_json = "{}"
         // round-trip: an operator's `config.toml` is hand-authored, and a
         // publish step that silently ate their comments would be noticed once,
         // in the worst way.
-        let payload = "# corporate trust root, rotated quarterly\n[trust.sigstore]\ntrusted_root = \"root.json\"\n";
-        let rewritten = inline_trusted_root(payload, "{}").expect("rewrite");
+        let payload = "# corporate trust root, rotated quarterly\n[sigstore.\"fulcio.sigstore.dev\"]\ntrusted_root = \"root.json\"\n";
+        let rewritten = inline_trusted_root(payload, &public(), "{}").expect("rewrite");
         assert!(
             rewritten.contains("# corporate trust root, rotated quarterly"),
             "the comment survives: {rewritten}"
@@ -787,10 +969,10 @@ trusted_root_json = "{}"
     fn inline_trusted_root_leaves_a_payload_with_no_path_form_untouched() {
         for payload in [
             "[registry]\ndefault = \"ghcr.io\"\n",
-            "[trust.sigstore]\ntrusted_root_json = \"{}\"\n",
+            "[sigstore.\"fulcio.sigstore.dev\"]\ntrusted_root_json = \"{}\"\n",
         ] {
             assert_eq!(
-                inline_trusted_root(payload, "{}").expect("rewrite"),
+                inline_trusted_root(payload, &public(), "{}").expect("rewrite"),
                 payload,
                 "byte-identical when there is nothing to inline"
             );
@@ -1117,9 +1299,12 @@ trusted_root_json = "{}"
         let cap = ocx_sign::verify::MAX_TRUSTED_ROOT_BYTES as usize;
         std::fs::write(directory.path().join("root.json"), vec![b' '; cap + 1]).expect("write the root");
 
-        let error = publish_from_tempdir(&directory, "[trust.sigstore]\ntrusted_root = \"root.json\"\n")
-            .await
-            .expect_err("an over-cap trust root is refused");
+        let error = publish_from_tempdir(
+            &directory,
+            "[sigstore.\"fulcio.sigstore.dev\"]\ntrusted_root = \"root.json\"\n",
+        )
+        .await
+        .expect_err("an over-cap trust root is refused");
         assert!(
             matches!(&error, ManagedConfigPublishError::TrustedRootReadFailed { source, .. }
                 if source.kind() == std::io::ErrorKind::InvalidInput),
@@ -1138,7 +1323,10 @@ trusted_root_json = "{}"
         let fifo = directory.path().join("root.fifo");
         ocx_test_support::fifo::mkfifo(&fifo);
 
-        let publish = publish_from_tempdir(&directory, "[trust.sigstore]\ntrusted_root = \"root.fifo\"\n");
+        let publish = publish_from_tempdir(
+            &directory,
+            "[sigstore.\"fulcio.sigstore.dev\"]\ntrusted_root = \"root.fifo\"\n",
+        );
         let outcome = std::panic::AssertUnwindSafe(publish).catch_unwind().await;
         ocx_test_support::fifo::release_blocked_reader(&fifo);
         let error = outcome
@@ -1344,7 +1532,7 @@ trusted_root_json = "{}"
     }
 
     /// A bundle over the 32 KiB cap is `read_bounded`'s `TooLarge`
-    /// and surfaces as 74 (parity with `[trust.sigstore] trusted_root`), never
+    /// and surfaces as 74 (parity with a table's `trusted_root`), never
     /// as content error 65 — the file is well-formed PEM throughout, so the
     /// code can only come from the size gate.
     #[tokio::test(flavor = "multi_thread")]

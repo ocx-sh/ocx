@@ -3,8 +3,6 @@
 
 //! `ocx package sign` — Sigstore signing of a published package as an OCI referrer. Pipeline:
 //! [`adr_oci_referrers_signing_v1.md`](../../../../../.claude/artifacts/adr_oci_referrers_signing_v1.md).
-//!
-//! No `--identity-token <VALUE>` flag: a raw token on the command line leaks into shell history.
 
 use ocx_package_manager::Error as PmError;
 use std::process::ExitCode;
@@ -19,6 +17,7 @@ use crate::command::package_sign_common;
 use crate::options;
 use crate::options::key::KeyOpt;
 use crate::options::rekor_upload::RekorUploadOpt;
+use crate::options::sign_endpoints::SignEndpointsOpt;
 use crate::options::signature_format::SignatureFormatOpt;
 use crate::options::tags::TagsOpt;
 
@@ -42,55 +41,8 @@ pub struct PackageSign {
     )]
     platform: Option<ocx_oci::Platform>,
 
-    // Both URLs are `Option`, not clap-defaulted, or `[trust.sigstore]` can never apply.
-    /// Fulcio CA endpoint (the keyless certificate issuer)
-    ///
-    /// Defaults to [trust.sigstore].fulcio_url, else public Fulcio.
-    ///
-    /// Keyless-only: an error alongside `--key`, never silently ignored.
-    #[clap(long = "fulcio-url", value_name = "URL", conflicts_with = "key")]
-    fulcio_url: Option<String>,
-
-    /// Rekor transparency-log endpoint
-    ///
-    /// Defaults to [trust.sigstore].rekor_url, else public Rekor.
-    #[clap(long = "rekor-url", value_name = "URL")]
-    rekor_url: Option<String>,
-
-    /// Read the OIDC identity token from this file (highest precedence).
-    ///
-    /// Use this when the CI system writes the token to a file instead of the
-    /// environment (GitHub Actions `$ACTIONS_ID_TOKEN_REQUEST_TOKEN` flow is
-    /// env-based; other systems write the token out).
-    ///
-    /// Security: `--identity-token-file` does not follow symlinks. On Unix the
-    /// file is opened with `O_NOFOLLOW` and rejected if not owned by the
-    /// effective user or if group/other permission bits are set.
-    #[clap(
-        long = "identity-token-file",
-        value_name = "PATH",
-        conflicts_with = "identity_token_stdin",
-        conflicts_with = "key"
-    )]
-    identity_token_file: Option<std::path::PathBuf>,
-
-    /// Read the OIDC identity token from stdin (second precedence).
-    ///
-    /// Mutually exclusive with `--identity-token-file`. Accepts a newline-terminated
-    /// token on stdin; trailing whitespace is trimmed.
-    #[clap(
-        long = "identity-token-stdin",
-        conflicts_with = "identity_token_file",
-        conflicts_with = "key"
-    )]
-    identity_token_stdin: bool,
-
-    /// Suppress the interactive browser OAuth fallback (CI / headless).
-    ///
-    /// When set, ambient detection must succeed or the override flags must
-    /// supply a token; there is no interactive recovery path.
-    #[clap(long = "no-tty", conflicts_with = "key")]
-    no_tty: bool,
+    #[clap(flatten)]
+    endpoints: SignEndpointsOpt,
 
     /// Bypass the referrers-capability cache for this invocation.
     ///
@@ -122,19 +74,20 @@ impl PackageSign {
         let identifier = self.identifier.with_domain(context.default_registry())?;
 
         // Also the SSRF guard (CWE-918): both endpoints are validated before any client dials them.
-        let (fulcio_url, rekor_url) = package_sign_common::resolve_sigstore_pair(
+        let target = package_sign_common::resolve_sigstore_pair(
             context.config_trust_sigstore(),
             &identifier,
-            self.fulcio_url.as_deref(),
-            self.rekor_url.as_deref(),
+            self.key.is_key_mode(),
+            self.endpoints.fulcio_url(),
+            self.endpoints.rekor_url(),
         )?;
         // Offline is a policy refusal, not a network failure (`test_sign_offline_refused`).
         package_sign_common::refuse_when_offline(&context, &identifier, SignErrorKind::OfflineSignRefused)?;
 
         // Never log the token or put it in error context.
         let override_token = package_sign_common::resolve_override_token(
-            self.identity_token_file.as_deref(),
-            self.identity_token_stdin,
+            self.endpoints.identity_token_file(),
+            self.endpoints.identity_token_stdin(),
             &identifier,
         )
         .await?;
@@ -145,20 +98,18 @@ impl PackageSign {
             .key
             .reference()
             .map_err(|kind| SignError::new(identifier.clone(), SignErrorKind::from(kind)))?;
-        let configured_rekor_upload = context
-            .config_trust_sigstore()
-            .and_then(|sigstore| sigstore.rekor_upload);
         let rekor_upload = self
             .rekor_upload
-            .enabled(self.key.is_key_mode(), configured_rekor_upload)
+            .enabled(self.key.is_key_mode(), target.configured_rekor_upload)
             .map_err(|kind| SignError::new(identifier.clone(), kind))?;
+        let (fulcio_url, rekor_url) = target.endpoints(rekor_upload)?;
 
         let options = SignOptions {
             fulcio_url,
             rekor_url,
             identity_token: override_token,
             no_cache: self.no_cache,
-            no_tty: self.no_tty,
+            no_tty: self.endpoints.no_tty(),
             key,
             rekor_upload,
             format: self.signature_format.write_format(),

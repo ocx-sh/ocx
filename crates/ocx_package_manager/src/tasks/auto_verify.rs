@@ -6,7 +6,7 @@
 //! Runs after resolve and before any layer download, so a fail-closed abort leaves no package or symlink state.
 //! Called only from `setup_impl`: an install path that bypasses it installs unverified.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -20,10 +20,11 @@ use ocx_oci::{self};
 use ocx_sign::sign::state::SigningStatePaths;
 use ocx_sign::verify::trust_cache::cache_key_for_rekor;
 use ocx_sign::verify::{
-    Transparency, TrustRoot, VerifyError, VerifyErrorKind, resolve_local_trust_root, resolve_trust_root,
+    Transparency, TrustRoot, VerifyError, VerifyErrorKind, resolve_instance_trust_root, resolve_local_trust_root,
+    resolve_trust_root,
 };
 use ocx_store::file_structure::StateStore;
-use ocx_trust::{CompiledPolicy, TrustPolicy};
+use ocx_trust::{CompiledPolicy, PolicyBackend, SigstoreAuthority, TrustPolicy};
 
 use super::super::PackageManager;
 use super::signer_rounds::{
@@ -66,10 +67,8 @@ pub struct AutoVerify {
     offline: bool,
     /// State store owning the capability + trust-root cache layouts.
     state: StateStore,
-    /// `OCX_SIGSTORE_TRUSTED_ROOT` override captured at construction.
-    trusted_root_env: Option<PathBuf>,
-    /// Operator `[trust.sigstore]` from `config.toml`, captured at construction.
-    sigstore_trust: Option<ocx_trust::SigstoreTrust>,
+    /// Operator `[sigstore."<authority>"]` tables from `config.toml`, captured at construction.
+    sigstore_trust: Option<ocx_trust::SigstoreInstances>,
     /// `$OCX_HOME/sigstore/trusted-root.json` convention path, if `$OCX_HOME` resolved.
     home_trusted_root: Option<PathBuf>,
     /// Resolved `--no-verify` / `OCX_NO_VERIFY` opt-out (flag wins).
@@ -79,6 +78,8 @@ pub struct AutoVerify {
     /// The trust root already local with no network, memoized per batch; an empty root, which can check nothing,
     /// when no rung holds one.
     local_trust_root: Arc<OnceCell<TrustRoot>>,
+    /// Each non-public instance's trust root, memoized per batch on success.
+    instance_trust_roots: Arc<Mutex<HashMap<SigstoreAuthority, Arc<OnceCell<TrustRoot>>>>>,
     /// WARN-once latch, shared across a batch install.
     warned: Arc<AtomicBool>,
     /// Whether each logical repository declares publishers, memoized per batch for the origin gate.
@@ -110,10 +111,8 @@ pub struct AutoVerifyInput {
     pub offline: bool,
     /// State store owning the capability + trust-root cache layouts.
     pub state: StateStore,
-    /// `OCX_SIGSTORE_TRUSTED_ROOT` override, if set.
-    pub trusted_root_env: Option<PathBuf>,
-    /// Operator `[trust.sigstore]` from `config.toml`, if configured.
-    pub sigstore_trust: Option<ocx_trust::SigstoreTrust>,
+    /// Operator `[sigstore."<authority>"]` tables from `config.toml`, if configured.
+    pub sigstore_trust: Option<ocx_trust::SigstoreInstances>,
     /// `$OCX_HOME/sigstore/trusted-root.json` convention path, if resolvable.
     pub home_trusted_root: Option<PathBuf>,
     /// Resolved user opt-out.
@@ -132,18 +131,31 @@ impl AutoVerify {
             rekor_url: input.rekor_url,
             offline: input.offline,
             state: input.state,
-            trusted_root_env: input.trusted_root_env,
             sigstore_trust: input.sigstore_trust,
             home_trusted_root: input.home_trusted_root,
             user_opted_out: input.user_opted_out,
             trust_root: Arc::new(OnceCell::new()),
             local_trust_root: Arc::new(OnceCell::new()),
+            instance_trust_roots: Arc::new(Mutex::new(HashMap::new())),
             warned: Arc::new(AtomicBool::new(false)),
             declarations: Arc::new(Mutex::new(HashMap::new())),
             referrer_source: ReferrerSource::default(),
             overlay_clients: Arc::new(Mutex::new(HashMap::new())),
             accepted: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    /// The convention path of `instance`'s trusted root, beside the public instance's:
+    /// `sigstore/instances/<host>_<port>/trusted-root.json`. `None` when no home is known or the authority is an
+    /// IPv6 literal, whose table must name its root.
+    fn home_root_of(&self, instance: &SigstoreAuthority) -> Option<PathBuf> {
+        let sigstore_dir = self.home_trusted_root.as_deref()?.parent()?;
+        Some(
+            sigstore_dir
+                .join("instances")
+                .join(instance.convention_dir_name()?)
+                .join("trusted-root.json"),
+        )
     }
 
     /// The referrer digests a lookup-only verify accepted for `subject` on `registry`: the referrer manifest, or
@@ -446,7 +458,7 @@ impl PackageManager {
             RoundsDecision::Uncovered => return Ok(false),
         };
 
-        let (trust_root, transparency, keyless_skipped) = self.round_trust(auto_verify, resolved, &mut rounds).await?;
+        let (trust_roots, transparency, keyless_skipped) = self.round_trust(auto_verify, resolved, &mut rounds).await?;
 
         // Publisher round first: its refusal names the publishers, which is the more useful message when both fail.
         if let Some(publishers) = &rounds.publishers {
@@ -454,7 +466,7 @@ impl PackageManager {
                 auto_verify,
                 resolved,
                 std::slice::from_ref(publishers),
-                trust_root,
+                &trust_roots,
                 transparency,
             )
             .await
@@ -468,7 +480,7 @@ impl PackageManager {
             })?;
         }
         if !rounds.operator.is_empty() {
-            self.verify_round(auto_verify, resolved, &rounds.operator, trust_root, transparency)
+            self.verify_round(auto_verify, resolved, &rounds.operator, &trust_roots, transparency)
                 .await?;
         }
 
@@ -476,18 +488,20 @@ impl PackageManager {
         Ok(rounds.publishers.is_some())
     }
 
-    /// The trust root and transparency treatment for this package's rounds.
+    /// The trust roots and transparency treatment for this package's rounds, one root per Sigstore instance a
+    /// keyless entry names.
     ///
-    /// A keyless candidate needs the full root, resolved at most once per batch. A key candidate needs none: its
-    /// log entry is checked only against a root already local, so a key-only install on a fresh home makes no
-    /// Sigstore request. When the full root cannot be had and a round also lists a key, the keyless candidates
-    /// fail alone and the key candidates still count; a keyless-only round keeps the resolution error.
-    async fn round_trust<'a>(
+    /// A keyless candidate needs the full root of its instance, resolved at most once per batch. A key candidate
+    /// needs none: its log entry is checked only against a root already local, so a key-only install on a fresh home
+    /// makes no Sigstore request. An entry naming an instance with no local table contributes no root and matches
+    /// nobody. When a full root cannot be had and a round also lists a key, the keyless candidates fail alone and
+    /// the key candidates still count; a keyless-only round keeps the resolution error.
+    async fn round_trust(
         &self,
-        auto_verify: &'a AutoVerify,
+        auto_verify: &AutoVerify,
         resolved: &ocx_oci::PackageRef,
         rounds: &mut SignerRounds,
-    ) -> Result<(&'a TrustRoot, Transparency, bool), PackageErrorKind> {
+    ) -> Result<(Vec<TrustRoot>, Transparency, bool), PackageErrorKind> {
         let backends = || {
             rounds
                 .publishers
@@ -495,13 +509,21 @@ impl PackageManager {
                 .chain(&rounds.operator)
                 .flat_map(|policy| &policy.backends)
         };
-        let has_keyless = backends().any(|backend| matches!(backend, ocx_trust::PolicyBackend::Keyless(_)));
-        let has_key = backends().any(|backend| matches!(backend, ocx_trust::PolicyBackend::Key(_)));
+        let instances: BTreeSet<SigstoreAuthority> = backends()
+            .filter_map(|backend| match backend {
+                PolicyBackend::Keyless(keyless) => Some(keyless.instance.clone()),
+                PolicyBackend::Key(_) => None,
+            })
+            .collect();
+        let has_key = backends().any(|backend| matches!(backend, PolicyBackend::Key(_)));
 
         let mut keyless_skipped = false;
-        if has_keyless {
-            match self.auto_verify_trust_root(auto_verify, resolved).await {
-                Ok(root) => return Ok((root, Transparency::Verify, false)),
+        if !instances.is_empty() {
+            match self.instance_roots(auto_verify, resolved, &instances).await {
+                Ok(roots) if !roots.is_empty() => return Ok((roots, Transparency::Verify, false)),
+                // Every named instance lacks a table: no keyless candidate can match, and the local root below
+                // lets the key candidates, if any, still count.
+                Ok(_) => {}
                 Err(error) if has_key => {
                     // A keyless candidate on a root that cannot check it aborts the scan, so it is dropped from
                     // the rounds instead; a round left with no key to try keeps the resolution error.
@@ -524,7 +546,7 @@ impl PackageManager {
             .local_trust_root
             .get_or_try_init(|| async {
                 let local = resolve_local_trust_root(
-                    auto_verify.trusted_root_env.as_deref(),
+                    None,
                     auto_verify.sigstore_trust.as_ref(),
                     auto_verify.home_trusted_root.as_deref(),
                     &signing_state,
@@ -535,7 +557,62 @@ impl PackageManager {
             })
             .await
             .map_err(|kind| verify_kind(resolved, kind))?;
-        Ok((local, Transparency::VerifyIfRootAvailable, keyless_skipped))
+        Ok((
+            vec![local.clone()],
+            Transparency::VerifyIfRootAvailable,
+            keyless_skipped,
+        ))
+    }
+
+    /// The full trust root of each of `instances` that has a local table, the public instance first.
+    ///
+    /// Each instance's root comes from its own table, its convention file, the cache, then TUF (public only).
+    async fn instance_roots(
+        &self,
+        auto_verify: &AutoVerify,
+        resolved: &ocx_oci::PackageRef,
+        instances: &BTreeSet<SigstoreAuthority>,
+    ) -> Result<Vec<TrustRoot>, PackageErrorKind> {
+        let public = SigstoreAuthority::public();
+        let mut roots = Vec::with_capacity(instances.len());
+        if instances.contains(&public) {
+            roots.push(self.auto_verify_trust_root(auto_verify, resolved).await?.clone());
+        }
+        for instance in instances.iter().filter(|instance| **instance != public) {
+            if auto_verify
+                .sigstore_trust
+                .as_ref()
+                .is_none_or(|tables| tables.get(instance).is_none())
+            {
+                continue;
+            }
+            let cell = auto_verify
+                .instance_trust_roots
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .entry(instance.clone())
+                .or_default()
+                .clone();
+            let signing_state = SigningStatePaths::new(auto_verify.state.root());
+            let home_root = auto_verify.home_root_of(instance);
+            let rekor_cache_key = cache_key_for_rekor(&auto_verify.rekor_url);
+            let root = cell
+                .get_or_try_init(|| {
+                    resolve_instance_trust_root(
+                        instance,
+                        None,
+                        auto_verify.sigstore_trust.as_ref(),
+                        home_root.as_deref(),
+                        &signing_state,
+                        &rekor_cache_key,
+                        auto_verify.offline,
+                    )
+                })
+                .await
+                .map_err(|kind| verify_kind(resolved, kind))?;
+            roots.push(root.clone());
+        }
+        Ok(roots)
     }
 
     /// The batch's trust root, resolved on first use and memoized on success only, so a failure retries
@@ -552,7 +629,7 @@ impl PackageManager {
             .trust_root
             .get_or_try_init(|| async {
                 let root = resolve_trust_root(
-                    auto_verify.trusted_root_env.as_deref(),
+                    None,
                     auto_verify.sigstore_trust.as_ref(),
                     auto_verify.home_trusted_root.as_deref(),
                     &signing_state,
@@ -581,52 +658,77 @@ impl PackageManager {
     }
 
     /// One signer round: first match only, signatures only.
+    ///
+    /// One pass per instance root; a pass judges only the entries of its own instance, so the round holds when any
+    /// pass does, and a failed round reports the first pass's refusal.
     async fn verify_round(
         &self,
         auto_verify: &AutoVerify,
         resolved: &ocx_oci::PackageRef,
         policies: &[CompiledPolicy],
-        trust_root: &TrustRoot,
+        trust_roots: &[TrustRoot],
         transparency: Transparency,
     ) -> Result<(), PackageErrorKind> {
         let home_blobs = self.file_structure().blobs.root();
         let client = auto_verify.client_for(home_blobs, resolved.registry());
-        let options = VerifyOptions {
-            policies,
-            client: &client,
-            trust_root,
-            rekor_url: &auto_verify.rekor_url,
-            offline: auto_verify.offline,
-            state: &auto_verify.state,
-            no_cache: false,
-            // Signatures only: a subject whose referrers are all attestations fails closed.
-            content: VerifyContentMode::Signature,
-            // Default discovery order and no unlogged keyless sidecar: an install gate must not widen what counts
-            // as signed.
-            signature_format: None,
-            allow_unlogged_signature: false,
-            // First match only: `true` runs full crypto over every candidate on every covered install, unread.
-            report_all: false,
-            transparency,
-        };
-        match self.verify_one(resolved, None, options).await {
-            Ok(report) => {
-                if matches!(auto_verify.referrer_source, ReferrerSource::LookupOnly(_)) {
-                    auto_verify
-                        .accepted
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .extend(report.signatures.into_iter().map(|signature| {
-                            (
-                                resolved.registry().to_owned(),
-                                signature.subject_digest,
-                                signature.referrer_digest,
-                            )
-                        }));
+        let mut first_refusal = None;
+        for trust_root in trust_roots {
+            let options = VerifyOptions {
+                policies,
+                client: &client,
+                trust_root,
+                rekor_url: &auto_verify.rekor_url,
+                offline: auto_verify.offline,
+                state: &auto_verify.state,
+                no_cache: false,
+                // Signatures only: a subject whose referrers are all attestations fails closed.
+                content: VerifyContentMode::Signature,
+                // Default discovery order and no unlogged keyless sidecar: an install gate must not widen what
+                // counts as signed.
+                signature_format: None,
+                allow_unlogged_signature: false,
+                // First match only: `true` runs full crypto over every candidate on every covered install, unread.
+                report_all: false,
+                transparency,
+            };
+            match self.verify_one(resolved, None, options).await {
+                Ok(report) => {
+                    if matches!(auto_verify.referrer_source, ReferrerSource::LookupOnly(_)) {
+                        auto_verify
+                            .accepted
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .extend(report.signatures.into_iter().map(|signature| {
+                                (
+                                    resolved.registry().to_owned(),
+                                    signature.subject_digest,
+                                    signature.referrer_digest,
+                                )
+                            }));
+                    }
+                    return Ok(());
                 }
-                Ok(())
+                Err(error) => {
+                    first_refusal.get_or_insert(error);
+                }
             }
-            Err(error) => Err(auto_verify.name_unexported(error.kind, home_blobs, resolved).await),
+        }
+        match first_refusal {
+            Some(error) => {
+                // A certificate no listed instance's root vouches for is a signer nobody listed (77), not
+                // corrupt data: the install gate judges identity, and the chain is only how an instance is told apart.
+                let kind = match error.kind {
+                    PackageErrorKind::Internal(crate::Error::Verify(verify))
+                        if matches!(verify.kind, VerifyErrorKind::CertChainInvalid) =>
+                    {
+                        verify_kind(resolved, VerifyErrorKind::IdentityMismatch)
+                    }
+                    other => other,
+                };
+                Err(auto_verify.name_unexported(kind, home_blobs, resolved).await)
+            }
+            // No root at all: nothing was judged, and a pass that judged nothing must not count as one.
+            None => Err(verify_kind(resolved, VerifyErrorKind::TrustRootUnavailable)),
         }
     }
 }
@@ -689,6 +791,7 @@ mod tests {
             scope: Some(ocx_trust::ScopeSpec::Prefix(format!("{REGISTRY}/{REPO}"))),
             builder: None,
             signers: vec![ocx_trust::SignerSpec::Keyless(ocx_trust::KeylessMatcher {
+                sigstore: None,
                 identity: Some("you@example.com".into()),
                 identity_regexp: None,
                 oidc_issuer: Some("https://example.com".into()),
@@ -743,7 +846,6 @@ mod tests {
             rekor_url,
             offline: false,
             state,
-            trusted_root_env: None,
             sigstore_trust: None,
             home_trusted_root: None,
             user_opted_out: false,
@@ -955,13 +1057,15 @@ mod tests {
         signatures_locked: bool,
         user_opted_out: bool,
         offline: bool,
-        /// `OCX_SIGSTORE_TRUSTED_ROOT`; `None` leaves no local trust root at all.
+        /// The convention-file trust root; `None` leaves no local trust root at all.
         trusted_root: Option<std::path::PathBuf>,
         /// The source routes the name, so a materializing resolve records a routing pointer.
         routes: bool,
         referrer_source: ReferrerSource,
         /// Replaces the index built from the golden source, for a scenario that must hold index reads.
         index: Option<ocx_index::Index>,
+        /// The `[sigstore."<authority>"]` tables.
+        sigstore_trust: Option<ocx_trust::SigstoreInstances>,
     }
 
     impl GoldenScenario {
@@ -977,6 +1081,7 @@ mod tests {
                 routes: false,
                 referrer_source: ReferrerSource::default(),
                 index: None,
+                sigstore_trust: None,
             }
         }
     }
@@ -1030,9 +1135,8 @@ mod tests {
             rekor_url: Url::parse("http://127.0.0.1:3000").unwrap(),
             offline: scenario.offline,
             state: StateStore::new(root.join("state")),
-            trusted_root_env: scenario.trusted_root,
-            sigstore_trust: None,
-            home_trusted_root: None,
+            sigstore_trust: scenario.sigstore_trust,
+            home_trusted_root: scenario.trusted_root,
             user_opted_out: scenario.user_opted_out,
         })
         .with_referrer_source(scenario.referrer_source);
@@ -1072,6 +1176,7 @@ mod tests {
             builder: None,
             signers: vec![
                 ocx_trust::SignerSpec::Keyless(ocx_trust::KeylessMatcher {
+                    sigstore: None,
                     identity: Some(GOLDEN_IDENTITY.into()),
                     identity_regexp: None,
                     oidc_issuer: Some(GOLDEN_ISSUER.into()),
@@ -1080,6 +1185,7 @@ mod tests {
                 ocx_trust::SignerSpec::Key(ocx_trust::KeyMatcher {
                     key: None,
                     key_pem: Some(GOLDEN_PUBLIC_KEY_PEM.to_string()),
+                    sigstore: None,
                 }),
             ],
             system_locked: false,
@@ -1251,6 +1357,7 @@ mod tests {
             signers: vec![ocx_trust::SignerSpec::Key(ocx_trust::KeyMatcher {
                 key: None,
                 key_pem: Some(GOLDEN_PUBLIC_KEY_PEM.to_string()),
+                sigstore: None,
             })],
             system_locked: false,
         }
@@ -2250,5 +2357,75 @@ mod tests {
         .expect_err("the only candidate left is a key that did not sign");
         let message = rounds_refusal(error).to_string();
         assert!(message.contains("keyless publishers were skipped"), "{message}");
+    }
+
+    /// The golden trusted root as the table of `authority`.
+    fn instance_table(authority: &str) -> ocx_trust::SigstoreInstances {
+        toml::from_str(&format!(
+            "[\"{authority}\"]\ntrusted_root_json = '''{GOLDEN_TRUSTED_ROOT}'''\n"
+        ))
+        .expect("an instance table parses")
+    }
+
+    fn keyless_publisher_on(authority: &str) -> serde_json::Value {
+        serde_json::json!({
+            "kind": "keyless",
+            "identity": GOLDEN_IDENTITY,
+            "oidc_issuer": GOLDEN_ISSUER,
+            "sigstore": authority,
+        })
+    }
+
+    /// A publisher naming `localhost:5555` is verified against that instance's own root.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_publisher_naming_an_instance_verifies_against_that_instances_root() {
+        verify_golden_with(GoldenScenario {
+            sigstore_trust: Some(instance_table("localhost:5555")),
+            ..GoldenScenario::new(Some(serde_json::json!([keyless_publisher_on("localhost:5555")])))
+        })
+        .await
+        .expect("the instance's own root verifies the package");
+    }
+
+    /// The public override never stands in for a private instance: the entry on `localhost:5555` has no table and
+    /// matches nobody, so the same signature that verified above is a mismatch.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_entry_naming_an_instance_with_no_table_matches_nobody() {
+        let root = TempDir::new().unwrap();
+        let error = verify_golden_with(GoldenScenario {
+            trusted_root: Some(trusted_root_in(root.path())),
+            ..GoldenScenario::new(Some(serde_json::json!([keyless_publisher_on("localhost:5555")])))
+        })
+        .await
+        .expect_err("no table, no match");
+        assert!(matches!(rounds_refusal(error), RoundsError::PublisherMismatch { .. }));
+    }
+
+    /// A table for another instance does not admit an entry that names a third.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_table_for_another_instance_does_not_admit_the_entry() {
+        let error = verify_golden_with(GoldenScenario {
+            sigstore_trust: Some(instance_table("other.example:5555")),
+            ..GoldenScenario::new(Some(serde_json::json!([keyless_publisher_on("localhost:5555")])))
+        })
+        .await
+        .expect_err("the named instance has no table");
+        assert!(matches!(rounds_refusal(error), RoundsError::PublisherMismatch { .. }));
+    }
+
+    /// The same signer listed on the public instance does not verify against the private instance's root: the
+    /// instance of an entry decides which root judges it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_public_entry_is_not_judged_by_a_private_instances_root() {
+        let error = verify_golden_with(GoldenScenario {
+            sigstore_trust: Some(instance_table("localhost:5555")),
+            ..GoldenScenario::new(Some(serde_json::json!([golden_keyless_publisher(GOLDEN_IDENTITY)])))
+        })
+        .await
+        .expect_err("the public instance has no root offline");
+        assert!(
+            matches!(round_outcome(error), Ok(VerifyErrorKind::OfflineNoPinnedRekorKey)),
+            "the public entry still needs the public root"
+        );
     }
 }

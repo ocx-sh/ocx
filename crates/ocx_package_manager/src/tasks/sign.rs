@@ -268,7 +268,7 @@ pub(super) async fn shared_signer<'slot>(
 /// The key backend's error when the key cannot be read or decrypted (an unresolvable password reference
 /// included, never read as the empty password), and
 /// [`SignErrorKind::UnsupportedKeyBackend`](ocx_sign::sign::SignErrorKind) for a scheme with no implementation.
-pub(super) async fn build_signer(
+pub async fn build_signer(
     key: Option<ocx_trust::key_ref::KeyRef>,
     rekor_upload: bool,
     rekor_url: Url,

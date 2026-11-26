@@ -10,6 +10,9 @@ from src import OcxRunner, PackageInfo, static_index
 from src.registry import fetch_manifest_raw, fetch_platform_manifest_digest
 from src.runner import registry_dir
 
+# The registry routed to the fixture index sets `index_signature = "off"`: this module does not test the
+# catalog signature check (test_index_signature.py does), so it expects no signature request and no WARN.
+
 pytestmark = pytest.mark.command("index*")
 
 IMAGE_INDEX_MEDIA_TYPE = "application/vnd.oci.image.index.v1+json"
@@ -521,7 +524,7 @@ def test_index_catalog_tags_remote_fetch_failure_exits_nonzero(
     broken_root.write_bytes(b"not valid json")
 
     config_path = Path(ocx.env["OCX_HOME"]) / "config.toml"
-    config_path.write_text(f'[registries."{namespace}"]\nindex = "{index_server.base_url}"\n')
+    config_path.write_text(f'[registries."{namespace}"]\nindex = "{index_server.base_url}"\nindex_signature = "off"\n')
     ocx.env["OCX_INSECURE_REGISTRIES"] = f"{ocx.registry},{index_server.host}"
 
     result = ocx.plain("--remote", "index", "catalog", "--with-tags", namespace, check=False)
@@ -570,7 +573,7 @@ def test_remote_index_catalog_fails_when_the_index_serves_no_catalog(
     namespace = "127.0.0.1:1"
     static_index.write_config(index_server.root)
     config_path = Path(ocx.env["OCX_HOME"]) / "config.toml"
-    config_path.write_text(f'[registries."{namespace}"]\nindex = "{index_server.base_url}"\n')
+    config_path.write_text(f'[registries."{namespace}"]\nindex = "{index_server.base_url}"\nindex_signature = "off"\n')
     ocx.env["OCX_INSECURE_REGISTRIES"] = f"{ocx.registry},{index_server.host}"
 
     result = ocx.plain("--remote", "index", "catalog", namespace, check=False)
@@ -636,7 +639,7 @@ def test_index_catalog_tags_bounds_its_in_flight_listings(
     )
 
     config_path = Path(ocx.env["OCX_HOME"]) / "config.toml"
-    config_path.write_text(f'[registries."{namespace}"]\nindex = "{index_server.base_url}"\n')
+    config_path.write_text(f'[registries."{namespace}"]\nindex = "{index_server.base_url}"\nindex_signature = "off"\n')
     ocx.env["OCX_INSECURE_REGISTRIES"] = f"{ocx.registry},{index_server.host}"
 
     index_server.hold_seconds = 0.5

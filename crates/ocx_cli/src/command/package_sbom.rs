@@ -15,7 +15,8 @@ use std::process::ExitCode;
 use clap::Parser;
 use tokio::io::AsyncWriteExt as _;
 
-use ocx_package_manager::{Round, SbomOptions};
+use ocx_package_manager::error::PackageError;
+use ocx_package_manager::{InspectOptions, InspectResult, Round, SbomOptions, SbomReport};
 use ocx_sign::attest::predicate::PredicateType;
 use ocx_sign::sbom;
 use ocx_sign::verify::{
@@ -55,7 +56,7 @@ pub struct PackageSbom {
     /// types, a candidate without one or a tie on the newest is refused
     /// (`multiple_attestations`): narrow with --type. Writing to a terminal
     /// is refused - redirect to a file or a pipe.
-    #[clap(long = "output", short = 'o', value_name = "PATH", conflicts_with = "summary")]
+    #[clap(long = "output", short = 'o', value_name = "PATH", conflicts_with_all = ["summary", "dependencies"])]
     output: Option<PathBuf>,
 
     /// Parse each SBOM and report component counts (CycloneDX 1.5-1.7 only).
@@ -86,7 +87,7 @@ pub struct PackageSbom {
         long = "certificate-identity",
         value_name = "IDENTITY",
         requires = "certificate_oidc_issuer",
-        conflicts_with = "key"
+        conflicts_with_all = ["key", "dependencies"]
     )]
     certificate_identity: Option<String>,
 
@@ -100,9 +101,15 @@ pub struct PackageSbom {
         long = "certificate-oidc-issuer",
         value_name = "URL",
         requires = "certificate_identity",
-        conflicts_with = "key"
+        conflicts_with_all = ["key", "dependencies"]
     )]
     certificate_oidc_issuer: Option<String>,
+
+    #[clap(flatten)]
+    sigstore: options::sigstore_instance::SigstoreInstanceOpt,
+
+    #[clap(flatten)]
+    dependencies: options::Dependencies,
 
     /// Verify against a pinned public key instead of a Fulcio certificate.
     ///
@@ -120,7 +127,7 @@ pub struct PackageSbom {
     /// Supplies the Fulcio CA, the CT-log key and the pinned Rekor public key
     /// for air-gapped verification against a local trust-root mirror. No TUF
     /// network fetch is performed. Takes precedence over the
-    /// OCX_SIGSTORE_TRUSTED_ROOT env var and over [trust.sigstore] in
+    /// OCX_SIGSTORE_TRUSTED_ROOT env var and over the `[sigstore."<host>"]` tables in
     /// config.toml. See
     /// https://ocx.sh/docs/guides/self-hosted-sigstore/
     #[clap(long = "sigstore-trusted-root", value_name = "PATH")]
@@ -128,7 +135,7 @@ pub struct PackageSbom {
 
     /// Rekor transparency-log endpoint
     ///
-    /// Defaults to [trust.sigstore].rekor_url, else public Rekor.
+    /// Defaults to the public instance's `[sigstore."fulcio.sigstore.dev"]` table `rekor_url`, else public Rekor.
     #[clap(long = "rekor-url", value_name = "URL")]
     rekor_url: Option<String>,
 
@@ -168,59 +175,22 @@ impl PackageSbom {
             .reference()
             .map_err(|error| VerifyError::new(identifier.clone(), VerifyErrorKind::from(error)))?;
 
-        // SSRF-checked (CWE-918) through `verify`'s ladder, or the two disagree on the Rekor keying their
-        // shared trust-root cache.
-        let rekor_url = package_sign_common::resolve_rekor_endpoint(
-            context.config_trust_sigstore(),
-            &identifier,
-            self.rekor_url.as_deref(),
-        )?;
-
         let destination = destination(self.output.as_deref());
         if let Some(destination) = &destination {
             refuse_tty_output(destination, std::io::stdout().is_terminal())?;
         }
 
-        let client = context.verify_client();
-        let offline = context.is_offline();
-        let (verification, rounds) = self.mode(&context, &identifier, key.as_ref(), &rekor_url).await?;
-
-        // `TrustRoot::default()` has no anchors, so leaked into a signed pass it fails closed (`NoCtLogKey`).
-        let (trust_root, transparency) = match verification {
-            VerificationMode::Permissive => (TrustRoot::default(), Transparency::Verify),
-            VerificationMode::Demand => {
-                Box::pin(package_sign_common::trust_for_rounds(
-                    &context,
-                    &identifier,
-                    &rounds,
-                    &ocx_sign::verify::trust_cache::cache_key_for_rekor(&rekor_url),
-                    offline,
-                    self.trusted_root.as_deref(),
-                ))
-                .await?
-            }
-        };
-
-        let options = SbomOptions {
-            policies: &[],
-            client,
-            trust_root: &trust_root,
-            rekor_url: &rekor_url,
-            offline,
-            state: &context.file_structure().state,
-            no_cache: self.no_cache,
-            predicate_type: self.predicate_type.clone(),
-            verification,
+        let root = Box::pin(self.scan_package(
+            &context,
+            &identifier,
+            self.platform.as_ref(),
             signature_format,
-            transparency,
-        };
-        // Re-rooted on the bare `VerifyError` (`PackageError` has no `#[source]`), or every failure exits 1
-        // (`each_verify_kind_keeps_its_own_exit_code_through_the_wrapper`).
-        let report = context
-            .manager()
-            .sbom_rounds(&identifier, self.platform.as_ref(), &rounds, options)
-            .await
-            .map_err(package_sign_common::verify_error_into_anyhow)?;
+            key.as_ref(),
+            None,
+        ))
+        .await?;
+        let verification = root.verification;
+        let report = root.report;
 
         match destination {
             Some(destination) => {
@@ -236,13 +206,55 @@ impl PackageSbom {
                 write_predicate(&destination, selected.document()).await?;
             }
             None => {
-                let listing = self.listing(
-                    verification,
+                let (mut entries, mut refusals) = self.entries(
+                    &identifier,
                     report.attestations,
                     report.unverified,
                     report.refused,
                     &report.shadowed,
                 );
+                if self.dependencies.enabled(false) {
+                    let dependencies = self.closure_dependencies(&context, &identifier).await?;
+                    let scanned = scan_dependencies(dependencies, |dependency| {
+                        let (context, key) = (&context, key.as_ref());
+                        async move {
+                            // A closure member is a concrete platform manifest, so no platform narrows it.
+                            let scan = Box::pin(self.scan_package(
+                                context,
+                                &dependency,
+                                None,
+                                signature_format,
+                                key,
+                                Some(verification),
+                            ))
+                            .await?;
+                            Ok(scan.report)
+                        }
+                    })
+                    .await?;
+                    for (package, outcome) in scanned {
+                        match outcome {
+                            DependencyScan::Report(report) => {
+                                let (more_entries, more_refusals) = self.entries(
+                                    &package,
+                                    report.attestations,
+                                    report.unverified,
+                                    report.refused,
+                                    &report.shadowed,
+                                );
+                                entries.extend(more_entries);
+                                refusals.extend(more_refusals);
+                            }
+                            DependencyScan::NoAttestation => {
+                                refusals.push(missing_refusal(&package, VerifyErrorKind::AttestationNotFound));
+                            }
+                            DependencyScan::NoSignatures => {
+                                refusals.push(missing_refusal(&package, VerifyErrorKind::NoSignaturesFound));
+                            }
+                        }
+                    }
+                }
+                let listing = SbomListingReport::new(listing_verification(verification), entries, refusals);
                 context.api().report(&listing)?;
                 if let Some(error) = no_usable_entry(&identifier, &listing) {
                     return Err(error);
@@ -250,6 +262,132 @@ impl PackageSbom {
             }
         }
         Ok(ExitCode::SUCCESS)
+    }
+
+    /// Scans one package under its own signer set: its rekor endpoint, trust root and publisher rounds.
+    ///
+    /// `inherited` is the mode the root resolved, so a closure is never listed half verified and half not.
+    async fn scan_package(
+        &self,
+        context: &crate::app::Context,
+        identifier: &ocx_oci::PackageRef,
+        platform: Option<&ocx_oci::Platform>,
+        signature_format: Option<ocx_sign::sign::SignatureFormat>,
+        key: Option<&ocx_trust::key_ref::KeyRef>,
+        inherited: Option<VerificationMode>,
+    ) -> anyhow::Result<PackageScan> {
+        let instance = self.sigstore.instance();
+        // SSRF-checked (CWE-918) through `verify`'s ladder, or the two disagree on the Rekor keying their
+        // shared trust-root cache.
+        let rekor_url = package_sign_common::resolve_rekor_endpoint(
+            context.config_trust_sigstore(),
+            identifier,
+            self.rekor_url.as_deref(),
+            &instance,
+        )?;
+
+        let client = context.verify_client();
+        let offline = context.is_offline();
+        let requested = inherited.or_else(|| self.verification.requested());
+        let (verification, rounds) = self.mode(context, identifier, key, &rekor_url, requested).await?;
+
+        // One pass per instance a keyless entry names; the flag and the variable override the selected one only.
+        let instances = match verification {
+            VerificationMode::Permissive => vec![instance.clone()],
+            VerificationMode::Demand => package_sign_common::round_instances(&rounds, &instance),
+        };
+        let selected_override = package_sign_common::selected_trust_root_override(self.trusted_root.as_deref());
+        let mut first_refusal = None;
+        for pass_instance in instances {
+            let (pass_rekor, pass_override) = if pass_instance == instance {
+                (rekor_url.clone(), selected_override.as_deref())
+            } else {
+                let endpoint = package_sign_common::resolve_rekor_endpoint(
+                    context.config_trust_sigstore(),
+                    identifier,
+                    None,
+                    &pass_instance,
+                )?;
+                (endpoint, None)
+            };
+            // `TrustRoot::default()` has no anchors, so leaked into a signed pass it fails closed (`NoCtLogKey`).
+            let (trust_root, transparency) = match verification {
+                VerificationMode::Permissive => (TrustRoot::default(), Transparency::Verify),
+                VerificationMode::Demand => {
+                    Box::pin(package_sign_common::trust_for_rounds(
+                        context,
+                        identifier,
+                        &rounds,
+                        &pass_instance,
+                        &ocx_sign::verify::trust_cache::cache_key_for_rekor(&pass_rekor),
+                        offline,
+                        pass_override,
+                    ))
+                    .await?
+                }
+            };
+
+            let options = SbomOptions {
+                policies: &[],
+                client,
+                trust_root: &trust_root,
+                rekor_url: &pass_rekor,
+                offline,
+                state: &context.file_structure().state,
+                no_cache: self.no_cache,
+                predicate_type: self.predicate_type.clone(),
+                verification,
+                signature_format,
+                transparency,
+            };
+            // Re-rooted on the bare `VerifyError` (`PackageError` has no `#[source]`), or every failure exits 1
+            // (`each_verify_kind_keeps_its_own_exit_code_through_the_wrapper`).
+            match context
+                .manager()
+                .sbom_rounds(identifier, platform, &rounds, options)
+                .await
+            {
+                Ok(report) => return Ok(PackageScan { verification, report }),
+                Err(error) => {
+                    first_refusal.get_or_insert(error);
+                }
+            }
+        }
+        Err(first_refusal.map_or_else(
+            || VerifyError::new(identifier.clone(), VerifyErrorKind::TrustRootUnavailable).into(),
+            package_sign_common::verify_error_into_anyhow,
+        ))
+    }
+
+    /// The packages of `root`'s dependency closure, root excluded, read from registry metadata alone: the
+    /// walk behind `ocx package inspect --closure` fetches manifests and config blobs and installs nothing.
+    async fn closure_dependencies(
+        &self,
+        context: &crate::app::Context,
+        root: &ocx_oci::PackageRef,
+    ) -> anyhow::Result<Vec<ocx_oci::PackageRef>> {
+        let platform = crate::conventions::platform_or_default(self.platform.clone());
+        let options = InspectOptions {
+            resolve: false,
+            closure: true,
+        };
+        let result = context
+            .manager()
+            .inspect(root, platform, options)
+            .await
+            .map_err(|kind| anyhow::Error::from(PackageError::new(root.clone(), kind)))?;
+        let closure = match result {
+            InspectResult::Manifest { closure, .. } | InspectResult::Resolved { closure, .. } => closure,
+            InspectResult::Candidates { .. } => None,
+        };
+        let closure =
+            closure.ok_or_else(|| anyhow::anyhow!("the dependency closure of {root} could not be resolved"))?;
+        Ok(closure
+            .nodes
+            .into_iter()
+            .filter(|node| !node.is_root)
+            .map(|node| node.identifier.as_identifier().clone())
+            .collect())
     }
 
     /// Resolves the verification mode and the policies to verify against; `--no-verify` resolves
@@ -260,8 +398,8 @@ impl PackageSbom {
         identifier: &ocx_oci::PackageRef,
         key: Option<&ocx_trust::key_ref::KeyRef>,
         rekor_url: &ocx_oci::endpoint::Url,
+        requested: Option<VerificationMode>,
     ) -> anyhow::Result<(VerificationMode, Vec<Round>)> {
-        let requested = self.verification.requested();
         if requested == Some(VerificationMode::Permissive) {
             if key.is_some() {
                 return Err(crate::error::UsageError::new(
@@ -274,8 +412,9 @@ impl PackageSbom {
         package_sign_common::validate_explicit_trust_root(
             context,
             identifier,
+            &self.sigstore.instance(),
             &ocx_sign::verify::trust_cache::cache_key_for_rekor(rekor_url),
-            self.trusted_root.as_deref(),
+            package_sign_common::selected_trust_root_override(self.trusted_root.as_deref()).as_deref(),
         )
         .await?;
         let rounds = package_sign_common::resolve_rounds(
@@ -284,6 +423,7 @@ impl PackageSbom {
             self.certificate_identity.as_deref(),
             self.certificate_oidc_issuer.as_deref(),
             key,
+            &self.sigstore.instance(),
         )
         .await?;
         match resolve_mode(requested, rounds.iter().all(|round| round.policies.is_empty())) {
@@ -293,20 +433,21 @@ impl PackageSbom {
         }
     }
 
-    /// Projects a scan into the report DTO, summarizing under `--summary`; an unsummarizable document
-    /// refuses its own entry, never the listing.
-    fn listing(
+    /// Projects one package's scan into report entries, summarizing under `--summary`; an unsummarizable
+    /// document refuses its own entry, never the listing.
+    fn entries(
         &self,
-        verification: VerificationMode,
+        package: &ocx_oci::PackageRef,
         attestations: Vec<AttestationMatch>,
         unverified: Vec<UnverifiedSbom>,
         refused: Vec<RefusedCandidate>,
         shadowed: &BTreeSet<ocx_oci::Digest>,
-    ) -> SbomListingReport {
+    ) -> (Vec<SbomEntry>, Vec<RefusedEntry>) {
         let mut entries = Vec::with_capacity(attestations.len() + unverified.len());
         let mut refusals: Vec<RefusedEntry> = refused
             .into_iter()
             .map(|candidate| RefusedEntry {
+                package: package.clone(),
                 referrer_digest: ocx_oci::Digest::try_from(candidate.referrer_digest.as_str()).ok(),
                 reason: candidate.reason.to_string(),
                 reason_kind: crate::exit::detail_slug(ocx_exit::ClassifyErrorKind::kind_detail(&candidate.reason)),
@@ -317,6 +458,7 @@ impl PackageSbom {
             let is_shadowed = shadowed.contains(&candidate.verify.referrer_digest);
             let referrer_digest = candidate.verify.referrer_digest;
             let summary = match self.summary_for(
+                package,
                 &candidate.attestation.predicate_type,
                 candidate.attestation.predicate.get().as_bytes(),
                 &referrer_digest,
@@ -328,6 +470,7 @@ impl PackageSbom {
                 }
             };
             entries.push(SbomEntry {
+                package: package.clone(),
                 predicate_type: candidate.attestation.predicate_type,
                 verified: true,
                 shadowed: is_shadowed,
@@ -344,7 +487,12 @@ impl PackageSbom {
         for candidate in unverified {
             let is_shadowed = shadowed.contains(&candidate.referrer_digest);
             let referrer_digest = candidate.referrer_digest;
-            let summary = match self.summary_for(&candidate.predicate_type, &candidate.document, &referrer_digest) {
+            let summary = match self.summary_for(
+                package,
+                &candidate.predicate_type,
+                &candidate.document,
+                &referrer_digest,
+            ) {
                 Ok(summary) => summary,
                 Err(refusal) => {
                     refusals.push(refusal);
@@ -352,6 +500,7 @@ impl PackageSbom {
                 }
             };
             entries.push(SbomEntry {
+                package: package.clone(),
                 predicate_type: candidate.predicate_type,
                 verified: false,
                 shadowed: is_shadowed,
@@ -363,17 +512,33 @@ impl PackageSbom {
                 summary,
             });
         }
-        let verification = match verification {
-            VerificationMode::Demand => ListingVerification::Verified,
-            VerificationMode::Permissive => ListingVerification::Unverified,
-        };
-        SbomListingReport::new(verification, entries, refusals)
+        (entries, refusals)
+    }
+
+    /// One package's report, the unit the tests exercise.
+    #[cfg(test)]
+    fn listing(
+        &self,
+        package: &ocx_oci::PackageRef,
+        verification: VerificationMode,
+        attestations: Vec<AttestationMatch>,
+        unverified: Vec<UnverifiedSbom>,
+        refused: Vec<RefusedCandidate>,
+        shadowed: &BTreeSet<ocx_oci::Digest>,
+    ) -> SbomListingReport {
+        let (entries, refusals) = self.entries(package, attestations, unverified, refused, shadowed);
+        SbomListingReport::new(listing_verification(verification), entries, refusals)
     }
 
     /// The `--summary` cell for one document (`Ok(None)` without the flag), or the refusal that
     /// replaces its row.
+    #[expect(
+        clippy::result_large_err,
+        reason = "the refusal row is reported whole and built once per entry"
+    )]
     fn summary_for(
         &self,
+        package: &ocx_oci::PackageRef,
         predicate_type: &str,
         document: &[u8],
         referrer_digest: &ocx_oci::Digest,
@@ -384,10 +549,83 @@ impl PackageSbom {
         summarize(predicate_type, document)
             .map(Some)
             .map_err(|reason| RefusedEntry {
+                package: package.clone(),
                 referrer_digest: Some(referrer_digest.clone()),
                 reason,
                 reason_kind: SUMMARY_FAILED,
             })
+    }
+}
+
+/// One package's scan with the mode it ran under.
+struct PackageScan {
+    verification: VerificationMode,
+    report: SbomReport,
+}
+
+/// What scanning one closure member produced.
+enum DependencyScan {
+    Report(SbomReport),
+    /// The member carries no attestation; the root's absence is an error, a dependency's is a refused row.
+    NoAttestation,
+    /// The member was never signed at all.
+    NoSignatures,
+}
+
+/// Scans every dependency with `scan`, one at a time and each on its own signer set. Any failure but a
+/// missing attestation or a member that was never signed aborts the listing.
+async fn scan_dependencies<F, Fut>(
+    dependencies: Vec<ocx_oci::PackageRef>,
+    mut scan: F,
+) -> anyhow::Result<Vec<(ocx_oci::PackageRef, DependencyScan)>>
+where
+    F: FnMut(ocx_oci::PackageRef) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<SbomReport>>,
+{
+    let mut scanned = Vec::with_capacity(dependencies.len());
+    for dependency in dependencies {
+        let outcome = match scan(dependency.clone()).await {
+            Ok(report) => DependencyScan::Report(report),
+            Err(error) if is_attestation_not_found(&error) => DependencyScan::NoAttestation,
+            Err(error) if is_never_signed(&error) => DependencyScan::NoSignatures,
+            Err(error) => return Err(error),
+        };
+        scanned.push((dependency, outcome));
+    }
+    Ok(scanned)
+}
+
+fn is_attestation_not_found(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<VerifyError>()
+        .is_some_and(|error| matches!(error.kind, VerifyErrorKind::AttestationNotFound))
+}
+
+/// Every spelling of "no signature referrers": none, none on an index, none exported.
+fn is_never_signed(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<VerifyError>().is_some_and(|error| {
+        matches!(
+            error.kind,
+            VerifyErrorKind::NoSignaturesFound
+                | VerifyErrorKind::NoSignaturesOnIndex
+                | VerifyErrorKind::NoSignaturesNotExported
+        )
+    })
+}
+
+fn missing_refusal(package: &ocx_oci::PackageRef, kind: VerifyErrorKind) -> RefusedEntry {
+    RefusedEntry {
+        package: package.clone(),
+        referrer_digest: None,
+        reason: kind.to_string(),
+        reason_kind: crate::exit::detail_slug(ocx_exit::ClassifyErrorKind::kind_detail(&kind)),
+    }
+}
+
+fn listing_verification(mode: VerificationMode) -> ListingVerification {
+    match mode {
+        VerificationMode::Demand => ListingVerification::Verified,
+        VerificationMode::Permissive => ListingVerification::Unverified,
     }
 }
 
@@ -591,9 +829,35 @@ async fn write_stream<W: tokio::io::AsyncWrite + Unpin>(sink: &mut W, bytes: &[u
 
 #[cfg(test)]
 mod tests {
+    fn test_package() -> ocx_oci::PackageRef {
+        ocx_oci::PackageRef::parse_with_default_registry("ocx.sh/tool:1", "ocx.sh").expect("a valid identifier")
+    }
+
     use super::*;
     use crate::error_document::render_error_document;
     use ocx_package_manager::error::{PackageError, PackageErrorKind};
+
+    #[test]
+    fn sigstore_needs_a_certificate_identity() {
+        let Err(error) =
+            PackageSbom::try_parse_from(["sbom", "--sigstore", "fulcio.corp.example", "registry.example/pkg:1.0"])
+        else {
+            panic!("--sigstore alone must not parse");
+        };
+        assert_eq!(error.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+        let parsed = PackageSbom::try_parse_from([
+            "sbom",
+            "--sigstore",
+            "fulcio.corp.example",
+            "--certificate-identity",
+            "me",
+            "--certificate-oidc-issuer",
+            "https://issuer.example",
+            "registry.example/pkg:1.0",
+        ])
+        .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(parsed.sigstore.instance().as_str(), "fulcio.corp.example");
+    }
 
     fn identifier() -> ocx_oci::PackageRef {
         ocx_oci::PackageRef::parse("registry.example/pkg:1.0").expect("parse identifier")
@@ -687,6 +951,7 @@ mod tests {
         ];
 
         let report = command(&[]).listing(
+            &test_package(),
             VerificationMode::Demand,
             Vec::new(),
             Vec::new(),
@@ -713,6 +978,7 @@ mod tests {
     #[test]
     fn a_listing_with_refusals_and_no_usable_entry_fails_with_not_found() {
         let report = command(&[]).listing(
+            &test_package(),
             VerificationMode::Demand,
             Vec::new(),
             Vec::new(),
@@ -728,6 +994,7 @@ mod tests {
     #[test]
     fn a_listing_with_refusals_and_one_usable_entry_succeeds() {
         let report = command(&[]).listing(
+            &test_package(),
             VerificationMode::Demand,
             vec![attestation_match_carrying("b", "https://cyclonedx.org/bom", CYCLONEDX)],
             Vec::new(),
@@ -741,6 +1008,7 @@ mod tests {
     #[test]
     fn a_listing_with_no_candidates_at_all_is_unchanged() {
         let report = command(&[]).listing(
+            &test_package(),
             VerificationMode::Demand,
             Vec::new(),
             Vec::new(),
@@ -913,6 +1181,7 @@ mod tests {
     #[test]
     fn the_listing_carries_both_trust_classes_and_summarizes_either() {
         let demanded = command(&["--summary"]).listing(
+            &test_package(),
             VerificationMode::Demand,
             vec![attestation_match_carrying("b", "https://cyclonedx.org/bom", CYCLONEDX)],
             Vec::new(),
@@ -932,6 +1201,7 @@ mod tests {
         assert!(signed.summary.is_some());
 
         let permissive = command(&["--summary"]).listing(
+            &test_package(),
             VerificationMode::Permissive,
             Vec::new(),
             vec![unverified_sbom("c", "https://cyclonedx.org/bom", CYCLONEDX)],
@@ -1040,11 +1310,148 @@ mod tests {
         );
     }
 
+    /// The closure flag pair last-wins through the real command and defaults to the root alone.
+    #[test]
+    fn dependencies_default_off_and_last_flag_wins() {
+        assert!(!command(&[]).dependencies.enabled(false));
+        assert!(command(&["--dependencies"]).dependencies.enabled(false));
+        assert!(
+            !command(&["--dependencies", "--no-dependencies"])
+                .dependencies
+                .enabled(false)
+        );
+        assert!(
+            command(&["--no-dependencies", "--dependencies"])
+                .dependencies
+                .enabled(false)
+        );
+    }
+
+    /// Several documents cannot be one byte stream, and one pinned identity cannot speak for a closure of
+    /// different publishers: clap refuses both before any request.
+    #[test]
+    fn dependencies_conflicts_with_output_and_a_pinned_identity() {
+        use clap::error::ErrorKind;
+        let refused = |extra: &[&str]| {
+            let mut argv = vec!["sbom", "-p", "linux/amd64"];
+            argv.extend_from_slice(extra);
+            argv.push("ocx.sh/acme/tool:1.0");
+            PackageSbom::try_parse_from(argv).err().map(|error| error.kind())
+        };
+        assert_eq!(
+            refused(&["--dependencies", "--output", "-"]),
+            Some(ErrorKind::ArgumentConflict)
+        );
+        assert_eq!(
+            refused(&[
+                "--dependencies",
+                "--certificate-identity",
+                "you@example.com",
+                "--certificate-oidc-issuer",
+                "https://example.com"
+            ]),
+            Some(ErrorKind::ArgumentConflict),
+        );
+        // The negative form and the default stay compatible with both.
+        assert_eq!(refused(&["--no-dependencies", "--output", "-"]), None);
+        assert_eq!(refused(&["--dependencies", "--no-dependencies", "--output", "-"]), None);
+        assert_eq!(refused(&["--dependencies", "--summary"]), None);
+    }
+
+    fn dependency(name: &str) -> ocx_oci::PackageRef {
+        ocx_oci::PackageRef::parse_with_default_registry(&format!("ocx.sh/{name}:1"), "ocx.sh")
+            .expect("a valid identifier")
+    }
+
+    fn report_with(attestations: Vec<AttestationMatch>) -> SbomReport {
+        SbomReport {
+            attestations,
+            unverified: Vec::new(),
+            refused: Vec::new(),
+            shadowed: BTreeSet::new(),
+        }
+    }
+
+    /// Every closure member is scanned on its own, in closure order, and each entry names its own package.
+    #[tokio::test]
+    async fn each_dependency_is_scanned_alone_and_its_entries_carry_its_package() {
+        let asked = std::cell::RefCell::new(Vec::new());
+        let scanned = scan_dependencies(vec![dependency("zlib"), dependency("openssl")], |package| {
+            asked.borrow_mut().push(package.to_string());
+            let candidate = attestation_match_carrying("b", "https://cyclonedx.org/bom", CYCLONEDX);
+            async move { Ok(report_with(vec![candidate])) }
+        })
+        .await
+        .expect("both scans succeed");
+
+        assert_eq!(asked.into_inner(), ["ocx.sh/zlib:1", "ocx.sh/openssl:1"]);
+        let command = command(&[]);
+        let mut entries = Vec::new();
+        for (package, outcome) in scanned {
+            let DependencyScan::Report(report) = outcome else {
+                panic!("a scan that returned a report is a report");
+            };
+            entries.extend(
+                command
+                    .entries(&package, report.attestations, Vec::new(), Vec::new(), &BTreeSet::new())
+                    .0,
+            );
+        }
+        let packages: Vec<String> = entries.iter().map(|entry| entry.package.to_string()).collect();
+        assert_eq!(packages, ["ocx.sh/zlib:1", "ocx.sh/openssl:1"]);
+    }
+
+    /// A dependency without an attestation is one refused row; any other failure aborts the listing.
+    #[tokio::test]
+    async fn a_dependency_without_an_sbom_is_a_refusal_and_any_other_failure_aborts() {
+        let missing = |package: ocx_oci::PackageRef| async move {
+            Err::<SbomReport, _>(anyhow::Error::new(VerifyError::new(
+                package,
+                VerifyErrorKind::AttestationNotFound,
+            )))
+        };
+        let scanned = scan_dependencies(vec![dependency("zlib")], missing)
+            .await
+            .expect("a missing attestation does not abort");
+        assert!(matches!(scanned[0].1, DependencyScan::NoAttestation));
+        let refusal = missing_refusal(&scanned[0].0, VerifyErrorKind::AttestationNotFound);
+        assert_eq!(refusal.package.to_string(), "ocx.sh/zlib:1");
+        assert_eq!(refusal.reason_kind, "attestation_not_found");
+
+        let failing = |package: ocx_oci::PackageRef| async move {
+            Err::<SbomReport, _>(anyhow::Error::new(VerifyError::new(
+                package,
+                VerifyErrorKind::IdentityMismatch,
+            )))
+        };
+        let aborted = scan_dependencies(vec![dependency("zlib"), dependency("openssl")], failing).await;
+        assert_eq!(exit_code(&aborted.err().expect("a mismatch aborts")), 77);
+    }
+
+    /// A dependency that was never signed is one refused row too, whichever spelling of "no signatures" it raised.
+    #[tokio::test]
+    async fn a_dependency_that_was_never_signed_is_a_refusal_not_an_abort() {
+        let unsigned = |package: ocx_oci::PackageRef| async move {
+            Err::<SbomReport, _>(anyhow::Error::new(VerifyError::new(
+                package,
+                VerifyErrorKind::NoSignaturesFound,
+            )))
+        };
+        let scanned = scan_dependencies(vec![dependency("zlib")], unsigned)
+            .await
+            .expect("an unsigned dependency does not abort");
+        assert!(matches!(scanned[0].1, DependencyScan::NoSignatures));
+        let refusal = missing_refusal(&scanned[0].0, VerifyErrorKind::NoSignaturesFound);
+        assert_eq!(refusal.package.to_string(), "ocx.sh/zlib:1");
+        assert_eq!(refusal.reason_kind, "no_signatures_found");
+    }
+
     /// The refusal channel is shared too: an unsigned document `--summary`
     /// cannot read costs its own entry and not the listing.
     #[test]
     fn an_unsummarizable_unsigned_document_refuses_only_its_own_entry() {
         let listing = command(&["--summary"]).listing(
+            &test_package(),
             VerificationMode::Permissive,
             Vec::new(),
             vec![
@@ -1357,6 +1764,7 @@ mod tests {
     #[test]
     fn one_unsummarizable_document_refuses_that_entry_and_keeps_the_listing() {
         let listing = command(&["--summary"]).listing(
+            &test_package(),
             VerificationMode::Demand,
             vec![
                 attestation_match_carrying("b", "https://cyclonedx.org/bom", CYCLONEDX),
@@ -1412,6 +1820,7 @@ mod tests {
     #[test]
     fn without_summary_an_unreadable_document_is_listed_like_any_other() {
         let listing = command(&[]).listing(
+            &test_package(),
             VerificationMode::Demand,
             vec![attestation_match_carrying("c", "https://spdx.dev/Document", SPDX)],
             Vec::new(),
@@ -1433,6 +1842,7 @@ mod tests {
     #[test]
     fn summary_refusals_travel_beside_the_pipelines_own() {
         let listing = command(&["--summary"]).listing(
+            &test_package(),
             VerificationMode::Demand,
             vec![attestation_match_carrying("c", "https://spdx.dev/Document", SPDX)],
             Vec::new(),
@@ -1466,6 +1876,7 @@ mod tests {
         let shadowed = BTreeSet::from([superseded.verify.referrer_digest.clone()]);
 
         let listing = command(&[]).listing(
+            &test_package(),
             VerificationMode::Demand,
             vec![
                 superseded,
@@ -1485,6 +1896,7 @@ mod tests {
         let unverified = unverified_sbom("b", "https://cyclonedx.org/bom", CYCLONEDX);
         let shadowed = BTreeSet::from([unverified.referrer_digest.clone()]);
         let permissive = command(&[]).listing(
+            &test_package(),
             VerificationMode::Permissive,
             Vec::new(),
             vec![unverified, unverified_sbom("c", "https://spdx.dev/Document", SPDX)],

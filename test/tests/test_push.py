@@ -33,6 +33,7 @@ from pathlib import Path
 import pytest
 
 from src.helpers import make_package, resolved_metadata_path
+from src.index_signing import assert_retired_table_refused
 from src.registry import get_blob, list_referrers, referrers_fallback_tag
 from src.runner import OcxRunner, PackageInfo, current_platform
 from tests.fixtures import attestations
@@ -404,7 +405,7 @@ def test_a_plain_push_never_resolves_the_sigstore_endpoints(
     """A push that asks for no signing must not fail on signing configuration.
 
     The endpoint ladder is resolved before the push, so a rejected
-    `[trust.sigstore]` URL costs no upload -- but only when signing was
+    `[sigstore."<authority>"]` URL costs no upload -- but only when signing was
     actually asked for. Resolving it unconditionally would make a plain
     `ocx package push` start failing on a config key it never reads, which is
     a regression a signing test could never notice.
@@ -417,15 +418,15 @@ def test_a_plain_push_never_resolves_the_sigstore_endpoints(
     # Plain http is what the SSRF guard refuses, on the config tier exactly as
     # on a flag.
     (Path(ocx.env["OCX_HOME"]) / "config.toml").write_text(
-        '[trust.sigstore]\nfulcio_url = "http://fulcio.corp.example"\n'
+        '[sigstore."fulcio.corp.example:80"]\nfulcio_url = "http://fulcio.corp.example"\n'
     )
 
     plain = push(ocx, pkg, tmp_path, [])
     assert plain.returncode == 0, (
-        f"a plain push must ignore [trust.sigstore]\nstdout: {plain.stdout}\nstderr: {plain.stderr}"
+        f"a plain push must ignore the Sigstore tables\nstdout: {plain.stdout}\nstderr: {plain.stderr}"
     )
 
-    signed = push(ocx, pkg, tmp_path, ["--sign", "--key", str(COSIGN_KEY)], env_overrides=KEY_PASSWORD)
+    signed = push(ocx, pkg, tmp_path, ["--sign", "--fulcio-url", "http://fulcio.corp.example"])
     assert signed.returncode == 64, (
         f"--sign must reach the endpoint guard, got {signed.returncode}\nstdout: {signed.stdout}"
     )
@@ -573,3 +574,7 @@ def test_push_sbom_under_simplesigning_reports_the_sidecar_and_succeeds(
     assert manifest_status(ocx.registry, pkg.repo, sidecar["sidecar_digest"]) == 200, (
         f"the reported sidecar digest names no manifest in the registry: {sidecar}"
     )
+
+
+def test_the_retired_trust_sigstore_spelling_is_refused_by_a_push(ocx: OcxRunner) -> None:
+    assert_retired_table_refused(ocx)

@@ -53,6 +53,9 @@
     "RegenerateReport": {
       "$ref": "#/$defs/RegenerateReportRoot"
     },
+    "IndexSignReport": {
+      "$ref": "#/$defs/IndexSignReportRoot"
+    },
     "Installs": {
       "$ref": "#/$defs/InstallsRoot"
     },
@@ -2029,6 +2032,62 @@
         "removed"
       ],
       "description": "One registry's drift-repair outcome.\n\n`roots` is what the `p/` walk found, and it is reported even when the three\nlists are empty: a `0` there says the walk found an empty tree, which is a\ndifferent fact from \"the catalog already matched\"."
+    },
+    "IndexSignReport": {
+      "type": "object",
+      "properties": {
+        "catalog_path": {
+          "$ref": "#/$defs/AbsolutePath",
+          "description": "The catalog file that was rewritten with its new `expires`."
+        },
+        "signature_path": {
+          "$ref": "#/$defs/AbsolutePath",
+          "description": "The detached signature file beside it."
+        },
+        "catalog_digest": {
+          "$ref": "#/$defs/Digest",
+          "description": "Digest of the catalog bytes the signature covers."
+        },
+        "expires_at": {
+          "$ref": "#/$defs/Timestamp",
+          "description": "When the catalog stops being trusted."
+        },
+        "signer": {
+          "type": "string",
+          "description": "Signing mechanism used: `\"keyless-fulcio\"`, or the key backend's own slug under a key."
+        },
+        "certificate_identity": {
+          "type": "string",
+          "description": "Certificate SAN (identity) embedded in the Fulcio cert. Absent under a key."
+        },
+        "certificate_oidc_issuer": {
+          "type": "string",
+          "description": "Certificate OIDC issuer URL embedded in the Fulcio cert. Absent under a key."
+        },
+        "key_backend": {
+          "$ref": "#/$defs/KeyBackendKind",
+          "description": "Which key model produced this signature."
+        },
+        "public_key_hint": {
+          "type": "string",
+          "description": "The signing key's cosign hint, in key mode only."
+        },
+        "tlog_index": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "description": "The Rekor log index; absent when no upload happened."
+        }
+      },
+      "required": [
+        "catalog_path",
+        "signature_path",
+        "catalog_digest",
+        "expires_at",
+        "signer",
+        "key_backend"
+      ],
+      "description": "What `ocx index sign` wrote."
     },
     "Installs": {
       "type": "object",
@@ -4780,6 +4839,10 @@
     "SbomEntry": {
       "type": "object",
       "properties": {
+        "package": {
+          "$ref": "#/$defs/PackageRef",
+          "description": "The package whose attestation this is."
+        },
         "predicate_type": {
           "type": "string",
           "description": "predicateType. Read out of the **signed** payload when `verified`;\nderived from the referrer's `artifactType`\notherwise, since an unsigned referrer states its type nowhere else."
@@ -4818,6 +4881,7 @@
         }
       },
       "required": [
+        "package",
         "predicate_type",
         "verified",
         "shadowed",
@@ -4857,6 +4921,10 @@
     "RefusedEntry": {
       "type": "object",
       "properties": {
+        "package": {
+          "$ref": "#/$defs/PackageRef",
+          "description": "The package whose candidate was refused."
+        },
         "referrer_digest": {
           "description": "The referrer's digest as the registry listed it. Absent when no\nwell-formed digest names the candidate: a budget-stop row, or a\nregistry listing a malformed digest.",
           "$ref": "#/$defs/Digest"
@@ -4871,6 +4939,7 @@
         }
       },
       "required": [
+        "package",
         "reason",
         "reason_kind"
       ],
@@ -8758,6 +8827,68 @@
         "items"
       ],
       "description": "What `ocx index regenerate <REGISTRY>...` changed, per registry, in argument order."
+    },
+    "IndexSignReportRoot": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "description": "The version of this root's shape; a breaking change increments it.",
+          "type": "integer",
+          "const": 1
+        },
+        "catalog_path": {
+          "$ref": "#/$defs/AbsolutePath",
+          "description": "The catalog file that was rewritten with its new `expires`."
+        },
+        "signature_path": {
+          "$ref": "#/$defs/AbsolutePath",
+          "description": "The detached signature file beside it."
+        },
+        "catalog_digest": {
+          "$ref": "#/$defs/Digest",
+          "description": "Digest of the catalog bytes the signature covers."
+        },
+        "expires_at": {
+          "$ref": "#/$defs/Timestamp",
+          "description": "When the catalog stops being trusted."
+        },
+        "signer": {
+          "type": "string",
+          "description": "Signing mechanism used: `\"keyless-fulcio\"`, or the key backend's own slug under a key."
+        },
+        "certificate_identity": {
+          "type": "string",
+          "description": "Certificate SAN (identity) embedded in the Fulcio cert. Absent under a key."
+        },
+        "certificate_oidc_issuer": {
+          "type": "string",
+          "description": "Certificate OIDC issuer URL embedded in the Fulcio cert. Absent under a key."
+        },
+        "key_backend": {
+          "$ref": "#/$defs/KeyBackendKind",
+          "description": "Which key model produced this signature."
+        },
+        "public_key_hint": {
+          "type": "string",
+          "description": "The signing key's cosign hint, in key mode only."
+        },
+        "tlog_index": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "description": "The Rekor log index; absent when no upload happened."
+        }
+      },
+      "required": [
+        "schema_version",
+        "catalog_path",
+        "signature_path",
+        "catalog_digest",
+        "expires_at",
+        "signer",
+        "key_backend"
+      ],
+      "description": "What `ocx index sign` wrote."
     },
     "InstallsRoot": {
       "type": "object",

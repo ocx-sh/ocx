@@ -21,6 +21,7 @@ from pathlib import Path
 
 from src import registry as reg
 from src.helpers import make_package, resolved_metadata_path
+from src.index_signing import assert_retired_table_refused, stack_table
 from src.runner import OcxRunner, PackageInfo, current_platform
 from tests.fixtures import adversarial, attestations
 from tests.fixtures.sigstore_stack import SigstoreStack
@@ -658,7 +659,7 @@ def test_push_with_sbom_writes_no_tag_when_the_attestation_fails(
     unattested content (issue 402). The attestation is made to fail
     hermetically by routing outbound HTTPS to a closed local port.
     ``push --sbom`` has no endpoint flags and this test writes no
-    ``[trust.sigstore]`` config, so it addresses builtin public Fulcio —
+    ``--fulcio-url`` flag, so it addresses builtin public Fulcio —
     through the dead proxy. The success half of S-010 is the config-driven
     test below, the one lever that points push at the local stack.
     """
@@ -695,19 +696,19 @@ def test_push_with_sbom_writes_no_tag_when_the_attestation_fails(
     assert after == before, f"tags written by a push whose attestation failed: {sorted(after - before)}"
 
 
-def test_push_with_sbom_reaches_the_stack_through_trust_sigstore_config(
+def test_push_with_sbom_reaches_the_stack_through_its_sigstore_table(
     ocx: OcxRunner,
     unique_repo: str,
     sigstore_stack: SigstoreStack,
     identity_token: Path,
     tmp_path: Path,
 ) -> None:
-    """S-010 (success half): `[trust.sigstore]` endpoints carry the pipeline.
+    """S-010 (success half): the `[sigstore."<authority>"]` table carries the pipeline.
 
-    ``push --sbom`` has no ``--fulcio-url``/``--rekor-url`` flags, so the
-    config tier is the only way to point it at the local stack — the one
-    acceptance row where config-sourced endpoints must carry a real signing
-    round-trip end to end, not just a unit-tested precedence rule.
+    ``push --sbom --fulcio-url`` selects the table of that authority, which
+    supplies the Rekor endpoint and the trust root — the one acceptance row
+    where config-sourced endpoints must carry a real signing round-trip end to
+    end, not just a unit-tested precedence rule.
 
     Exit 0 discriminates: the identity token below is minted by the local
     dex, which builtin public Fulcio rejects. A run that ignored the config
@@ -716,14 +717,11 @@ def test_push_with_sbom_reaches_the_stack_through_trust_sigstore_config(
     pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path)
     sbom = cyclonedx_predicate(tmp_path)
 
-    (Path(ocx.env["OCX_HOME"]) / "config.toml").write_text(
-        "[trust.sigstore]\n"
-        f'fulcio_url = "{sigstore_stack.fulcio_url}"\n'
-        f'rekor_url = "{sigstore_stack.rekor_url}"\n'
-    )
+    (Path(ocx.env["OCX_HOME"]) / "config.toml").write_text(stack_table(sigstore_stack))
 
     result = ocx.run(
         *push_argv(pkg, tmp_path, sbom),
+        "--fulcio-url", sigstore_stack.fulcio_url,
         check=False,
         env_overrides={
             "OCX_IDENTITY_TOKEN": identity_token.read_text().strip(),
@@ -1533,3 +1531,7 @@ def test_attest_refuses_a_platform_alongside_a_sweep(
             f"expected a usage error (64) for --platform with {sweep}, got "
             f"{result.returncode}\n{result.stderr}"
         )
+
+
+def test_the_retired_trust_sigstore_spelling_is_refused_by_attest(ocx: OcxRunner) -> None:
+    assert_retired_table_refused(ocx)

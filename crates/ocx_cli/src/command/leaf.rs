@@ -44,6 +44,7 @@ leaves! {
     IndexCatalog,
     IndexList,
     IndexRegenerate,
+    IndexSign,
     IndexSync,
     IndexUpdate,
     Init,
@@ -128,6 +129,7 @@ impl Leaf {
             Self::IndexCatalog => &["index", "catalog"],
             Self::IndexList => &["index", "list"],
             Self::IndexRegenerate => &["index", "regenerate"],
+            Self::IndexSign => &["index", "sign"],
             Self::IndexSync => &["index", "sync"],
             Self::IndexUpdate => &["index", "update"],
             Self::Init => &["init"],
@@ -219,6 +221,10 @@ impl Leaf {
             Self::IndexCatalog => (1, const { &[OutputMode::report::<data::catalog::Catalog>()] }),
             Self::IndexList => (1, const { &[OutputMode::report::<data::tag::Tags>()] }),
             Self::IndexRegenerate => (1, const { &[OutputMode::report::<data::index::RegenerateReport>()] }),
+            Self::IndexSign => (
+                1,
+                const { &[OutputMode::report::<data::index_sign::IndexSignReport>()] },
+            ),
             Self::IndexSync => (
                 1,
                 const { &[OutputMode::report::<data::index::CatalogPreview>(), Empty] },
@@ -340,7 +346,7 @@ impl Leaf {
                 const { &[OutputMode::report::<data::package_receipt::PackageReceipt>()] },
             ),
             Self::PackageSbom => (
-                2,
+                3,
                 const {
                     &[
                         OutputMode::report::<data::sbom::SbomListingReport>(),
@@ -501,6 +507,7 @@ impl Command {
                 Index::Update(_) => Leaf::IndexUpdate,
                 Index::Sync(_) => Leaf::IndexSync,
                 Index::Regenerate(_) => Leaf::IndexRegenerate,
+                Index::Sign(_) => Leaf::IndexSign,
             },
             Command::About(_) => Leaf::About,
             Command::Init(_) => Leaf::Init,

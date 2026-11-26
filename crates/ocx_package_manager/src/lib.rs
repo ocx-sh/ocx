@@ -17,6 +17,7 @@ pub mod composer;
 pub mod concurrency;
 pub mod error;
 pub mod exec_env;
+pub mod index_trust;
 pub mod launcher;
 pub mod managed_config;
 pub mod mutate;
@@ -582,6 +583,13 @@ impl PackageManager {
             activity: None,
             blob_lookup: std::sync::Arc::default(),
         }
+    }
+
+    /// Replace the resolution index, for a run whose chain differs from the context's (a skipped catalog check).
+    #[must_use]
+    pub fn with_selected_index(mut self, index: ocx_index::Index) -> Self {
+        self.index = index;
+        self
     }
 
     /// Inject the effective index collection home (`--index` / `OCX_INDEX`

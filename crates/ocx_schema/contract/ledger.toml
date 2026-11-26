@@ -278,3 +278,24 @@ subjects = ["*"]
 rule = "G14"
 pointer = "/env/5"
 reason = "OCX_CONFIG is now a path list (platform path-list separator) instead of one path; a value holding the separator is split into several files"
+
+[[break]]
+document = "cli"
+subjects = ["package sbom"]
+rule = "G10"
+pointer = "/root/commands/14/commands/17/args/1"
+reason = "`--output` now also conflicts with the new `--dependencies`, which writes its own attestations; no existing invocation is affected"
+
+[[break]]
+document = "cli"
+subjects = ["package sbom"]
+rule = "G10"
+pointer = "/root/commands/14/commands/17/args/4"
+reason = "`--certificate-identity` now also conflicts with the new `--dependencies`, which writes its own attestations; no existing invocation is affected"
+
+[[break]]
+document = "cli"
+subjects = ["package sbom"]
+rule = "G10"
+pointer = "/root/commands/14/commands/17/args/5"
+reason = "`--certificate-oidc-issuer` now also conflicts with the new `--dependencies`, which writes its own attestations; no existing invocation is affected"

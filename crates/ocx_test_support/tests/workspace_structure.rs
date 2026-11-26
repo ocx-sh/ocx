@@ -2795,6 +2795,52 @@ const UNARMED_AT_THE_BOUNDARY: &[(&str, &str, &str)] = &[
          caller maps it onto `TrustPolicyError::InvalidRegex`, whose `#[source]` field it becomes, \
          and the other caller is a test",
     ),
+    (
+        "ocx_index/src/catalog_verifier.rs",
+        "S::Error",
+        "The serializer's own associated type, like `deserialize_mirrors_table`'s: `#[serde(with)]` on a \
+         date field makes it the serializer's error, and the writer that calls it hands the catalog to \
+         `serde_json` in memory, so no concrete type reaches the CLI",
+    ),
+    (
+        "ocx_index/src/catalog_verifier.rs",
+        "D::Error",
+        "The deserializer's own associated type: `#[serde(with)]` on the high-water file's date makes it \
+         `serde_json::Error`, which the reader turns into a debug line and an absent bound",
+    ),
+    (
+        "ocx_index/src/wire.rs",
+        "S::Error",
+        "The serializer's own associated type, as in `catalog_verifier.rs`: `serialize_catalog` renders \
+         the catalog through `serde_json` into memory",
+    ),
+    (
+        "ocx_index/src/wire.rs",
+        "D::Error",
+        "The deserializer's own associated type: a catalog that fails to parse reaches the CLI as \
+         `index::error::Error::MalformedIndexDocument`, which a `families!` rung registers",
+    ),
+    (
+        "ocx_sign/src/detached.rs",
+        "SignErrorKind",
+        "`sign_statement`'s error. Its one production caller, `ocx index sign`, wraps it with \
+         `SignError::new(registry, kind)`, which a `families!` rung registers and which delegates to \
+         the Kind",
+    ),
+    (
+        "ocx_sign/src/detached.rs",
+        "VerifyErrorKind",
+        "`verify_statement`'s error. Its one production caller, `IndexTrust::check`, maps it onto a \
+         `CatalogVerdict` (a mismatch or an invalid signature), which `ocx_index` raises as the armed \
+         `IndexTrustError`",
+    ),
+    (
+        "ocx_trust/src/instance.rs",
+        "SigstoreAuthorityError",
+        "`SigstoreAuthority::parse` and `from_url`. It reaches the CLI as the `#[source]` of \
+         `config::error::Error::SigstoreAuthorityInvalid`, which is armed; the other callers render it \
+         into a clap value-parser message (exit 64) or discard it",
+    ),
     // The `ocx_store` rows are the three narrow unions WP-27's E1 minted so the
     // store tier could stop naming the crate-wide `ocx_lib::Error`. Each is
     // rebuilt into the exact variant it replaced by an `impl From<..> for
@@ -3136,8 +3182,8 @@ const UNARMED_AT_THE_BOUNDARY: &[(&str, &str, &str)] = &[
     (
         "ocx_package_manager/src/tasks/sign.rs",
         "SignErrorKind",
-        "WP-34 revelation: `build_signer` is `pub(super)` and has no caller outside \
-         `ocx_package_manager/src/tasks`. Unarmed at `9d34070d` and unarmed now, same signature",
+        "WP-34 revelation: `build_signer` is public for `ocx index sign` and a caller \
+         that only forwards the key backend's error. Unarmed at `9d34070d` and unarmed now, same signature",
     ),
     (
         "ocx_package_manager/src/tasks/verify.rs",

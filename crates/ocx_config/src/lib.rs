@@ -22,6 +22,7 @@ pub mod refresh;
 pub mod registry;
 pub mod shell;
 pub mod telemetry;
+mod terminal;
 pub mod tls;
 pub mod update;
 
@@ -38,7 +39,7 @@ use ocx_util::fs::path::FileReference;
 pub use self::managed::ManagedConfig;
 pub use self::mirror::MirrorConfig;
 pub use self::patch::PatchConfig;
-pub use self::registry::{RegistryConfig, SignatureRequirement};
+pub use self::registry::{IndexExpiryMode, IndexSignatureMode, RegistryConfig, SignatureRequirement};
 pub use self::shell::ShellConfig;
 pub use self::update::UpdateConfig;
 
@@ -143,6 +144,14 @@ pub struct Config {
     ///
     /// Consumed by `ocx package verify`.
     pub trust: Option<ocx_trust::TrustConfig>,
+
+    /// Sigstore instances (`[sigstore."<authority>"]`): the trust material and endpoints of each Fulcio and Rekor
+    /// stack a keyless signer can name.
+    ///
+    /// Read from `config.toml` tiers only: a repository that could name its own Fulcio CA would verify its own
+    /// signatures. Tables merge per table and per field, last tier wins; a table under `fulcio.sigstore.dev`
+    /// overrides the built-in public instance field by field.
+    pub sigstore: Option<ocx_trust::SigstoreInstances>,
 
     /// Shell-integration settings (`[shell]`) — the per-prompt hook and
     /// completions toggles, plus the activation consent whitelist.
@@ -341,11 +350,17 @@ impl Config {
                 None => self.update = Some(other_update),
             }
         }
-        // Trust policies append across tiers; `[trust.sigstore]` replaces, since two Fulcio CAs are ambiguous.
+        // Trust policies append across tiers; a `[sigstore."<authority>"]` table replaces field by field.
         if let Some(other_trust) = other.trust {
             match self.trust.as_mut() {
                 Some(self_trust) => self_trust.merge(other_trust),
                 None => self.trust = Some(other_trust),
+            }
+        }
+        if let Some(other_sigstore) = other.sigstore {
+            match self.sigstore.as_mut() {
+                Some(self_sigstore) => self_sigstore.merge(other_sigstore),
+                None => self.sigstore = Some(other_sigstore),
             }
         }
         if let Some(other_shell) = other.shell {
@@ -391,13 +406,35 @@ impl Config {
     }
 
     /// Resolve [`Self::extra_ca_certs`] against the declaring `config.toml`'s directory, with the
-    /// same [`FileReference`] grammar as `SigstoreTrust::anchor_relative_root`.
+    /// same [`FileReference`] grammar as `SigstoreInstance::anchor_relative_root`.
     pub fn anchor_relative_extra_ca_certs(&mut self, config_dir: &Path) {
         if let Some(path) = self.extra_ca_certs.as_ref() {
             // Lossless: the value came from a TOML string, so it is UTF-8.
             let written = path.to_string_lossy().into_owned();
             self.extra_ca_certs = Some(FileReference::parse(&written).anchored_at(config_dir));
         }
+    }
+
+    /// Check every `[sigstore."<authority>"]` table: a `fulcio_url`, when set, must name the table's own authority.
+    ///
+    /// # Errors
+    /// [`error::Error::SigstoreAuthorityInvalid`] for a `fulcio_url` with no usable authority;
+    /// [`error::Error::SigstoreTableKeyMismatch`] when its authority differs from the table key.
+    pub fn validate_sigstore_tables(&self) -> Result<(), error::Error> {
+        for (authority, table) in self.sigstore.iter().flat_map(|tables| tables.iter()) {
+            let Some(fulcio_url) = table.fulcio_url.as_deref() else {
+                continue;
+            };
+            let declared =
+                ocx_trust::SigstoreAuthority::from_url(fulcio_url).map_err(error::Error::SigstoreAuthorityInvalid)?;
+            if declared != *authority {
+                return Err(error::Error::SigstoreTableKeyMismatch {
+                    authority: authority.to_string(),
+                    fulcio_url: fulcio_url.to_owned(),
+                });
+            }
+        }
+        Ok(())
     }
 
     /// The declared trust policies (empty when no `[trust]` section is set).
@@ -1595,6 +1632,46 @@ mod tests {
         .unwrap();
         lower.merge(higher);
         assert_eq!(lower.trust_policies().len(), 2);
+    }
+
+    #[test]
+    fn sigstore_tables_merge_per_table_across_tiers() {
+        let mut lower: Config =
+            toml::from_str("[sigstore.\"fulcio.a.example\"]\nrekor_url = \"https://rekor.a\"\n").expect("lower parses");
+        let higher: Config = toml::from_str(
+            "[sigstore.\"fulcio.a.example\"]\nrekor_url = \"https://rekor.a2\"\n[sigstore.\"fulcio.b.example\"]\nrekor_url = \"https://rekor.b\"\n",
+        )
+        .expect("higher parses");
+        lower.merge(higher);
+        let tables = lower.sigstore.expect("sigstore tables");
+        assert_eq!(tables.len(), 2);
+        let a = ocx_trust::SigstoreAuthority::parse("fulcio.a.example").expect("authority");
+        assert_eq!(
+            tables.get(&a).and_then(|table| table.rekor_url.as_deref()),
+            Some("https://rekor.a2")
+        );
+    }
+
+    /// Last tier wins per field; a table switching from a path to an inline root never keeps both.
+    #[test]
+    fn sigstore_table_fields_merge_last_tier_wins_and_roots_switch_together() {
+        let key = ocx_trust::SigstoreAuthority::parse("fulcio.a.example").expect("authority");
+        let mut lower: Config = toml::from_str(
+            "[sigstore.\"fulcio.a.example\"]\nrekor_url = \"https://rekor.a\"\nrekor_upload = true\ntrusted_root = \"root.json\"\n",
+        )
+        .expect("lower parses");
+        let higher: Config =
+            toml::from_str("[sigstore.\"fulcio.a.example\"]\ntrusted_root_json = \"{}\"\n").expect("higher parses");
+        lower.merge(higher);
+        let table = lower.sigstore.expect("tables").get(&key).cloned().expect("table");
+        assert_eq!(
+            table.rekor_url.as_deref(),
+            Some("https://rekor.a"),
+            "untouched field stays"
+        );
+        assert_eq!(table.rekor_upload, Some(true));
+        assert_eq!(table.trusted_root_json.as_deref(), Some("{}"));
+        assert_eq!(table.trusted_root, None, "path and inline form are never both set");
     }
 
     #[test]
@@ -3599,5 +3676,38 @@ mod toolchain_root_tests {
             assert!(schema.contains(known), "{known} missing: {schema}");
         }
         assert!(!schema.to_lowercase().contains("unknown"), "{schema}");
+    }
+
+    #[test]
+    fn a_sigstore_table_must_name_its_own_fulcio_authority() {
+        let check = |toml: &str| {
+            toml::from_str::<Config>(toml)
+                .expect("parses")
+                .validate_sigstore_tables()
+        };
+        check("[sigstore.\"fulcio.example:5555\"]\nfulcio_url = \"https://FULCIO.example:5555/api\"\n")
+            .expect("the same authority, whatever the spelling");
+        check("[sigstore.\"fulcio.example:5555\"]\nrekor_url = \"https://rekor.example\"\n")
+            .expect("an absent fulcio_url defaults to the key");
+        check("[sigstore.\"fulcio.sigstore.dev\"]\n").expect("a table can be empty");
+
+        let mismatch = check("[sigstore.\"fulcio.a.example\"]\nfulcio_url = \"https://fulcio.b.example\"\n")
+            .expect_err("another authority");
+        assert!(
+            matches!(mismatch, error::Error::SigstoreTableKeyMismatch { .. }),
+            "{mismatch:?}"
+        );
+        let port = check("[sigstore.\"fulcio.a.example\"]\nfulcio_url = \"https://fulcio.a.example:8443\"\n")
+            .expect_err("a different port is a different authority");
+        assert!(
+            matches!(port, error::Error::SigstoreTableKeyMismatch { .. }),
+            "{port:?}"
+        );
+        let unusable =
+            check("[sigstore.\"fulcio.a.example\"]\nfulcio_url = \"not a url\"\n").expect_err("no authority");
+        assert!(
+            matches!(unusable, error::Error::SigstoreAuthorityInvalid(_)),
+            "{unusable:?}"
+        );
     }
 }

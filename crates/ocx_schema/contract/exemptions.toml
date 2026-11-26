@@ -32,6 +32,13 @@ adr = ".claude/artifacts/plan_ocx_interface_contract.md#decisions-question--rese
 [[exemption]]
 rule = "C08"
 document = "cli"
+pointer = "ocx index sign --key"
+reason = "`--key` names a key reference (`env://`, a path, a KMS URI), never the key itself (D-35)."
+adr = ".claude/artifacts/plan_ocx_interface_contract.md#decisions-question--research--decision"
+
+[[exemption]]
+rule = "C08"
+document = "cli"
 pointer = "ocx package push --key"
 reason = "`--key` names a key reference (`env://`, a path, a KMS URI), never the key itself (D-35)."
 adr = ".claude/artifacts/plan_ocx_interface_contract.md#decisions-question--research--decision"

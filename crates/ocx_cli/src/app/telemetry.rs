@@ -67,6 +67,7 @@ pub fn class(leaf: Option<Leaf>, shell_flag: bool) -> Class {
         | Leaf::IndexCatalog
         | Leaf::IndexList
         | Leaf::IndexRegenerate
+        | Leaf::IndexSign
         | Leaf::IndexSync
         | Leaf::IndexUpdate
         | Leaf::Init

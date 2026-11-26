@@ -97,6 +97,21 @@ impl ConfigLoader {
     /// # Errors
     /// Same as [`Self::load`].
     pub async fn load_with_local_view(inputs: ConfigInputs<'_>) -> Result<LoadedConfig> {
+        Self::load_inner(inputs, false).await
+    }
+
+    /// [`Self::load_with_local_view`] for the command that replaces the managed snapshot.
+    ///
+    /// A snapshot that still carries the retired `[trust.sigstore]` table loads with one warning
+    /// instead of a refusal, or the refresh that would replace it could never run.
+    ///
+    /// # Errors
+    /// Same as [`Self::load`].
+    pub async fn load_with_local_view_tolerating_retired_snapshot(inputs: ConfigInputs<'_>) -> Result<LoadedConfig> {
+        Self::load_inner(inputs, true).await
+    }
+
+    async fn load_inner(inputs: ConfigInputs<'_>, tolerate_retired_snapshot: bool) -> Result<LoadedConfig> {
         let no_config = Self::no_config();
         let env_config_files = Self::config_list_entries(inputs.received_config_list)?;
 
@@ -142,8 +157,9 @@ impl ConfigLoader {
             resolved_managed_config,
             managed_snapshot_state,
             managed_extra_ca_tier,
-        ) = Self::fold_managed_tier(base.clone(), &local_only).await?;
+        ) = Self::fold_managed_tier(base.clone(), &local_only, tolerate_retired_snapshot).await?;
         merged.merge(overlay.clone());
+        merged.validate_sigstore_tables()?;
         let extra_ca_certs_tier = overlay_extra_ca_tier
             .or(managed_extra_ca_tier)
             .or(discovered_extra_ca_tier);
@@ -276,6 +292,7 @@ impl ConfigLoader {
     async fn fold_managed_tier(
         accumulator: Config,
         local_only: &Config,
+        tolerate_retired_snapshot: bool,
     ) -> Result<(
         Config,
         Option<crate::managed::ManagedConfigSnapshot>,
@@ -325,6 +342,16 @@ impl ConfigLoader {
             ));
         }
 
+        if Self::declares_retired_trust_sigstore(&snapshot.config) {
+            if !tolerate_retired_snapshot {
+                return Err(Error::TrustSigstoreRetired { path: candidate });
+            }
+            log::warn!(
+                "managed-config snapshot for '{}' declares the retired `[trust.sigstore]` table, which is ignored; \
+                 run `ocx config update` to replace it with the republished payload",
+                resolved.source
+            );
+        }
         let payload = Self::strip_managed_update(&snapshot.config, &resolved.source);
         let mut parsed: Config = match Self::parse_config_stripping_refused_consent(&payload, &resolved.source) {
             Ok(parsed) => parsed,
@@ -372,6 +399,8 @@ impl ConfigLoader {
         // Reached only if `strip_managed_update` could not re-serialize; a payload never sets `[update]`.
         parsed.update = None;
         Self::guard_managed_sigstore_trust(&mut parsed, &resolved.source);
+        // `local_only`, not the accumulator: the overlay lands above the payload and can arm a registry too.
+        Self::guard_managed_index_signing(&mut parsed, local_only, &resolved.source);
         Self::guard_managed_shell_consent(&mut parsed, &resolved.source);
         Self::stamp_shell_tier(&mut parsed, crate::ConfigTier::Managed);
         let extra_ca_certs_tier = (Self::sets_extra_ca_certs(&parsed)
@@ -387,6 +416,66 @@ impl ConfigLoader {
             ManagedSnapshotState::Applied,
             extra_ca_certs_tier,
         ))
+    }
+
+    /// Whether raw `text` declares the retired `[trust.sigstore]` table in any TOML form.
+    ///
+    /// A raw-table check ahead of the typed parse: once the field is gone the parse would drop the
+    /// table silently, and trust would widen to the public instance.
+    pub fn declares_retired_trust_sigstore(text: &str) -> bool {
+        toml::from_str::<toml::Table>(text).is_ok_and(|table| {
+            table
+                .get("trust")
+                .and_then(toml::Value::as_table)
+                .is_some_and(|trust| trust.contains_key("sigstore"))
+        })
+    }
+
+    /// Refuse a `[sigstore."<key>"]` table key, or a `[[trust.policy]]` signer's `sigstore` value, that is
+    /// not a valid authority.
+    ///
+    /// A raw-table check ahead of the typed parse, so the refusal names the authority rather than a
+    /// position in the TOML.
+    ///
+    /// # Errors
+    /// [`Error::SigstoreAuthorityInvalid`] for the first offender; [`Error::SigstoreAuthorityDuplicate`] when two keys
+    /// parse to one authority.
+    pub fn check_sigstore_authorities(text: &str) -> Result<()> {
+        let Ok(table) = toml::from_str::<toml::Table>(text) else {
+            return Ok(());
+        };
+        let refuse = |key: &str| {
+            ocx_trust::SigstoreAuthority::parse(key)
+                .map(drop)
+                .map_err(Error::SigstoreAuthorityInvalid)
+        };
+        let mut seen: std::collections::HashMap<ocx_trust::SigstoreAuthority, &str> = std::collections::HashMap::new();
+        for key in table
+            .get("sigstore")
+            .and_then(toml::Value::as_table)
+            .into_iter()
+            .flat_map(toml::Table::keys)
+        {
+            let authority = ocx_trust::SigstoreAuthority::parse(key).map_err(Error::SigstoreAuthorityInvalid)?;
+            if let Some(first) = seen.insert(authority, key) {
+                return Err(Error::SigstoreAuthorityDuplicate {
+                    first: first.to_owned(),
+                    second: key.clone(),
+                });
+            }
+        }
+        let signers = table
+            .get("trust")
+            .and_then(|trust| trust.get("policy"))
+            .and_then(toml::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|policy| policy.get("signers")?.as_array())
+            .flatten();
+        for value in signers.filter_map(|signer| signer.get("sigstore")?.as_str()) {
+            refuse(value)?;
+        }
+        Ok(())
     }
 
     /// `payload` without its `update` key, removed from the raw table before the typed parse.
@@ -421,11 +510,8 @@ impl ConfigLoader {
                  extra_ca_certs_pem)"
             );
         }
-        let Some(trust) = parsed.trust.as_mut() else {
-            return;
-        };
         // `key_pem` stays: it travels inline, bounded, and names no file.
-        for policy in &mut trust.policy {
+        for policy in parsed.trust.iter_mut().flat_map(|trust| trust.policy.iter_mut()) {
             for signer in &mut policy.signers {
                 // `unusable`: removing the path left the entry with no key at all.
                 let (dropped, unusable) = match signer {
@@ -450,32 +536,188 @@ impl ConfigLoader {
                 }
             }
         }
-        let Some(sigstore) = trust.sigstore.as_mut() else {
+        let Some(sigstore) = parsed.sigstore.as_mut() else {
             return;
         };
-        if sigstore.trusted_root.take().is_some() {
-            log::warn!(
-                "managed-config payload for '{source}' set [trust.sigstore] trusted_root to a local path; ignored (a                  remote payload cannot name a path on this machine — publish with `ocx config push`, which inlines                  the file as trusted_root_json)"
-            );
-        }
-        // Unpinned, whoever can move the tag could swap the trust root or repoint `fulcio_url`, which
-        // receives the OIDC identity token.
-        if source.digest().is_none() {
-            if sigstore.trusted_root_json.take().is_some() {
+        for instance in sigstore.instances_mut() {
+            if instance.trusted_root.take().is_some() {
                 log::warn!(
-                    "managed-config payload for '{source}' carries [trust.sigstore] trusted_root_json but the [managed]                      source is not digest-pinned; ignored (pin the source to a digest so the trust root cannot be                      swapped by whoever can move the tag)"
+                    "managed-config payload for '{source}' set a [sigstore] trusted_root to a local path; ignored (a \
+                     remote payload cannot name a path on this machine — publish with `ocx config push`, which inlines \
+                     the file as trusted_root_json)"
                 );
             }
-            for (field, name) in [
-                (&mut sigstore.fulcio_url, "fulcio_url"),
-                (&mut sigstore.rekor_url, "rekor_url"),
-            ] {
-                if field.take().is_some() {
+            // Unpinned, whoever can move the tag could swap the trust root or repoint `fulcio_url`, which
+            // receives the OIDC identity token.
+            if source.digest().is_none() {
+                if instance.trusted_root_json.take().is_some() {
                     log::warn!(
-                        "managed-config payload for '{source}' sets [trust.sigstore] {name} but the [managed] source is                          not digest-pinned; ignored (pin the source to a digest so the Sigstore endpoints cannot be                          repointed by whoever can move the tag)"
+                        "managed-config payload for '{source}' carries a [sigstore] trusted_root_json but the [managed] \
+                         source is not digest-pinned; ignored (pin the source to a digest so the trust root cannot be \
+                         swapped by whoever can move the tag)"
                     );
                 }
+                // Only `true` is honoured: a movable tag must not turn transparency off for every key-mode signer.
+                if instance.rekor_upload == Some(false) {
+                    instance.rekor_upload = None;
+                    log::warn!(
+                        "managed-config payload for '{source}' sets a [sigstore] rekor_upload = false but the \
+                         [managed] source is not digest-pinned; ignored (pin the source to a digest to turn \
+                         transparency-log upload off fleet-wide)"
+                    );
+                }
+                for (field, name) in [
+                    (&mut instance.fulcio_url, "fulcio_url"),
+                    (&mut instance.rekor_url, "rekor_url"),
+                ] {
+                    if field.take().is_some() {
+                        log::warn!(
+                            "managed-config payload for '{source}' sets a [sigstore] {name} but the [managed] source is \
+                             not digest-pinned; ignored (pin the source to a digest so the Sigstore endpoints cannot be \
+                             repointed by whoever can move the tag)"
+                        );
+                    }
+                }
             }
+        }
+    }
+
+    /// Strips the index-signing and index-source settings an unpinned remote payload may not set.
+    ///
+    /// A movable tag may only tighten: no signer list, no looser `index_signature` or `index_expiry`. For a
+    /// registry whose catalog check is armed below ([`Self::index_check_armed`]) it may not switch off or
+    /// reroute `index`, nor set a `[mirrors]` index role on that registry's index host. A registry with no
+    /// check armed keeps its `index`. A digest-pinned source may do all of it.
+    // Left alone, none can weaken the check: `signatures` (strictest tier wins), the `[mirrors]` registry role
+    // (cannot suppress an index), `trusted_hosts`, `insecure`, and `[sigstore]` (`guard_managed_sigstore_trust`).
+    fn guard_managed_index_signing(parsed: &mut Config, lower: &Config, source: &ocx_oci::OciIdentifier) {
+        if source.digest().is_some() {
+            return;
+        }
+        if let Some(registries) = parsed.registries.as_mut() {
+            for (name, entry) in registries.iter_mut() {
+                let below = lower.registries.as_ref().and_then(|entries| entries.get(name));
+                Self::guard_managed_registry_index_signing(name, entry, below, source);
+            }
+        }
+        let armed_hosts = Self::armed_index_hosts(lower);
+        for (host, mirror) in parsed.mirrors.iter_mut().flatten() {
+            if !armed_hosts.contains(host.as_str()) {
+                continue;
+            }
+            let Some(index) = mirror.index.take() else {
+                continue;
+            };
+            let below = lower
+                .mirrors
+                .as_ref()
+                .and_then(|entries| entries.get(host))
+                .and_then(|entry| entry.index.as_deref());
+            if below != Some(index.as_str()) {
+                let host = crate::terminal::escape_for_terminal(host);
+                log::warn!(
+                    "managed-config payload for '{source}' sets the [mirrors.\"{host}\"] index role but the \
+                     [managed] source is not digest-pinned; ignored (pin the source to a digest so an index cannot \
+                     be rerouted by whoever can move the tag)"
+                );
+            }
+        }
+        // A role-less entry is a fatal `EmptyEntry` in the mirror map, so a stripped role must leave none.
+        if let Some(mirrors) = parsed.mirrors.as_mut() {
+            mirrors.retain(|_, mirror| mirror.registry.is_some() || mirror.index.is_some());
+        }
+    }
+
+    /// Whether a registry's catalog check runs below: a signer list (`index_publishers`, or the built-in one for
+    /// `ocx.sh`) and an `index_signature` mode other than `off`.
+    fn index_check_armed(name: &str, below: Option<&crate::RegistryConfig>) -> bool {
+        let has_signers =
+            name == ocx_oci::OCX_SH_REGISTRY || below.is_some_and(|entry| entry.index_publishers.is_some());
+        let mode = below
+            .and_then(|entry| entry.index_signature)
+            .unwrap_or(crate::IndexSignatureMode::Warn);
+        has_signers && mode != crate::IndexSignatureMode::Off
+    }
+
+    /// The index authorities, as the resolver keys them (raw case and port), of every registry whose catalog check is armed below.
+    fn armed_index_hosts(lower: &Config) -> std::collections::HashSet<String> {
+        let mut hosts = std::collections::HashSet::new();
+        // The resolver keys `[mirrors]` index roles on the raw authority of the registry's index URL.
+        let mut note = |index: &str| {
+            if let Ok(parsed) = crate::mirror::parse_url(index) {
+                hosts.insert(parsed.host);
+            }
+        };
+        let lower_registries = lower.registries.iter().flatten();
+        for (name, entry) in lower_registries {
+            if Self::index_check_armed(name, Some(entry)) {
+                // Only `ocx.sh` has a compiled-in index; any other registry without one builds no index source.
+                match entry.index.as_deref() {
+                    Some(index) if !index.is_empty() => note(index),
+                    None if name == ocx_oci::OCX_SH_REGISTRY => note(crate::index::DEFAULT_INDEX_BASE_URL),
+                    _ => {}
+                }
+            }
+        }
+        // `ocx.sh` is armed by the built-in list even when the lower tiers hold no entry for it.
+        if lower
+            .registries
+            .as_ref()
+            .is_none_or(|entries| !entries.contains_key(ocx_oci::OCX_SH_REGISTRY))
+        {
+            note(crate::index::DEFAULT_INDEX_BASE_URL);
+        }
+        hosts
+    }
+
+    fn guard_managed_registry_index_signing(
+        name: &str,
+        entry: &mut crate::RegistryConfig,
+        below: Option<&crate::RegistryConfig>,
+        source: &ocx_oci::OciIdentifier,
+    ) {
+        let armed = Self::index_check_armed(name, below);
+        let name = crate::terminal::escape_for_terminal(name);
+        if entry.index_publishers.take().is_some() {
+            log::warn!(
+                "managed-config payload for '{source}' sets index_publishers for registry '{name}' but the \
+                 [managed] source is not digest-pinned; ignored (pin the source to a digest so the signers of \
+                 an index cannot be swapped by whoever can move the tag)"
+            );
+        }
+        // An empty value and no value both leave the namespace on plain OCI.
+        if let Some(index) = entry.index.take() {
+            let below_index = below.and_then(|entry| entry.index.as_deref()).unwrap_or("");
+            if !armed {
+                entry.index = Some(index);
+            } else if index != below_index {
+                log::warn!(
+                    "managed-config payload for '{source}' sets index for registry '{name}' but the [managed] \
+                     source is not digest-pinned; ignored (pin the source to a digest so the index of a registry \
+                     cannot be switched off or rerouted by whoever can move the tag)"
+                );
+            }
+        }
+        // Unset below means the default of a registry with signers, `warn`.
+        let floor = below
+            .and_then(|entry| entry.index_signature)
+            .unwrap_or(crate::IndexSignatureMode::Warn);
+        if entry.index_signature.is_some_and(|mode| mode < floor) {
+            entry.index_signature = None;
+            log::warn!(
+                "managed-config payload for '{source}' loosens index_signature for registry '{name}' but the \
+                 [managed] source is not digest-pinned; ignored (an unpinned payload may only tighten it)"
+            );
+        }
+        let floor = below
+            .and_then(|entry| entry.index_expiry)
+            .unwrap_or(crate::IndexExpiryMode::Check);
+        if entry.index_expiry.is_some_and(|mode| mode > floor) {
+            entry.index_expiry = None;
+            log::warn!(
+                "managed-config payload for '{source}' loosens index_expiry for registry '{name}' but the \
+                 [managed] source is not digest-pinned; ignored (an unpinned payload may only tighten it)"
+            );
         }
     }
 
@@ -844,6 +1086,12 @@ impl ConfigLoader {
                     limit: MAX_CONFIG_SIZE,
                 });
             }
+            if Self::declares_retired_trust_sigstore(&contents) {
+                return Err(Error::TrustSigstoreRetired {
+                    path: path.to_path_buf(),
+                });
+            }
+            Self::check_sigstore_authorities(&contents)?;
             let mut parsed: Config =
                 Self::parse_config_stripping_refused_consent(&contents, path.display()).map_err(|source| {
                     Error::Parse {
@@ -863,6 +1111,10 @@ impl ConfigLoader {
             }
             Self::anchor_relative_paths(&mut parsed, path);
             Self::guard_extra_ca_certs_ambiguity(&parsed, path)?;
+            Self::guard_sigstore_trust_root_ambiguity(&parsed, path)?;
+            for warning in Self::unmatched_registry_key_warnings(&parsed, path) {
+                log::warn!("{warning}");
+            }
             let tier = Self::tier_for_path(path);
             Self::stamp_shell_tier(&mut parsed, tier);
             if Self::sets_extra_ca_certs(&parsed) && !Self::system_lock_drops_extra_ca(&config, &parsed, tier) {
@@ -871,6 +1123,30 @@ impl ConfigLoader {
             config.merge(parsed);
         }
         Ok((config, extra_ca_certs_tier))
+    }
+
+    /// One warning per `[registries."<key>"]` key of `parsed` that no client ever spells, naming the key and the
+    /// spelling that would match.
+    ///
+    /// The entry is never applied, so an `index_signature = "enforce"` under it would silently do nothing.
+    /// Keys are not canonicalised; the warning is the whole remedy.
+    fn unmatched_registry_key_warnings(parsed: &Config, path: &Path) -> Vec<String> {
+        let mut keys: Vec<&String> = parsed.registries.iter().flatten().map(|(key, _)| key).collect();
+        keys.sort();
+        keys.into_iter()
+            .filter_map(|key| {
+                let matching = crate::registry::unmatched_registry_key_spelling(key)?;
+                let (key, matching) = (
+                    crate::terminal::escape_for_terminal(key),
+                    crate::terminal::escape_for_terminal(&matching),
+                );
+                Some(format!(
+                    "{}: [registries.\"{key}\"] is never applied, because clients spell that registry \
+                     \"{matching}\"; rename the table to [registries.\"{matching}\"]",
+                    path.display()
+                ))
+            })
+            .collect()
     }
 
     /// Refuse one file declaring both `extra_ca_certs` and `extra_ca_certs_pem`; across tiers,
@@ -885,6 +1161,25 @@ impl ConfigLoader {
             });
         }
         Ok(())
+    }
+
+    /// Refuse a `[sigstore."<authority>"]` table that sets both `trusted_root` and `trusted_root_json`.
+    ///
+    /// # Errors
+    /// Returns [`Error::AmbiguousTrustRoot`] naming the file and the table.
+    fn guard_sigstore_trust_root_ambiguity(parsed: &Config, path: &Path) -> Result<()> {
+        let ambiguous = parsed
+            .sigstore
+            .iter()
+            .flat_map(|tables| tables.iter())
+            .find(|(_, table)| table.trusted_root.is_some() && table.trusted_root_json.is_some());
+        match ambiguous {
+            Some((authority, _)) => Err(Error::AmbiguousTrustRoot {
+                path: path.to_path_buf(),
+                authority: authority.to_string(),
+            }),
+            None => Ok(()),
+        }
     }
 
     /// Lock the system-scope config's lockable sections and extra-CA pair before it merges, so each
@@ -919,6 +1214,9 @@ impl ConfigLoader {
         // outbid it narrower.
         if let Some(trust) = parsed.trust.as_mut() {
             trust.lock_as_system();
+        }
+        if let Some(sigstore) = parsed.sigstore.as_mut() {
+            sigstore.lock_as_system();
         }
         // Unconditional and per block: `dir`, `name` and `required` clamp together.
         if let Some(records) = parsed.records.as_mut() {
@@ -1008,9 +1306,10 @@ impl ConfigLoader {
         let Ok(mut parsed) = toml::Value::Table(table).try_into::<Config>() else {
             return Err(refusal);
         };
+        let refusal_text = crate::terminal::escape_for_terminal(&refusal.to_string()).into_owned();
         let reason = format!(
             "[shell.consent] in {origin} was refused and dropped; every other section of that file still applies \
-             ({refusal}) — a consent grant fails closed, so nothing activates through it until the table is fixed"
+             ({refusal_text}) — a consent grant fails closed, so nothing activates through it until the table is fixed"
         );
         log::warn!("{reason}");
         parsed
@@ -1181,13 +1480,10 @@ impl ConfigLoader {
                 }
             }
         }
-        let Some(trust) = parsed.trust.as_mut() else {
-            return;
-        };
-        if let Some(sigstore) = trust.sigstore.as_mut() {
-            sigstore.anchor_relative_root(dir);
+        if let Some(sigstore) = parsed.sigstore.as_mut() {
+            sigstore.anchor_relative_roots(dir);
         }
-        for policy in &mut trust.policy {
+        for policy in parsed.trust.iter_mut().flat_map(|trust| trust.policy.iter_mut()) {
             policy.anchor_relative_keys(dir);
         }
     }
@@ -1207,6 +1503,7 @@ impl ConfigLoader {
             managed,
             update,
             trust,
+            sigstore,
             shell,
             records,
             telemetry,
@@ -1245,14 +1542,15 @@ impl ConfigLoader {
             entries.retain(|_, mirror| mirror.registry_system_locked || mirror.index_system_locked);
         }
         *mirrors = mirrors.take().filter(|entries| !entries.is_empty());
-        // Per policy entry, since policies array-append across tiers; `[trust.sigstore]` as a whole.
+        // Per policy entry, since policies array-append across tiers; per table for `[sigstore]`.
         if let Some(declared) = trust.as_mut() {
             declared.policy.retain(|policy| policy.system_locked);
-            declared.sigstore = declared.sigstore.take().filter(|sigstore| sigstore.system_locked);
         }
-        *trust = trust
-            .take()
-            .filter(|declared| !declared.policy.is_empty() || declared.sigstore.is_some());
+        *trust = trust.take().filter(|declared| !declared.policy.is_empty());
+        if let Some(tables) = sigstore.as_mut() {
+            tables.retain_system_locked();
+        }
+        *sigstore = sigstore.take().filter(|tables| !tables.is_empty());
     }
 
     /// System config: `/etc/ocx/config.toml`, or `%ProgramFiles%\ocx\config.toml` on Windows. The Windows
@@ -1294,6 +1592,22 @@ impl ConfigLoader {
     pub fn home_sigstore_trusted_root_path() -> Option<PathBuf> {
         crate::home::default_ocx_root().map(|d| d.join("sigstore").join("trusted-root.json"))
     }
+
+    /// The convention trust-root path of one Sigstore instance: the public instance keeps
+    /// [`Self::home_sigstore_trusted_root_path`]; any other lives under
+    /// `$OCX_HOME/sigstore/instances/<host>_<port>/trusted-root.json`. `None` for an IPv6-literal authority.
+    pub fn home_sigstore_trusted_root_path_for(authority: &ocx_trust::SigstoreAuthority) -> Option<PathBuf> {
+        if *authority == ocx_trust::SigstoreAuthority::public() {
+            return Self::home_sigstore_trusted_root_path();
+        }
+        let directory = authority.convention_dir_name()?;
+        crate::home::default_ocx_root().map(|home| {
+            home.join("sigstore")
+                .join("instances")
+                .join(directory)
+                .join("trusted-root.json")
+        })
+    }
 }
 
 /// [`dirs::config_dir`]'s answer from the hermetic override table; `dirs` reads the process
@@ -1318,6 +1632,20 @@ fn hermetic_config_dir() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_unmatched_registry_key_warns_once_naming_both_spellings() {
+        let parsed: Config = toml::from_str(
+            "[registries.\"OCX.SH\"]\nindex_signature = \"enforce\"\n[registries.\"ocx.sh\"]\nindex = \"https://i.example\"\n\
+             [registries.\"localhost:05000\"]\ninsecure = true\n",
+        )
+        .expect("parses");
+        let warnings = ConfigLoader::unmatched_registry_key_warnings(&parsed, Path::new("/etc/ocx/config.toml"));
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(warnings[0].contains("[registries.\"OCX.SH\"]"), "{}", warnings[0]);
+        assert!(warnings[0].contains("\"ocx.sh\""), "{}", warnings[0]);
+        assert!(warnings[1].contains("localhost:5000"), "{}", warnings[1]);
+    }
+
     use std::path::PathBuf;
 
     use tempfile::TempDir;
@@ -4085,6 +4413,59 @@ mod tests {
         );
     }
 
+    /// A registry armed only by the `--config` overlay keeps its index against an unpinned payload that
+    /// reroutes it, directly or through a `[mirrors]` index role.
+    #[tokio::test]
+    async fn unpinned_managed_snapshot_cannot_reroute_an_index_armed_only_by_the_overlay() {
+        let env = ocx_env::overrides::lock();
+        let dir = TempDir::new().unwrap();
+        env.set(&ocx_env::OCX_HOME, dir.path().to_str().unwrap());
+        env.remove(&ocx_env::OCX_CONFIG);
+        env.remove(&ocx_env::OCX_NO_CONFIG);
+        env.remove(&ocx_env::OCX_MANAGED_CONFIG);
+
+        write_managed_snapshot(
+            dir.path(),
+            "overlay-only.test/managed-config:v1",
+            "[registries.\"corp.example\"]\nindex = \"https://evil.example\"\n\
+             [mirrors.\"index.corp.example\"]\nindex = \"https://evil.example\"\n",
+        );
+        let overlay_dir = TempDir::new().unwrap();
+        let overlay = write_config(
+            &overlay_dir,
+            "overlay.toml",
+            "[managed]\nsource = \"overlay-only.test/managed-config:v1\"\n\
+             [registries.\"corp.example\"]\nindex = \"https://index.corp.example\"\n\
+             index_publishers = [{ kind = \"keyless\", identity = \"a\", oidc_issuer = \"i\" }]\n",
+        );
+        let inputs = ConfigInputs {
+            explicit_path: Some(&overlay),
+            explicit_project_path: None,
+            received_config_list: None,
+            cwd: None,
+        };
+        let loaded = ConfigLoader::load_with_local_view(inputs)
+            .await
+            .expect("load must succeed");
+
+        assert_eq!(
+            loaded.merged.registries.as_ref().expect("registries")["corp.example"]
+                .index
+                .as_deref(),
+            Some("https://index.corp.example"),
+            "the payload must not reroute the overlay-armed registry's index"
+        );
+        assert!(
+            loaded
+                .merged
+                .mirrors
+                .iter()
+                .flatten()
+                .all(|(_, mirror)| mirror.index.is_none()),
+            "the payload must not set an index role for the overlay-armed registry's host"
+        );
+    }
+
     /// A snapshot fetched under the `--config` OVERLAY's source merges even
     /// though the home tier declares a DIFFERENT `[managed].source` — the
     /// fold's identity gate must resolve from `local_only` (base + overlay),
@@ -4291,9 +4672,10 @@ mod tests {
         };
         let local_only = accumulator.clone();
 
-        let (folded, _snapshot, _resolved, _state, _) = ConfigLoader::fold_managed_tier(accumulator, &local_only)
-            .await
-            .expect("fold must succeed even against a locked accumulator");
+        let (folded, _snapshot, _resolved, _state, _) =
+            ConfigLoader::fold_managed_tier(accumulator, &local_only, false)
+                .await
+                .expect("fold must succeed even against a locked accumulator");
         assert_eq!(
             folded.registry.as_ref().and_then(|r| r.default.as_deref()),
             Some("system-locked-registry.example"),
@@ -4345,7 +4727,7 @@ mod tests {
         };
         let local_only = accumulator.clone();
 
-        let (folded, snapshot, _resolved, _state, _) = ConfigLoader::fold_managed_tier(accumulator, &local_only)
+        let (folded, snapshot, _resolved, _state, _) = ConfigLoader::fold_managed_tier(accumulator, &local_only, false)
             .await
             .expect("fold must succeed");
         assert!(
@@ -4386,7 +4768,7 @@ mod tests {
         };
         let local_only = accumulator.clone();
 
-        let (folded, snapshot, _resolved, state, _) = ConfigLoader::fold_managed_tier(accumulator, &local_only)
+        let (folded, snapshot, _resolved, state, _) = ConfigLoader::fold_managed_tier(accumulator, &local_only, false)
             .await
             .expect("a broken payload must not fail the load");
         assert!(
@@ -4432,7 +4814,7 @@ mod tests {
         };
         let local_only = accumulator.clone();
 
-        let (folded, _snapshot, _resolved, state, _) = ConfigLoader::fold_managed_tier(accumulator, &local_only)
+        let (folded, _snapshot, _resolved, state, _) = ConfigLoader::fold_managed_tier(accumulator, &local_only, false)
             .await
             .expect("fold must succeed");
         assert_eq!(
@@ -5003,7 +5385,7 @@ mod tests {
         };
         let local_only = accumulator.clone();
 
-        let (folded, ..) = ConfigLoader::fold_managed_tier(accumulator, &local_only)
+        let (folded, ..) = ConfigLoader::fold_managed_tier(accumulator, &local_only, false)
             .await
             .expect("fold must succeed against a locked accumulator");
         let telemetry = folded.telemetry.expect("present");
@@ -5129,9 +5511,10 @@ mod tests {
         };
         let local_only = accumulator.clone();
 
-        let (folded, _snapshot, _resolved, _state, _) = ConfigLoader::fold_managed_tier(accumulator, &local_only)
-            .await
-            .expect("fold must succeed even against a locked accumulator");
+        let (folded, _snapshot, _resolved, _state, _) =
+            ConfigLoader::fold_managed_tier(accumulator, &local_only, false)
+                .await
+                .expect("fold must succeed even against a locked accumulator");
 
         assert_eq!(
             folded.registries.unwrap()["corp"].index.as_deref(),
@@ -5154,11 +5537,16 @@ mod tests {
         let path = write_config(
             &dir,
             "config.toml",
-            "[trust.sigstore]\ntrusted_root = \"sigstore/trusted-root.json\"\n",
+            "[sigstore.\"fulcio.sigstore.dev\"]\ntrusted_root = \"sigstore/trusted-root.json\"\n",
         );
 
         let config = ConfigLoader::load_and_merge(&[path]).await.expect("load");
-        let sigstore = config.trust.expect("trust").sigstore.expect("sigstore");
+        let sigstore = config
+            .sigstore
+            .expect("sigstore")
+            .get(&ocx_trust::SigstoreAuthority::public())
+            .cloned()
+            .expect("public table");
         let anchored = sigstore.trusted_root.expect("trusted_root");
         assert!(
             anchored.is_absolute(),
@@ -5276,22 +5664,32 @@ mod tests {
             // Quoted by the TOML serializer, not by the format string — see the
             // signer-key twin above for the Windows path that breaks otherwise.
             &format!(
-                "[trust.sigstore]\ntrusted_root = {}\n",
+                "[sigstore.\"fulcio.sigstore.dev\"]\ntrusted_root = {}\n",
                 toml::Value::from(absolute.display().to_string())
             ),
         );
 
         let config = ConfigLoader::load_and_merge(&[path]).await.expect("load");
-        let sigstore = config.trust.expect("trust").sigstore.expect("sigstore");
+        let sigstore = config
+            .sigstore
+            .expect("sigstore")
+            .get(&ocx_trust::SigstoreAuthority::public())
+            .cloned()
+            .expect("public table");
         assert_eq!(sigstore.trusted_root.as_deref(), Some(absolute.as_path()));
     }
 
-    fn managed_payload_after_guard(payload: &str, source: &str) -> ocx_trust::SigstoreTrust {
+    fn managed_payload_after_guard(payload: &str, source: &str) -> ocx_trust::SigstoreInstance {
         let mut parsed: Config = toml::from_str(payload).expect("payload parses");
         let source =
             ocx_oci::OciIdentifier::parse_target(source, ocx_oci::DEFAULT_REGISTRY).expect("identifier parses");
         ConfigLoader::guard_managed_sigstore_trust(&mut parsed, &source);
-        parsed.trust.expect("trust").sigstore.expect("sigstore")
+        parsed
+            .sigstore
+            .expect("sigstore")
+            .get(&ocx_trust::SigstoreAuthority::public())
+            .cloned()
+            .expect("public table")
     }
 
     /// Any well-formed SPKI PEM; the guard strips by *spelling*, never by
@@ -5386,7 +5784,7 @@ mod tests {
         // payload that still carries the path form was not published through
         // the supported route.
         let sigstore = managed_payload_after_guard(
-            "[trust.sigstore]\ntrusted_root = \"/home/operator/root.json\"\nrekor_url = \"https://rekor.corp.example\"\n",
+            "[sigstore.\"fulcio.sigstore.dev\"]\ntrusted_root = \"/home/operator/root.json\"\nrekor_url = \"https://rekor.corp.example\"\n",
             "ghcr.io/acme/config@sha256:1111111111111111111111111111111111111111111111111111111111111111",
         );
         assert_eq!(sigstore.trusted_root, None, "the path form is stripped");
@@ -5402,7 +5800,7 @@ mod tests {
         // Without a digest pin the trust root arrives over the channel it
         // exists to verify: whoever can move the tag can swap the CA.
         let sigstore = managed_payload_after_guard(
-            "[trust.sigstore]\ntrusted_root_json = \"{}\"\n",
+            "[sigstore.\"fulcio.sigstore.dev\"]\ntrusted_root_json = \"{}\"\n",
             "ghcr.io/acme/config:v1",
         );
         assert_eq!(sigstore.trusted_root_json, None);
@@ -5419,7 +5817,7 @@ mod tests {
     #[test]
     fn managed_tier_ignores_sigstore_endpoints_behind_an_unpinned_source() {
         let sigstore = managed_payload_after_guard(
-            "[trust.sigstore]\nfulcio_url = \"https://fulcio.attacker.example\"\nrekor_url = \"https://rekor.attacker.example\"\n",
+            "[sigstore.\"fulcio.sigstore.dev\"]\nfulcio_url = \"https://fulcio.attacker.example\"\nrekor_url = \"https://rekor.attacker.example\"\n",
             "ghcr.io/acme/config:v1",
         );
         assert_eq!(
@@ -5429,10 +5827,71 @@ mod tests {
         assert_eq!(sigstore.rekor_url, None, "same rule for the transparency log");
     }
 
+    /// Collects `warn` records of this process; the only logger a test of this crate installs.
+    struct WarningCapture(std::sync::Mutex<Vec<String>>);
+
+    impl log::Log for WarningCapture {
+        fn enabled(&self, metadata: &log::Metadata) -> bool {
+            metadata.level() <= log::Level::Warn
+        }
+
+        fn log(&self, record: &log::Record) {
+            if self.enabled(record.metadata()) {
+                self.0.lock().expect("capture lock").push(record.args().to_string());
+            }
+        }
+
+        fn flush(&self) {}
+    }
+
+    static WARNINGS: WarningCapture = WarningCapture(std::sync::Mutex::new(Vec::new()));
+
+    fn capture_warnings() {
+        static INSTALL: std::sync::Once = std::sync::Once::new();
+        INSTALL.call_once(|| log::set_logger(&WARNINGS).expect("this crate's tests install no other logger"));
+        log::set_max_level(log::LevelFilter::Warn);
+    }
+
+    /// The captured warnings that mention `marker`.
+    fn warnings_mentioning(marker: &str) -> Vec<String> {
+        WARNINGS
+            .0
+            .lock()
+            .expect("capture lock")
+            .iter()
+            .filter(|message| message.contains(marker))
+            .cloned()
+            .collect()
+    }
+
+    /// Every strip warning reads as one sentence: no run of spaces left behind by a string continuation.
+    #[test]
+    fn managed_payload_strip_warnings_carry_no_double_spaces() {
+        capture_warnings();
+        let _ = managed_payload_after_guard(
+            "[sigstore.\"fulcio.sigstore.dev\"]\ntrusted_root = \"/x\"\ntrusted_root_json = \"{}\"\n\
+             rekor_upload = false\nfulcio_url = \"https://f.example\"\nrekor_url = \"https://r.example\"\n",
+            "ghcr.io/acme/config:latest",
+        );
+
+        let warnings: Vec<String> = WARNINGS
+            .0
+            .lock()
+            .expect("capture lock")
+            .iter()
+            .filter(|message| message.contains("ghcr.io/acme/config"))
+            .cloned()
+            .collect();
+        assert!(warnings.len() >= 5, "every stripped field warns once; got {warnings:?}");
+        for message in &warnings {
+            assert!(!message.contains("  "), "double space in: {message}");
+        }
+    }
+
     #[test]
     fn managed_tier_honours_sigstore_endpoints_behind_a_digest_pin() {
         let sigstore = managed_payload_after_guard(
-            "[trust.sigstore]\nfulcio_url = \"https://fulcio.corp.example\"\nrekor_url = \"https://rekor.corp.example\"\n",
+            "[sigstore.\"fulcio.sigstore.dev\"]\nfulcio_url = \"https://fulcio.corp.example\"\nrekor_url = \"https://rekor.corp.example\"\n",
             "ghcr.io/acme/config@sha256:1111111111111111111111111111111111111111111111111111111111111111",
         );
         assert_eq!(sigstore.fulcio_url.as_deref(), Some("https://fulcio.corp.example"));
@@ -5446,7 +5905,7 @@ mod tests {
     #[test]
     fn managed_tier_honours_an_inline_trust_root_behind_a_digest_pin() {
         let sigstore = managed_payload_after_guard(
-            "[trust.sigstore]\ntrusted_root_json = \"{}\"\n",
+            "[sigstore.\"fulcio.sigstore.dev\"]\ntrusted_root_json = \"{}\"\n",
             "ghcr.io/acme/config@sha256:1111111111111111111111111111111111111111111111111111111111111111",
         );
         assert_eq!(
@@ -5660,6 +6119,54 @@ mod tests {
         assert!(
             err.to_string().contains("extra_ca_certs names a local file"),
             "the refusal explains which key means what: {err}"
+        );
+    }
+
+    /// One `[sigstore."<authority>"]` table naming both trust-root spellings is refused at load, naming the file
+    /// and the table, so it cannot sign and then fail later with a generic trust-root error.
+    #[tokio::test]
+    async fn a_sigstore_table_declaring_both_trust_root_spellings_is_refused_at_load() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = write_config(
+            &dir,
+            "config.toml",
+            "[sigstore.\"localhost:5555\"]\ntrusted_root = \"root.json\"\ntrusted_root_json = \"{}\"\n",
+        );
+
+        let err = ConfigLoader::load_and_merge(std::slice::from_ref(&path))
+            .await
+            .expect_err("both spellings in one table must be refused");
+        assert!(
+            matches!(&err, Error::AmbiguousTrustRoot { path: named, authority } if *named == path && authority == "localhost:5555"),
+            "the refusal names the file and the table; got {err:?}"
+        );
+    }
+
+    /// Two keys of one file that parse to one authority are refused, naming both spellings, rather than one
+    /// silently replacing the other.
+    #[tokio::test]
+    async fn two_sigstore_keys_spelling_one_authority_are_refused_at_load() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = write_config(
+            &dir,
+            "config.toml",
+            "[sigstore.\"localhost:5555\"]\nrekor_url = \"https://a.example\"\n\
+             [sigstore.\"LOCALHOST:5555\"]\nrekor_url = \"https://b.example\"\n",
+        );
+
+        let err = ConfigLoader::load_and_merge(std::slice::from_ref(&path))
+            .await
+            .expect_err("collapsing keys must be refused");
+        let Error::SigstoreAuthorityDuplicate { first, second } = &err else {
+            panic!("expected SigstoreAuthorityDuplicate, got {err:?}");
+        };
+        let mut spellings = [first.as_str(), second.as_str()];
+        spellings.sort_unstable();
+        assert_eq!(spellings, ["LOCALHOST:5555", "localhost:5555"]);
+        let message = err.to_string();
+        assert!(
+            message.contains("LOCALHOST:5555") && message.contains("localhost:5555"),
+            "{message}"
         );
     }
 
@@ -6487,7 +6994,7 @@ mod tests {
         };
         let local_only = accumulator.clone();
 
-        let (folded, _snapshot, _resolved, state, _) = ConfigLoader::fold_managed_tier(accumulator, &local_only)
+        let (folded, _snapshot, _resolved, state, _) = ConfigLoader::fold_managed_tier(accumulator, &local_only, false)
             .await
             .expect("fold must succeed");
 
@@ -7170,9 +7677,10 @@ mod tests {
         };
         let local_only = accumulator.clone();
 
-        let (folded, _snapshot, _resolved, _state, _) = ConfigLoader::fold_managed_tier(accumulator, &local_only)
-            .await
-            .expect("fold must succeed even against a locked accumulator");
+        let (folded, _snapshot, _resolved, _state, _) =
+            ConfigLoader::fold_managed_tier(accumulator, &local_only, false)
+                .await
+                .expect("fold must succeed even against a locked accumulator");
 
         let folded_records = folded.records.expect("[records] must survive the fold");
         assert_eq!(
@@ -7223,9 +7731,10 @@ mod tests {
         };
         let local_only = accumulator.clone();
 
-        let (folded, _snapshot, _resolved, _state, _) = ConfigLoader::fold_managed_tier(accumulator, &local_only)
-            .await
-            .expect("fold must succeed");
+        let (folded, _snapshot, _resolved, _state, _) =
+            ConfigLoader::fold_managed_tier(accumulator, &local_only, false)
+                .await
+                .expect("fold must succeed");
 
         let folded_records = folded.records.expect("[records] must survive the fold");
         assert_eq!(
@@ -7531,5 +8040,686 @@ mod tests {
             .await
             .expect("an explicit flag still resolves");
         assert_eq!(flagged, Some(manifest), "no_project never prunes the explicit flag");
+    }
+
+    /// Every TOML spelling of the retired table, each with the key that makes it non-empty.
+    const RETIRED_TRUST_SIGSTORE_FORMS: [(&str, &str); 4] = [
+        ("table", "[trust.sigstore]\nrekor_upload = false\n"),
+        ("dotted key", "trust.sigstore.rekor_upload = false\n"),
+        ("inline table", "trust = { sigstore = { rekor_upload = false } }\n"),
+        ("array of tables", "[[trust.sigstore]]\nrekor_upload = false\n"),
+    ];
+
+    /// A leftover `[trust.sigstore]` must fail the file in every TOML form: the typed parse would
+    /// drop it and silently widen trust to the public instance.
+    #[tokio::test]
+    async fn retired_trust_sigstore_is_refused_in_every_toml_form() {
+        for (form, payload) in RETIRED_TRUST_SIGSTORE_FORMS {
+            let dir = TempDir::new().unwrap();
+            let path = write_config(&dir, "config.toml", payload);
+            let error = ConfigLoader::load_and_merge(std::slice::from_ref(&path))
+                .await
+                .expect_err(form);
+            assert!(
+                matches!(&error, Error::TrustSigstoreRetired { path: named } if *named == path),
+                "{form}: {error:?}"
+            );
+        }
+    }
+
+    /// The message names the file and both halves of the move.
+    #[tokio::test]
+    async fn retired_trust_sigstore_message_names_the_file_and_both_moves() {
+        let dir = TempDir::new().unwrap();
+        let path = write_config(&dir, "config.toml", "[trust.sigstore]\nrekor_upload = false\n");
+        let message = ConfigLoader::load_and_merge(std::slice::from_ref(&path))
+            .await
+            .expect_err("refused")
+            .to_string();
+        assert!(message.contains(&path.display().to_string()), "{message}");
+        assert!(message.contains("[sigstore.\""), "{message}");
+        assert!(message.contains("sigstore = \""), "{message}");
+    }
+
+    /// Absent `[trust.sigstore]`, a `[trust]` with other keys still loads: the probe is a key check.
+    #[tokio::test]
+    async fn trust_without_the_retired_table_still_loads() {
+        let config = load_one_config("[trust]\n[[trust.policy]]\nscope = \"ocx.sh\"\nsigners = []\n").await;
+        assert!(!matches!(config, Err(Error::TrustSigstoreRetired { .. })), "{config:?}");
+    }
+
+    /// System, home and `OCX_CONFIG` files all pass the one probe.
+    #[tokio::test]
+    async fn retired_trust_sigstore_is_refused_in_the_system_home_and_explicit_tiers() {
+        let retired = "[trust.sigstore]\nrekor_upload = false\n";
+        let env = ocx_env::overrides::lock();
+        let dir = TempDir::new().unwrap();
+        env.set(&ocx_env::OCX_HOME, dir.path().to_str().unwrap());
+        env.remove(&ocx_env::OCX_CONFIG);
+        env.remove(&ocx_env::OCX_NO_CONFIG);
+        env.remove(&ocx_env::OCX_MANAGED_CONFIG);
+
+        let system_dir = TempDir::new().unwrap();
+        with_system_config(&env, &system_dir, retired);
+        let system = ConfigLoader::load(no_inputs()).await.expect_err("system tier");
+        assert!(matches!(system, Error::TrustSigstoreRetired { .. }), "{system:?}");
+
+        without_system_config(&env);
+        std::fs::write(dir.path().join("config.toml"), retired).unwrap();
+        let home = ConfigLoader::load(no_inputs()).await.expect_err("home tier");
+        assert!(matches!(home, Error::TrustSigstoreRetired { .. }), "{home:?}");
+
+        std::fs::remove_file(dir.path().join("config.toml")).unwrap();
+        let explicit = write_config(&dir, "explicit.toml", retired);
+        env.set(&ocx_env::OCX_CONFIG, explicit.to_str().unwrap());
+        let overlay = ConfigLoader::load(no_inputs()).await.expect_err("OCX_CONFIG tier");
+        assert!(matches!(overlay, Error::TrustSigstoreRetired { .. }), "{overlay:?}");
+    }
+
+    fn retired_snapshot_env(env: &ocx_env::overrides::EnvLock, home: &TempDir) {
+        env.set(&ocx_env::OCX_HOME, home.path().to_str().unwrap());
+        env.remove(&ocx_env::OCX_CONFIG);
+        env.remove(&ocx_env::OCX_NO_CONFIG);
+        env.remove(&ocx_env::OCX_MANAGED_CONFIG);
+        without_system_config(env);
+        let source = "registry.test/managed-config:stable";
+        std::fs::write(
+            home.path().join("config.toml"),
+            format!("[managed]\nsource = \"{source}\"\nrequired = false\n"),
+        )
+        .unwrap();
+        write_managed_snapshot(
+            home.path(),
+            source,
+            "[trust.sigstore]\nrekor_upload = false\n[registries.\"ocx.sh\"]\nindex = \"https://index.corp.example\"\n",
+        );
+    }
+
+    fn no_inputs() -> ConfigInputs<'static> {
+        ConfigInputs {
+            explicit_path: None,
+            explicit_project_path: None,
+            received_config_list: None,
+            cwd: None,
+        }
+    }
+
+    /// A stale managed snapshot refuses every ordinary command.
+    #[tokio::test]
+    async fn a_managed_snapshot_with_the_retired_table_is_refused() {
+        let env = ocx_env::overrides::lock();
+        let home = TempDir::new().unwrap();
+        retired_snapshot_env(&env, &home);
+        let error = ConfigLoader::load_with_local_view(no_inputs())
+            .await
+            .expect_err("a stale snapshot must refuse");
+        assert!(matches!(error, Error::TrustSigstoreRetired { .. }), "{error:?}");
+    }
+
+    /// `ocx config update` loads the same snapshot with one warning, so the refresh that replaces it
+    /// can run; the rest of the payload still applies.
+    #[tokio::test]
+    async fn the_refresh_command_loads_a_stale_managed_snapshot() {
+        let env = ocx_env::overrides::lock();
+        let home = TempDir::new().unwrap();
+        retired_snapshot_env(&env, &home);
+        let loaded = ConfigLoader::load_with_local_view_tolerating_retired_snapshot(no_inputs())
+            .await
+            .expect("the refresh must be able to load a stale snapshot");
+        assert_eq!(
+            loaded.managed_snapshot_state,
+            crate::managed::ManagedSnapshotState::Applied
+        );
+        assert!(loaded.merged.sigstore.is_none(), "the retired table never takes effect");
+    }
+
+    /// The `config push` input and `ocx config test` share one probe with the loader.
+    #[test]
+    fn the_shared_probe_matches_every_form_and_nothing_else() {
+        for (form, payload) in RETIRED_TRUST_SIGSTORE_FORMS {
+            assert!(ConfigLoader::declares_retired_trust_sigstore(payload), "{form}");
+        }
+        assert!(!ConfigLoader::declares_retired_trust_sigstore("[trust]\n"));
+        assert!(!ConfigLoader::declares_retired_trust_sigstore(
+            "[sigstore.\"fulcio.sigstore.dev\"]\n"
+        ));
+        assert!(!ConfigLoader::declares_retired_trust_sigstore("not toml ["));
+    }
+
+    fn authority(key: &str) -> ocx_trust::SigstoreAuthority {
+        ocx_trust::SigstoreAuthority::parse(key).expect("authority")
+    }
+
+    /// Two tables in one file each anchor their own relative `trusted_root` against that file.
+    #[tokio::test]
+    async fn every_sigstore_table_anchors_its_relative_trusted_root() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = write_config(
+            &dir,
+            "config.toml",
+            "[sigstore.\"fulcio.a.example\"]\ntrusted_root = \"a/root.json\"\n\
+             [sigstore.\"fulcio.b.example\"]\ntrusted_root = \"/abs/b.json\"\n",
+        );
+        let tables = ConfigLoader::load_and_merge(&[path])
+            .await
+            .expect("load")
+            .sigstore
+            .expect("tables");
+        assert_eq!(
+            tables
+                .get(&authority("fulcio.a.example"))
+                .and_then(|t| t.trusted_root.clone()),
+            Some(dir.path().join("a").join("root.json"))
+        );
+        assert_eq!(
+            tables
+                .get(&authority("fulcio.b.example"))
+                .and_then(|t| t.trusted_root.clone()),
+            Some(PathBuf::from("/abs/b.json")),
+            "an absolute path is not rewritten"
+        );
+    }
+
+    /// A locked table survives the `OCX_NO_CONFIG` filter whole; an unlocked one is pruned.
+    #[test]
+    fn retain_keeps_a_locked_sigstore_table_and_drops_an_unlocked_one() {
+        let mut system: crate::Config =
+            toml::from_str("[sigstore.\"fulcio.a.example\"]\nrekor_url = \"https://r\"\n").unwrap();
+        ConfigLoader::apply_system_locks(&mut system);
+        let unlocked: crate::Config =
+            toml::from_str("[sigstore.\"fulcio.b.example\"]\nrekor_url = \"https://r\"\n").unwrap();
+        let mut config = crate::Config::default();
+        config.merge(system);
+        config.merge(unlocked);
+        ConfigLoader::retain_system_locked_sections(&mut config);
+        let tables = config.sigstore.expect("the locked table survives");
+        assert!(
+            tables
+                .get(&authority("fulcio.a.example"))
+                .is_some_and(|t| t.system_locked)
+        );
+        assert!(tables.get(&authority("fulcio.b.example")).is_none());
+    }
+
+    /// A system table ignores every lower tier, field by field, while another table stays open.
+    #[tokio::test]
+    async fn a_system_locked_sigstore_table_ignores_lower_tiers() {
+        let env = ocx_env::overrides::lock();
+        let home = TempDir::new().unwrap();
+        env.set(&ocx_env::OCX_HOME, home.path().to_str().unwrap());
+        env.remove(&ocx_env::OCX_CONFIG);
+        env.remove(&ocx_env::OCX_NO_CONFIG);
+        env.remove(&ocx_env::OCX_MANAGED_CONFIG);
+        let system_dir = TempDir::new().unwrap();
+        with_system_config(
+            &env,
+            &system_dir,
+            "[sigstore.\"fulcio.a.example\"]\nrekor_url = \"https://rekor.system\"\n",
+        );
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[sigstore.\"fulcio.a.example\"]\nrekor_url = \"https://rekor.home\"\nrekor_upload = true\n\
+             [sigstore.\"fulcio.b.example\"]\nrekor_url = \"https://rekor.b\"\n",
+        )
+        .unwrap();
+        let tables = ConfigLoader::load(no_inputs())
+            .await
+            .expect("load")
+            .sigstore
+            .expect("tables");
+        let locked = tables.get(&authority("fulcio.a.example")).expect("locked table");
+        assert_eq!(locked.rekor_url.as_deref(), Some("https://rekor.system"));
+        assert_eq!(locked.rekor_upload, None, "the lock drops every lower-tier field");
+        assert_eq!(
+            tables
+                .get(&authority("fulcio.b.example"))
+                .and_then(|t| t.rekor_url.as_deref()),
+            Some("https://rekor.b")
+        );
+    }
+
+    const PINNED: &str = "ghcr.io/acme/config@sha256:1111111111111111111111111111111111111111111111111111111111111111";
+    const UNPINNED: &str = "ghcr.io/acme/config:v1";
+
+    /// `payload` after the managed guards, folded over a `lower` tier that is the user's own config.
+    fn index_signing_after_guard(lower: &str, payload: &str, source: &str) -> crate::RegistryConfig {
+        let lower: Config = toml::from_str(lower).expect("lower parses");
+        let mut parsed: Config = toml::from_str(payload).expect("payload parses");
+        let source =
+            ocx_oci::OciIdentifier::parse_target(source, ocx_oci::DEFAULT_REGISTRY).expect("identifier parses");
+        ConfigLoader::guard_managed_index_signing(&mut parsed, &lower, &source);
+        parsed
+            .registries
+            .and_then(|mut registries| registries.remove("ocx.sh"))
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn unpinned_managed_payload_loses_its_index_publishers() {
+        let payload = "[registries.\"ocx.sh\"]\nindex_publishers = [{ kind = \"keyless\", identity = \"a\", oidc_issuer = \"i\" }]\n";
+        assert!(
+            index_signing_after_guard("", payload, UNPINNED)
+                .index_publishers
+                .is_none()
+        );
+        assert_eq!(
+            index_signing_after_guard("", payload, PINNED)
+                .index_publishers
+                .map(|list| list.len()),
+            Some(1),
+            "a digest-pinned source breaks the circularity"
+        );
+    }
+
+    #[test]
+    fn unpinned_managed_payload_may_only_tighten_index_signature() {
+        let user_warn = "[registries.\"ocx.sh\"]\nindex_signature = \"warn\"\n";
+        let user_enforce = "[registries.\"ocx.sh\"]\nindex_signature = \"enforce\"\n";
+        let set = |mode: &str| format!("[registries.\"ocx.sh\"]\nindex_signature = \"{mode}\"\n");
+        let after = |lower: &str, mode: &str, source: &str| {
+            index_signing_after_guard(lower, &set(mode), source).index_signature
+        };
+        assert_eq!(
+            after(user_warn, "enforce", UNPINNED),
+            Some(crate::IndexSignatureMode::Enforce)
+        );
+        assert_eq!(after(user_warn, "off", UNPINNED), None, "loosening is dropped");
+        assert_eq!(after(user_enforce, "warn", UNPINNED), None, "loosening is dropped");
+        assert_eq!(
+            after(user_enforce, "enforce", UNPINNED),
+            Some(crate::IndexSignatureMode::Enforce)
+        );
+        // No local value: the default of a registry with signers is `warn`.
+        assert_eq!(after("", "off", UNPINNED), None);
+        assert_eq!(after("", "warn", UNPINNED), Some(crate::IndexSignatureMode::Warn));
+        // A pinned source may loosen.
+        assert_eq!(after(user_enforce, "off", PINNED), Some(crate::IndexSignatureMode::Off));
+    }
+
+    #[test]
+    fn unpinned_managed_payload_may_only_tighten_index_expiry() {
+        let payload = "[registries.\"ocx.sh\"]\nindex_expiry = \"ignore\"\n";
+        let user_ignore = "[registries.\"ocx.sh\"]\nindex_expiry = \"ignore\"\n";
+        assert_eq!(index_signing_after_guard("", payload, UNPINNED).index_expiry, None);
+        assert_eq!(
+            index_signing_after_guard(user_ignore, payload, UNPINNED).index_expiry,
+            Some(crate::IndexExpiryMode::Ignore),
+            "the user already loosened it, so the payload loosens nothing"
+        );
+        assert_eq!(
+            index_signing_after_guard("", payload, PINNED).index_expiry,
+            Some(crate::IndexExpiryMode::Ignore)
+        );
+        assert_eq!(
+            index_signing_after_guard(
+                user_ignore,
+                "[registries.\"ocx.sh\"]\nindex_expiry = \"check\"\n",
+                UNPINNED
+            )
+            .index_expiry,
+            Some(crate::IndexExpiryMode::Check),
+            "tightening stays"
+        );
+    }
+
+    /// `payload` after the index-signing guard, folded over the compiled-in defaults plus the user's own `lower`.
+    fn guarded_over_builtin(lower: &str, payload: &str, source: &str) -> Config {
+        let mut below = ConfigLoader::builtin_defaults();
+        below.merge(toml::from_str(lower).expect("lower parses"));
+        let mut parsed: Config = toml::from_str(payload).expect("payload parses");
+        let source =
+            ocx_oci::OciIdentifier::parse_target(source, ocx_oci::DEFAULT_REGISTRY).expect("identifier parses");
+        ConfigLoader::guard_managed_index_signing(&mut parsed, &below, &source);
+        parsed
+    }
+
+    fn registry_index_after_guard(lower: &str, payload: &str, source: &str) -> Option<String> {
+        guarded_over_builtin(lower, payload, source)
+            .registries
+            .and_then(|mut registries| registries.remove("ocx.sh"))
+            .and_then(|entry| entry.index)
+    }
+
+    #[test]
+    fn unpinned_managed_payload_cannot_switch_off_the_index_below() {
+        let payload = "[registries.\"ocx.sh\"]\nindex = \"\"\n";
+        assert_eq!(
+            registry_index_after_guard("", payload, UNPINNED),
+            None,
+            "an empty index would resolve the namespace as plain OCI, past the catalog check"
+        );
+        assert_eq!(
+            registry_index_after_guard("", payload, PINNED).as_deref(),
+            Some(""),
+            "a digest-pinned source may"
+        );
+    }
+
+    #[test]
+    fn unpinned_managed_payload_cannot_reroute_the_index_below() {
+        let payload = "[registries.\"ocx.sh\"]\nindex = \"https://evil.example\"\n";
+        assert_eq!(registry_index_after_guard("", payload, UNPINNED), None);
+        assert_eq!(
+            registry_index_after_guard(
+                "[registries.\"ocx.sh\"]\nindex = \"https://corp.example\"\n",
+                payload,
+                UNPINNED
+            ),
+            None,
+            "a user-declared index is as protected as the compiled-in one"
+        );
+        assert_eq!(
+            registry_index_after_guard("", payload, PINNED).as_deref(),
+            Some("https://evil.example")
+        );
+    }
+
+    #[test]
+    fn unpinned_managed_payload_may_add_an_index_to_a_registry_without_a_signer_list() {
+        let payload = "[registries.\"ghcr.io\"]\nindex = \"https://corp.example\"\n";
+        let after = guarded_over_builtin("", payload, UNPINNED);
+        assert_eq!(
+            after.registries.expect("registries")["ghcr.io"].index.as_deref(),
+            Some("https://corp.example"),
+            "no catalog check is armed for this registry, so there is none to weaken"
+        );
+    }
+
+    #[test]
+    fn unpinned_managed_payload_may_change_the_index_of_a_registry_without_a_signer_list() {
+        let payload = "[registries.\"ghcr.io\"]\nindex = \"https://new.example\"\n";
+        let after = guarded_over_builtin(
+            "[registries.\"ghcr.io\"]\nindex = \"https://old.example\"\n",
+            payload,
+            UNPINNED,
+        );
+        assert_eq!(
+            after.registries.expect("registries")["ghcr.io"].index.as_deref(),
+            Some("https://new.example")
+        );
+    }
+
+    #[test]
+    fn unpinned_managed_payload_cannot_reroute_the_index_of_a_registry_with_user_signers() {
+        let lower = "[registries.\"ghcr.io\"]\nindex = \"https://corp.example\"\nindex_publishers = [{ kind = \"keyless\", identity = \"a\", oidc_issuer = \"i\" }]\n";
+        let payload = "[registries.\"ghcr.io\"]\nindex = \"https://evil.example\"\n";
+        let after = guarded_over_builtin(lower, payload, UNPINNED);
+        assert_eq!(after.registries.expect("registries")["ghcr.io"].index, None);
+    }
+
+    #[test]
+    fn unpinned_managed_payload_may_reroute_an_index_whose_mode_is_off() {
+        let lower = "[registries.\"ocx.sh\"]\nindex_signature = \"off\"\n";
+        let payload = "[registries.\"ocx.sh\"]\nindex = \"https://corp.example\"\n";
+        assert_eq!(
+            registry_index_after_guard(lower, payload, UNPINNED).as_deref(),
+            Some("https://corp.example"),
+            "mode off below means the check is not armed"
+        );
+    }
+
+    #[test]
+    fn unpinned_managed_payload_may_set_an_index_role_for_a_host_no_armed_registry_uses() {
+        let payload = "[mirrors.\"private.example\"]\nindex = \"https://mirror.example\"\n";
+        let after = guarded_over_builtin("", payload, UNPINNED);
+        assert_eq!(
+            after.mirrors.expect("mirrors")["private.example"].index.as_deref(),
+            Some("https://mirror.example")
+        );
+    }
+
+    #[test]
+    fn unpinned_managed_payload_cannot_reroute_an_index_through_a_mirror() {
+        let payload =
+            "[mirrors.\"index.ocx.sh\"]\nregistry = \"https://r.example\"\nindex = \"https://evil.example\"\n";
+        let after = guarded_over_builtin("", payload, UNPINNED);
+        let mirror = &after.mirrors.expect("mirrors")["index.ocx.sh"];
+        assert_eq!(
+            mirror.index, None,
+            "the index role replaces the base URL of the checked index"
+        );
+        assert_eq!(
+            mirror.registry.as_deref(),
+            Some("https://r.example"),
+            "the registry role carries digest-verified content only and stays"
+        );
+        let pinned = guarded_over_builtin("", payload, PINNED);
+        assert_eq!(
+            pinned.mirrors.expect("mirrors")["index.ocx.sh"].index.as_deref(),
+            Some("https://evil.example")
+        );
+    }
+
+    #[test]
+    fn an_ignored_mirror_index_role_leaves_no_empty_entry_to_fail_the_mirror_map() {
+        let payload = "[mirrors.\"index.ocx.sh\"]\nindex = \"https://evil.example\"\n";
+        let mut merged = ConfigLoader::builtin_defaults();
+        merged.merge(guarded_over_builtin("", payload, UNPINNED));
+        let resolved = crate::mirror::resolve_mirror_map(&merged, Vec::new(), &[])
+            .expect("a stripped role leaves nothing for the mirror map to refuse");
+        assert!(
+            merged
+                .mirrors
+                .as_ref()
+                .is_none_or(|mirrors| !mirrors.contains_key("index.ocx.sh")),
+            "the role-less entry is dropped"
+        );
+        drop(resolved);
+    }
+
+    #[test]
+    fn an_ignored_mirror_index_role_keeps_the_registry_role_of_the_same_entry() {
+        let payload =
+            "[mirrors.\"index.ocx.sh\"]\nregistry = \"https://r.example\"\nindex = \"https://evil.example\"\n";
+        let after = guarded_over_builtin("", payload, UNPINNED);
+        let mirror = &after.mirrors.expect("mirrors")["index.ocx.sh"];
+        assert_eq!(mirror.registry.as_deref(), Some("https://r.example"));
+        assert_eq!(mirror.index, None);
+    }
+
+    #[test]
+    fn an_armed_registry_without_an_index_does_not_guard_the_default_index_host() {
+        let lower =
+            format!("[registries.\"ocx.sh\"]\nindex_signature = \"off\"\n[registries.\"corp.example\"]\n{SIGNERS}");
+        let payload = "[mirrors.\"index.ocx.sh\"]\nindex = \"https://mirror.example\"\n";
+        let after = guarded_over_builtin(&lower, payload, UNPINNED);
+        assert_eq!(
+            after.mirrors.expect("mirrors")["index.ocx.sh"].index.as_deref(),
+            Some("https://mirror.example"),
+            "corp.example builds no index source, and ocx.sh is off below"
+        );
+        let armed = guarded_over_builtin("", payload, UNPINNED);
+        assert!(
+            armed
+                .mirrors
+                .as_ref()
+                .is_none_or(|mirrors| !mirrors.contains_key("index.ocx.sh")),
+            "ocx.sh armed by default still strips the role"
+        );
+    }
+
+    const SIGNERS: &str = "index_publishers = [{ kind = \"keyless\", identity = \"a\", oidc_issuer = \"i\" }]\n";
+
+    fn mirror_index_after_guard(lower_index: &str, mirror_key: &str) -> Option<String> {
+        let lower = format!("[registries.\"corp.example\"]\nindex = \"{lower_index}\"\n{SIGNERS}");
+        let payload = format!("[mirrors.\"{mirror_key}\"]\nindex = \"https://evil.example\"\n");
+        guarded_over_builtin(&lower, &payload, UNPINNED)
+            .mirrors
+            .and_then(|mut mirrors| mirrors.remove(mirror_key))
+            .and_then(|mirror| mirror.index)
+    }
+
+    #[test]
+    fn unpinned_managed_payload_cannot_reroute_a_mixed_case_index_host_through_a_mirror() {
+        assert_eq!(
+            mirror_index_after_guard("https://Index.Corp.Example/", "Index.Corp.Example"),
+            None
+        );
+    }
+
+    #[test]
+    fn unpinned_managed_payload_cannot_reroute_an_explicit_port_index_host_through_a_mirror() {
+        assert_eq!(
+            mirror_index_after_guard("https://index.corp.example:443/", "index.corp.example:443"),
+            None
+        );
+    }
+
+    #[test]
+    fn unpinned_managed_payload_may_set_an_index_role_for_a_host_the_resolver_would_not_match() {
+        assert_eq!(
+            mirror_index_after_guard("https://Index.Corp.Example/", "index.corp.example").as_deref(),
+            Some("https://evil.example"),
+            "the resolver keys on the raw authority, so a differently spelled key reroutes nothing"
+        );
+    }
+
+    #[test]
+    fn a_stripped_index_warns_once_per_key_and_a_restated_one_is_silent() {
+        capture_warnings();
+        let _ = guarded_over_builtin(
+            "",
+            "[registries.\"ocx.sh\"]\nindex = \"https://warned.example\"\n\
+             [mirrors.\"index.ocx.sh\"]\nindex = \"https://warned.example\"\n",
+            "ghcr.io/acme/index-warn:v1",
+        );
+        let _ = guarded_over_builtin(
+            "",
+            &format!(
+                "[registries.\"ocx.sh\"]\nindex = \"{}\"\n",
+                crate::index::DEFAULT_INDEX_BASE_URL
+            ),
+            "ghcr.io/acme/index-quiet:v1",
+        );
+        assert_eq!(warnings_mentioning("acme/index-warn").len(), 2);
+        assert!(warnings_mentioning("acme/index-quiet").is_empty());
+    }
+
+    #[test]
+    fn registry_names_from_a_payload_are_escaped_in_the_strip_warnings() {
+        capture_warnings();
+        let _ = guarded_over_builtin(
+            "[registries.\"evil\\u001b[31mred\"]\nindex_publishers = []\nindex = \"https://y.example\"\n",
+            "[registries.\"evil\\u001b[31mred\"]\nindex_publishers = []\nindex = \"https://x.example\"\n",
+            "ghcr.io/acme/escape-names:v1",
+        );
+        let warnings = warnings_mentioning("acme/escape-names");
+        assert!(warnings.len() >= 2, "{warnings:?}");
+        for warning in warnings {
+            assert!(
+                !warning.contains('\u{1b}'),
+                "raw escape reached the terminal: {warning:?}"
+            );
+            assert!(
+                warning.contains("evil\\u{1b}[31mred"),
+                "the name stays legible: {warning:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unmatched_registry_key_is_escaped_in_its_warning() {
+        let parsed: Config =
+            toml::from_str("[registries.\"Ghcr.io\\u001b[2J\"]\nindex_signature = \"enforce\"\n").expect("parses");
+        let warnings = ConfigLoader::unmatched_registry_key_warnings(&parsed, Path::new("/etc/ocx/config.toml"));
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(!warnings[0].contains('\u{1b}'), "{:?}", warnings[0]);
+        assert!(warnings[0].contains("\\u{1b}"), "{:?}", warnings[0]);
+    }
+
+    #[test]
+    fn unpinned_managed_payload_may_only_turn_rekor_upload_on() {
+        let off = managed_payload_after_guard("[sigstore.\"fulcio.sigstore.dev\"]\nrekor_upload = false\n", UNPINNED);
+        assert_eq!(off.rekor_upload, None, "a movable tag must not turn transparency off");
+        let on = managed_payload_after_guard("[sigstore.\"fulcio.sigstore.dev\"]\nrekor_upload = true\n", UNPINNED);
+        assert_eq!(on.rekor_upload, Some(true));
+        let pinned_off =
+            managed_payload_after_guard("[sigstore.\"fulcio.sigstore.dev\"]\nrekor_upload = false\n", PINNED);
+        assert_eq!(pinned_off.rekor_upload, Some(false));
+    }
+
+    #[test]
+    fn every_sigstore_table_of_a_payload_is_guarded() {
+        let mut parsed: Config = toml::from_str(
+            "[sigstore.\"fulcio.a.example\"]\nrekor_url = \"https://r.a\"\n[sigstore.\"fulcio.b.example\"]\nrekor_url = \"https://r.b\"\ntrusted_root = \"/x\"\n",
+        )
+        .unwrap();
+        let source = ocx_oci::OciIdentifier::parse_target(UNPINNED, ocx_oci::DEFAULT_REGISTRY).unwrap();
+        ConfigLoader::guard_managed_sigstore_trust(&mut parsed, &source);
+        for table in parsed.sigstore.expect("tables").values() {
+            assert!(table.rekor_url.is_none() && table.trusted_root.is_none());
+        }
+    }
+
+    #[test]
+    fn convention_trust_root_path_is_per_instance_and_the_public_one_is_unchanged() {
+        let env = ocx_env::overrides::lock();
+        let home = TempDir::new().unwrap();
+        env.set(&ocx_env::OCX_HOME, home.path().to_str().unwrap());
+        let of = |key: &str| ConfigLoader::home_sigstore_trusted_root_path_for(&authority(key));
+        assert_eq!(
+            of("fulcio.sigstore.dev"),
+            ConfigLoader::home_sigstore_trusted_root_path()
+        );
+        assert_eq!(
+            of("fulcio.example:5555"),
+            Some(
+                home.path()
+                    .join("sigstore")
+                    .join("instances")
+                    .join("fulcio.example_5555")
+                    .join("trusted-root.json")
+            )
+        );
+        assert_ne!(
+            of("a:5555"),
+            of("a_5555"),
+            "the port separator keeps the names injective"
+        );
+        assert_eq!(of("[::1]:5555"), None);
+    }
+
+    #[tokio::test]
+    async fn an_invalid_sigstore_authority_is_refused_by_name() {
+        for (what, payload) in [
+            ("table key with a scheme", "[sigstore.\"https://fulcio.example\"]\n"),
+            ("table key with a path", "[sigstore.\"fulcio.example/x\"]\n"),
+            (
+                "signer value",
+                "[[trust.policy]]\nscope = \"ocx.sh\"\nsigners = [{ kind = \"keyless\", identity = \"a\", oidc_issuer = \"i\", sigstore = \"a b\" }]\n",
+            ),
+        ] {
+            let error = load_one_config(payload).await.expect_err(what);
+            assert!(matches!(error, Error::SigstoreAuthorityInvalid(_)), "{what}: {error:?}");
+        }
+        load_one_config("[sigstore.\"fulcio.example:5555\"]\n")
+            .await
+            .expect("a valid key loads");
+    }
+
+    #[tokio::test]
+    async fn a_merged_sigstore_table_with_a_foreign_fulcio_url_is_refused_at_load() {
+        let env = ocx_env::overrides::lock();
+        let home = TempDir::new().unwrap();
+        env.set(&ocx_env::OCX_HOME, home.path().to_str().unwrap());
+        env.remove(&ocx_env::OCX_CONFIG);
+        env.remove(&ocx_env::OCX_NO_CONFIG);
+        env.remove(&ocx_env::OCX_MANAGED_CONFIG);
+        without_system_config(&env);
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[sigstore.\"fulcio.a.example\"]\nfulcio_url = \"https://fulcio.b.example\"\n",
+        )
+        .unwrap();
+        let error = ConfigLoader::load(no_inputs()).await.expect_err("mismatch");
+        assert!(matches!(error, Error::SigstoreTableKeyMismatch { .. }), "{error:?}");
+    }
+
+    #[tokio::test]
+    async fn an_index_signature_typo_is_a_parse_error() {
+        let error = load_one_config("[registries.\"ocx.sh\"]\nindex_signature = \"strict\"\n")
+            .await
+            .expect_err("unknown enum value");
+        assert!(matches!(error, Error::Parse { .. }), "{error:?}");
     }
 }

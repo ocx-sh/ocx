@@ -1367,7 +1367,10 @@ def test_apply_is_refused_by_a_trust_policy_with_the_wrong_identity(
     before = current.resolve()
     ocx.run("package", "sign", *sigstore_stack.sign_args(identity_token), f"{repo}:0.0.2", format=None)
     scope = f"{ocx.registry}/{repo}"
-    env = apply_env(ocx, repo, home, {"OCX_SIGSTORE_TRUSTED_ROOT": str(sigstore_stack.trusted_root_json)})
+    root = ocx.ocx_home / "sigstore" / "trusted-root.json"
+    root.parent.mkdir(parents=True, exist_ok=True)
+    root.write_bytes(sigstore_stack.trusted_root_json.read_bytes())
+    env = apply_env(ocx, repo, home, {})
 
     write_trust_policy(ocx, scope, "someone-else@example.com", sigstore_stack.issuer)
     status, terminal, _ = run_on_pty(ocx, tmp_path, env, ("clean", "--dry-run"))

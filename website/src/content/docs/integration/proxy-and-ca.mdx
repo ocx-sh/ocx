@@ -86,7 +86,7 @@ extra_ca_certs = "corp-ca.pem"    # path, relative to THIS config file
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `extra_ca_certs` | string | A path to a file holding one or more `CERTIFICATE`-tagged PEM blocks, read from disk each time a command resolves TLS trust. A relative path resolves against the directory of the `config.toml` that declared it, the same rule as `trusted_root` in [`[trust.sigstore]`][signing-trusted-root-fields]. Mutually exclusive with `extra_ca_certs_pem` |
+| `extra_ca_certs` | string | A path to a file holding one or more `CERTIFICATE`-tagged PEM blocks, read from disk each time a command resolves TLS trust. A relative path resolves against the directory of the `config.toml` that declared it, the same rule as `trusted_root` in a [`[sigstore."<host>"]` table][signing-trusted-root-fields]. Mutually exclusive with `extra_ca_certs_pem` |
 | `extra_ca_certs_pem` | string | The certificate PEM text inlined verbatim. This is the form a fleet receives, see [Roll it out to a fleet](#ca-fleet). Mutually exclusive with `extra_ca_certs` |
 
 Setting both in the same file is a configuration error, exit `78`. Neither key is an `ocx.toml` key. That file rejects every key it does not recognize, so writing either one there is a parse error (exit 78). A cloned repository can never add a trust root of its own. The default is unset: no root beyond the platform trust store and the compiled-in Mozilla set.
@@ -98,7 +98,7 @@ The compiled-in Mozilla roots stay put either way. These two keys never touch ho
 Two dials are outside the keys' reach:
 
 - An announce over the GitLab `git` write transport runs a spawned `git`, whose TLS trust is libcurl's. Point `GIT_SSL_CAINFO` (or `GIT_SSL_CAPATH`) at the bundle for that push. OCX passes both through to that `git` process, next to `SSL_CERT_FILE` and `SSL_CERT_DIR`. `OCX_EXTRA_CA_CERTS` reaches OCX's REST client only and is never exported to `git`, where it would replace the whole trust store.
-- The public-good Sigstore trust root's own TUF fetch (rung 6 of the [`[trust.sigstore]` ladder][signing-trust-root]) dials through the shared Sigstore HTTP client. Fulcio and Rekor use that same client, so these roots reach it too. Pin a [`trusted_root`][signing-trusted-root-fields] instead only for a fully offline host, where even that client's TUF fetch has nowhere to go.
+- The public-good Sigstore trust root's own TUF fetch (rung 6 of the [trust-root ladder][signing-trust-root]) dials through the shared Sigstore HTTP client. Fulcio and Rekor use that same client, so these roots reach it too. Pin a [`trusted_root`][signing-trusted-root-fields] instead only for a fully offline host, where even that client's TUF fetch has nowhere to go.
 
 ### The environment variable \{#ca-env\}
 
@@ -165,11 +165,11 @@ Unlike `toolchain_dir`, the environment variable here is not the weakest rung. [
 
 Below the variable, the two keys follow the [ordinary precedence table][config-precedence] like any other field: env, then `--config` or `OCX_CONFIG`, then `[managed]`, then `$OCX_HOME`, then user, then system. There is no union special case. Contrast `insecure`, which does union.
 
-The two keys are coupled across tiers the same way [`[trust.sigstore]`'s two spellings are][signing-trusted-root-fields]. If a higher tier sets either key, both are taken from that tier. A tier switching from `extra_ca_certs` to `extra_ca_certs_pem` drops the lower tier's path rather than leaving both set. So the cross-tier merge itself can never produce the both-keys ambiguity.
+The two keys are coupled across tiers the same way [the two spellings of `trusted_root` in a `[sigstore."<host>"]` table are][signing-trusted-root-fields]. If a higher tier sets either key, both are taken from that tier. A tier switching from `extra_ca_certs` to `extra_ca_certs_pem` drops the lower tier's path rather than leaving both set. So the cross-tier merge itself can never produce the both-keys ambiguity.
 
 ## Lock it system-wide \{#ca-system-lock\}
 
-Declared at the system tier (`/etc/ocx/config.toml`), the pair becomes non-overridable. The moment the system file sets either `extra_ca_certs` or `extra_ca_certs_pem`, both are taken from it, and no lower tier nor `OCX_EXTRA_CA_CERTS` can add or replace a root. The lock is per pair, not per field, the same shape as the [`[trust.sigstore]` lock][signing-trusted-root-fields]: a lower tier cannot supply `extra_ca_certs_pem` alongside a system `extra_ca_certs`.
+Declared at the system tier (`/etc/ocx/config.toml`), the pair becomes non-overridable. The moment the system file sets either `extra_ca_certs` or `extra_ca_certs_pem`, both are taken from it, and no lower tier nor `OCX_EXTRA_CA_CERTS` can add or replace a root. The lock is per pair, not per field, the same shape as the [`[sigstore."<host>"]` lock][signing-trusted-root-fields]: a lower tier cannot supply `extra_ca_certs_pem` alongside a system `extra_ca_certs`.
 
 A lower-tier attempt is dropped with a warning that names the tier, the locking file and the remedy, never the value:
 
@@ -225,7 +225,7 @@ interval = "1d"
 
 The operator's `corp-ca.pem` path means nothing on a consumer's disk, so [publishing](#ca-publish) rewrites the payload's `extra_ca_certs` into `extra_ca_certs_pem`. On the consuming side, a path-form `extra_ca_certs` arriving from the `[managed]` tier is ignored with a warning, the same rule as a `trusted_root` path.
 
-Unlike `trusted_root_json`, `extra_ca_certs_pem` from a managed payload is honored for registry, index and forge traffic without requiring a digest-pinned `[managed] source`. A certificate authority on its own grants no signature-verification bypass, unlike a Sigstore trust root. The `[trust.sigstore]` client is the one exception: [`ocx package verify`][cmd-package-verify], [`ocx package sign`][cmd-package-sign] and `ocx package push --sbom` accept managed-tier roots only behind a digest-pinned source, and local tiers and the variable always.
+Unlike `trusted_root_json`, `extra_ca_certs_pem` from a managed payload is honored for registry, index and forge traffic without requiring a digest-pinned `[managed] source`. A certificate authority on its own grants no signature-verification bypass, unlike a Sigstore trust root. The Sigstore client is the one exception: [`ocx package verify`][cmd-package-verify], [`ocx package sign`][cmd-package-sign] and `ocx package push --sbom` accept managed-tier roots only behind a digest-pinned source, and local tiers and the variable always.
 
 One client is deliberately excluded from all of this. The client that fetches the `[managed]` snapshot itself trusts only the local tiers (system, user, `$OCX_HOME`, `OCX_CONFIG` or `--config`) and `OCX_EXTRA_CA_CERTS`. It trusts no CA from the managed payload it is about to fetch. The refresh channel can never be secured by material it delivers.
 
@@ -239,7 +239,7 @@ A snapshot that already carries an unloadable bundle still refuses every command
 - Delete the snapshot under `$OCX_HOME/state/managed-config/`, so the tier contributes nothing until the next `ocx config update` replaces it.
 
 :::warning
-An unpinned managed CA is not equivalent to `insecure = true`. Without an on-path attacker, an unpinned `extra_ca_certs_pem` from a fleet operator grants nothing. TLS root material never enters OCI content or Sigstore signature verification. With an on-path attacker (a corporate CONNECT proxy included), that root can impersonate every TLS endpoint OCX dials. The exception is the `[trust.sigstore]` client, which is gated behind a digest-pinned source.
+An unpinned managed CA is not equivalent to `insecure = true`. Without an on-path attacker, an unpinned `extra_ca_certs_pem` from a fleet operator grants nothing. TLS root material never enters OCI content or Sigstore signature verification. With an on-path attacker (a corporate CONNECT proxy included), that root can impersonate every TLS endpoint OCX dials. The exception is the Sigstore client, which is gated behind a digest-pinned source.
 
 For registry and index traffic this is strictly weaker than the already-accepted unpinned `insecure = true` posture. For Sigstore it would otherwise reach the OIDC identity token that `fulcio_url` is gated to protect. That is why that client is held to the stricter rule. The hard guarantee is a digest-pinned `[managed] source`, or a [system-tier lock](#ca-system-lock) pinning the pair from `/etc/ocx/config.toml`. The lock excludes the unpinned managed tier from ever contributing a root at all.
 

@@ -70,6 +70,9 @@ pub struct PackageVerify {
     )]
     certificate_oidc_issuer: Option<String>,
 
+    #[clap(flatten)]
+    sigstore: options::sigstore_instance::SigstoreInstanceOpt,
+
     /// Verify against a pinned public key instead of a Fulcio certificate.
     ///
     /// The key is a plain SPKI PEM — the public half only. No password is read
@@ -81,10 +84,10 @@ pub struct PackageVerify {
     #[clap(flatten)]
     signature_format: options::signature_format::SignatureFormatOpt,
 
-    // `Option`, not a clap default, or `[trust.sigstore].rekor_url` can never apply.
+    // `Option`, not a clap default, or a table's `rekor_url` can never apply.
     /// Rekor transparency-log endpoint
     ///
-    /// Defaults to [trust.sigstore].rekor_url, else public Rekor.
+    /// Defaults to the public instance's `[sigstore."fulcio.sigstore.dev"]` table `rekor_url`, else public Rekor.
     #[clap(long = "rekor-url", value_name = "URL")]
     rekor_url: Option<String>,
 
@@ -124,7 +127,7 @@ pub struct PackageVerify {
     /// Supplies the Fulcio CA, the CT-log key and the pinned Rekor public key
     /// for air-gapped verification against a local trust-root mirror. No TUF
     /// network fetch is performed. Takes precedence over the
-    /// OCX_SIGSTORE_TRUSTED_ROOT env var and over [trust.sigstore] in
+    /// OCX_SIGSTORE_TRUSTED_ROOT env var and over the `[sigstore."<host>"]` tables in
     /// config.toml. See
     /// https://ocx.sh/docs/guides/self-hosted-sigstore/
     #[clap(long = "sigstore-trusted-root", value_name = "PATH")]
@@ -147,11 +150,14 @@ impl PackageVerify {
             .reference()
             .map_err(|error| VerifyError::new(identifier.clone(), VerifyErrorKind::from(error)))?;
 
+        let instance = self.sigstore.instance();
+
         // Also the SSRF guard (CWE-918): the endpoint is validated before any client dials it.
         let rekor_url = package_sign_common::resolve_rekor_endpoint(
             context.config_trust_sigstore(),
             &identifier,
             self.rekor_url.as_deref(),
+            &instance,
         )?;
 
         // `verify_client`, not the offline-gated client: verify reads the registry under `--offline` too.
@@ -159,11 +165,13 @@ impl PackageVerify {
         let offline = context.is_offline();
 
         let rekor_cache_key = ocx_sign::verify::trust_cache::cache_key_for_rekor(&rekor_url);
+        let selected_override = package_sign_common::selected_trust_root_override(self.trusted_root.as_deref());
         package_sign_common::validate_explicit_trust_root(
             &context,
             &identifier,
+            &instance,
             &rekor_cache_key,
-            self.trusted_root.as_deref(),
+            selected_override.as_deref(),
         )
         .await?;
 
@@ -174,45 +182,77 @@ impl PackageVerify {
             self.certificate_identity.as_deref(),
             self.certificate_oidc_issuer.as_deref(),
             key.as_ref(),
+            &instance,
         )
         .await?;
         if rounds.iter().all(|round| round.policies.is_empty()) {
             return Err(VerifyError::new(identifier.clone(), VerifyErrorKind::NoIdentityProvided).into());
         }
 
-        // A key-only run needs no Sigstore trust root, so it must not resolve (or fetch) one.
-        let (trust_root, transparency) = Box::pin(package_sign_common::trust_for_rounds(
-            &context,
-            &identifier,
-            &rounds,
-            &rekor_cache_key,
-            offline,
-            self.trusted_root.as_deref(),
-        ))
-        .await?;
+        // One pass per instance a keyless entry names; the flag and the variable override the selected one only.
+        let mut verified = None;
+        let mut first_refusal = None;
+        for pass_instance in package_sign_common::round_instances(&rounds, &instance) {
+            let (pass_rekor, pass_override) = if pass_instance == instance {
+                (rekor_url.clone(), selected_override.as_deref())
+            } else {
+                let endpoint = package_sign_common::resolve_rekor_endpoint(
+                    context.config_trust_sigstore(),
+                    &identifier,
+                    None,
+                    &pass_instance,
+                )?;
+                (endpoint, None)
+            };
+            // A key-only run needs no Sigstore trust root, so it must not resolve (or fetch) one.
+            let (trust_root, transparency) = Box::pin(package_sign_common::trust_for_rounds(
+                &context,
+                &identifier,
+                &rounds,
+                &pass_instance,
+                &ocx_sign::verify::trust_cache::cache_key_for_rekor(&pass_rekor),
+                offline,
+                pass_override,
+            ))
+            .await?;
 
-        let options = VerifyOptions {
-            policies: &[],
-            client,
-            trust_root: &trust_root,
-            rekor_url: &rekor_url,
-            offline,
-            state: &context.file_structure().state,
-            no_cache: self.no_cache,
-            content: self.content_mode(),
-            signature_format,
-            allow_unlogged_signature: self.allow_unlogged_signature,
-            // `signatures[]` reports every signature, so the scan must not stop at the first pass.
-            report_all: true,
-            transparency,
+            let options = VerifyOptions {
+                policies: &[],
+                client,
+                trust_root: &trust_root,
+                rekor_url: &pass_rekor,
+                offline,
+                state: &context.file_structure().state,
+                no_cache: self.no_cache,
+                content: self.content_mode(),
+                signature_format,
+                allow_unlogged_signature: self.allow_unlogged_signature,
+                // `signatures[]` reports every signature, so the scan must not stop at the first pass.
+                report_all: true,
+                transparency,
+            };
+            // A signature counts only when it verifies in every round (matched by referrer digest).
+            match context
+                .manager()
+                .verify_rounds(&identifier, self.platform.as_ref(), &rounds, options)
+                .await
+            {
+                Ok(report) => {
+                    verified = Some(report.signatures);
+                    break;
+                }
+                Err(error) => {
+                    first_refusal.get_or_insert(error);
+                }
+            }
+        }
+        let verified = match (verified, first_refusal) {
+            (Some(signatures), _) => signatures,
+            (None, Some(error)) => return Err(package_sign_common::verify_error_into_anyhow(error)),
+            (None, None) => {
+                return Err(VerifyError::new(identifier.clone(), VerifyErrorKind::TrustRootUnavailable).into());
+            }
         };
-        // A signature counts only when it verifies in every round (matched by referrer digest).
-        let verified = context
-            .manager()
-            .verify_rounds(&identifier, self.platform.as_ref(), &rounds, options)
-            .await
-            .map_err(package_sign_common::verify_error_into_anyhow)?
-            .signatures;
 
         // `VerifyPipeline::run` puts the passing verdict first.
         let mut signatures = verified.iter().map(Self::signature_entry);
@@ -307,6 +347,33 @@ mod tests {
             panic!("--type alone must not parse");
         };
         assert_eq!(error.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    /// `--sigstore` names the instance of the identity flags' entry, so clap refuses it alone.
+    #[test]
+    fn sigstore_needs_a_certificate_identity() {
+        let base = [
+            "verify",
+            "--sigstore",
+            "fulcio.corp.example",
+            "registry.example/pkg:1.0",
+        ];
+        let Err(error) = super::PackageVerify::try_parse_from(base) else {
+            panic!("--sigstore alone must not parse");
+        };
+        assert_eq!(error.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+        let with_identity = [
+            "verify",
+            "--sigstore",
+            "fulcio.corp.example",
+            "--certificate-identity",
+            "me",
+            "--certificate-oidc-issuer",
+            "https://issuer.example",
+            "registry.example/pkg:1.0",
+        ];
+        let parsed = super::PackageVerify::try_parse_from(with_identity).unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(parsed.sigstore.instance().as_str(), "fulcio.corp.example");
     }
 
     /// The `signatures[]` row is projected from the pipeline's own result, not

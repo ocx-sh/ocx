@@ -43,6 +43,8 @@ thiserror.workspace = true
 # `toml::de::Error` as its `#[source]`, and the project-tier reader parses the
 # `[trust]` table out of `ocx.toml` itself.
 toml.workspace = true
+# `SigstoreAuthority` parses a table key and a URL through one host parser (IDNA applied).
+url.workspace = true
 
 [dev-dependencies]
 # `ocx_env::overrides`, the process-environment table the `key_env`

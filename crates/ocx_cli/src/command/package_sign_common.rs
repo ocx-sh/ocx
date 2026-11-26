@@ -16,7 +16,7 @@ use ocx_sign::attest::MAX_PREDICATE_FILE_BYTES;
 use ocx_sign::sign::{SignError, SignErrorKind};
 use ocx_sign::verify::{TrustRoot, VerifyError, VerifyErrorKind};
 use ocx_trust::key_ref::KeyRef;
-use ocx_trust::{self, CompiledPolicy};
+use ocx_trust::{self, CompiledPolicy, SigstoreAuthority};
 use ocx_util::fs::path::FileReference;
 use tokio::io::AsyncReadExt;
 use zeroize::Zeroizing;
@@ -183,67 +183,181 @@ const MAX_IDENTITY_TOKEN_BYTES: u64 = 64 * 1024;
 /// Default public Fulcio CA endpoint; Rekor's is [`ocx_oci::endpoint::DEFAULT_REKOR_URL`].
 pub(crate) const DEFAULT_FULCIO_URL: &str = "https://fulcio.sigstore.dev";
 
-/// Which Sigstore service an endpoint is being resolved for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SigstoreEndpoint {
-    Fulcio,
-    Rekor,
-}
-
-/// Resolves a Sigstore endpoint URL: flag > `[trust.sigstore]` > builtin default.
+/// Resolves the public instance's Rekor URL for the verifying verbs: flag > the public table > built-in default.
 ///
 /// Unvalidated: a config URL is as attacker-reachable as a flag (`[managed]`), so every caller
 /// passes it through [`validate_sigstore_url`](ocx_oci::endpoint::validate_sigstore_url) before dialing.
-pub(crate) fn resolve_endpoint(
-    flag: Option<&str>,
-    configured: Option<&ocx_trust::SigstoreTrust>,
-    endpoint: SigstoreEndpoint,
-) -> String {
-    let from_config = configured.and_then(|sigstore| match endpoint {
-        SigstoreEndpoint::Fulcio => sigstore.fulcio_url.as_deref(),
-        SigstoreEndpoint::Rekor => sigstore.rekor_url.as_deref(),
-    });
-    let builtin = match endpoint {
-        SigstoreEndpoint::Fulcio => DEFAULT_FULCIO_URL,
-        SigstoreEndpoint::Rekor => ocx_oci::endpoint::DEFAULT_REKOR_URL,
-    };
-    flag.or(from_config).unwrap_or(builtin).to_string()
+pub(crate) fn resolve_public_rekor(flag: Option<&str>, configured: Option<&ocx_trust::SigstoreInstances>) -> String {
+    resolve_instance_rekor(flag, configured, &SigstoreAuthority::public())
 }
 
-/// Resolves and SSRF-validates (CWE-918) the Fulcio/Rekor pair every signing verb shares, so a
+/// [`resolve_public_rekor`] for the instance `instance`: flag > that instance's table > built-in default.
+fn resolve_instance_rekor(
+    flag: Option<&str>,
+    configured: Option<&ocx_trust::SigstoreInstances>,
+    instance: &SigstoreAuthority,
+) -> String {
+    let from_config = configured.and_then(|instances| match *instance == SigstoreAuthority::public() {
+        true => instances.public().rekor_url,
+        false => instances.get(instance).and_then(|table| table.rekor_url.clone()),
+    });
+    flag.map(str::to_owned)
+        .or(from_config)
+        .unwrap_or_else(|| ocx_oci::endpoint::DEFAULT_REKOR_URL.to_owned())
+}
+
+/// The Sigstore instance a signing run selected and the endpoints it resolves to, before any URL is validated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SigningSelection {
+    /// The instance whose table supplied the defaults; `None` when no table names the flag's authority.
+    pub authority: Option<ocx_trust::SigstoreAuthority>,
+    pub fulcio_url: String,
+    /// `None` when neither the flag nor the table names one.
+    pub rekor_url: Option<String>,
+    /// The table's preference for uploading a key-mode signature.
+    pub rekor_upload: Option<bool>,
+}
+
+/// Selects the Sigstore instance a signing run uses and resolves its endpoints.
+///
+/// Keyless runs select the table keyed by the authority of `--fulcio-url`, the public instance without the flag.
+/// Key mode has no Fulcio: it selects the table whose `rekor_url` has the authority of `--rekor-url`, the public
+/// table without the flag. A flag always beats the table's URL. An authority no table names gets no table
+/// defaults, so a private stack reached by flag alone never borrows the public Rekor.
+pub(crate) fn select_signing_instance(
+    configured: Option<&ocx_trust::SigstoreInstances>,
+    key_mode: bool,
+    fulcio_flag: Option<&str>,
+    rekor_flag: Option<&str>,
+) -> SigningSelection {
+    use ocx_trust::{SigstoreAuthority, SigstoreInstance, SigstoreInstances};
+
+    let none = SigstoreInstances::default();
+    let instances = configured.unwrap_or(&none);
+    let public = || (SigstoreAuthority::public(), instances.public());
+    let rekor_authority_of = |table: &SigstoreInstance| {
+        table
+            .rekor_url
+            .as_deref()
+            .and_then(|url| SigstoreAuthority::from_url(url).ok())
+    };
+    let selected = if key_mode {
+        match rekor_flag.and_then(|url| SigstoreAuthority::from_url(url).ok()) {
+            None => Some(public()),
+            Some(wanted) => Some(public())
+                .filter(|(_, table)| rekor_authority_of(table).as_ref() == Some(&wanted))
+                .or_else(|| {
+                    instances
+                        .iter()
+                        .find(|(_, table)| rekor_authority_of(table).as_ref() == Some(&wanted))
+                        .map(|(authority, table)| (authority.clone(), table.clone()))
+                }),
+        }
+    } else {
+        match fulcio_flag {
+            None => Some(public()),
+            Some(flag) => instances.select_by_fulcio_url(flag),
+        }
+    };
+
+    let (authority, table) = match selected {
+        Some((authority, table)) => (Some(authority), table),
+        None => (None, SigstoreInstance::default()),
+    };
+    let fulcio_default = authority.as_ref().map(|authority| {
+        table
+            .fulcio_url
+            .clone()
+            .unwrap_or_else(|| format!("https://{authority}"))
+    });
+    SigningSelection {
+        fulcio_url: fulcio_flag
+            .map(str::to_owned)
+            .or(fulcio_default)
+            .unwrap_or_else(|| DEFAULT_FULCIO_URL.to_owned()),
+        rekor_url: rekor_flag.map(str::to_owned).or(table.rekor_url.clone()),
+        rekor_upload: table.rekor_upload,
+        authority,
+    }
+}
+
+/// A signing run's validated Fulcio endpoint and its still-optional Rekor endpoint.
+#[derive(Debug)]
+pub(super) struct SigningTarget {
+    fulcio_url: Url,
+    rekor_url: Option<Url>,
+    authority: Option<ocx_trust::SigstoreAuthority>,
+    /// The selected table's `rekor_upload`, the fallback when neither upload flag is given.
+    pub configured_rekor_upload: Option<bool>,
+}
+
+impl SigningTarget {
+    /// The endpoint pair for a run that does or does not upload to the transparency log.
+    ///
+    /// # Errors
+    ///
+    /// `sigstore_rekor_url_missing` (exit 78) when the run uploads and neither `--rekor-url` nor the table gives a Rekor.
+    pub(super) fn endpoints(self, upload: bool) -> anyhow::Result<(Url, Url)> {
+        let rekor = match self.rekor_url {
+            Some(url) => url,
+            None if upload => {
+                return Err(anyhow::Error::from(ocx_config::error::Error::SigstoreRekorUrlMissing {
+                    authority: self
+                        .authority
+                        .map_or_else(|| "(none)".to_owned(), |authority| authority.to_string()),
+                }));
+            }
+            // Never dialled: nothing uploads.
+            None => validate_sigstore_url(ocx_oci::endpoint::DEFAULT_REKOR_URL, "--rekor-url")
+                .map_err(|reason| anyhow::anyhow!("built-in Rekor URL rejected: {reason:?}"))?,
+        };
+        Ok((self.fulcio_url, rekor))
+    }
+}
+
+/// Selects the Sigstore instance ([`select_signing_instance`]) and SSRF-validates (CWE-918) its endpoints, so a
 /// self-hosted stack never signs against two different Fulcios. Fulcio is validated first.
 ///
 /// # Errors
 ///
 /// [`SignErrorKind::InvalidEndpointUrl`] (exit 64) naming the rejected flag.
 pub(super) fn resolve_sigstore_pair(
-    configured: Option<&ocx_trust::SigstoreTrust>,
+    configured: Option<&ocx_trust::SigstoreInstances>,
     identifier: &ocx_oci::PackageRef,
+    key_mode: bool,
     fulcio_flag: Option<&str>,
     rekor_flag: Option<&str>,
-) -> anyhow::Result<(Url, Url)> {
-    let fulcio = resolve_endpoint(fulcio_flag, configured, SigstoreEndpoint::Fulcio);
-    let rekor = resolve_endpoint(rekor_flag, configured, SigstoreEndpoint::Rekor);
-    let fulcio_url =
-        validate_sigstore_url(&fulcio, "--fulcio-url").map_err(invalid_endpoint(identifier, "--fulcio-url"))?;
-    let rekor_url =
-        validate_sigstore_url(&rekor, "--rekor-url").map_err(invalid_endpoint(identifier, "--rekor-url"))?;
-    Ok((fulcio_url, rekor_url))
+) -> anyhow::Result<SigningTarget> {
+    let selection = select_signing_instance(configured, key_mode, fulcio_flag, rekor_flag);
+    let fulcio_url = validate_sigstore_url(&selection.fulcio_url, "--fulcio-url")
+        .map_err(invalid_endpoint(identifier, "--fulcio-url"))?;
+    let rekor_url = selection
+        .rekor_url
+        .as_deref()
+        .map(|rekor| validate_sigstore_url(rekor, "--rekor-url").map_err(invalid_endpoint(identifier, "--rekor-url")))
+        .transpose()?;
+    Ok(SigningTarget {
+        fulcio_url,
+        rekor_url,
+        authority: selection.authority,
+        configured_rekor_upload: selection.rekor_upload,
+    })
 }
 
 /// Resolves and SSRF-validates the Rekor endpoint for verifying verbs.
 ///
-/// Apart from the pair, or a `[trust.sigstore].fulcio_url` typo fails `verify` and `sbom`.
+/// Apart from the pair, or a `the Sigstore instance table.fulcio_url` typo fails `verify` and `sbom`.
 ///
 /// # Errors
 ///
 /// [`VerifyErrorKind::InvalidEndpointUrl`] (exit 64) naming `--rekor-url`.
 pub(super) fn resolve_rekor_endpoint(
-    configured: Option<&ocx_trust::SigstoreTrust>,
+    configured: Option<&ocx_trust::SigstoreInstances>,
     identifier: &ocx_oci::PackageRef,
     rekor_flag: Option<&str>,
+    instance: &SigstoreAuthority,
 ) -> anyhow::Result<Url> {
-    let rekor = resolve_endpoint(rekor_flag, configured, SigstoreEndpoint::Rekor);
+    let rekor = resolve_instance_rekor(rekor_flag, configured, instance);
     validate_sigstore_url(&rekor, "--rekor-url").map_err(|reason| {
         anyhow::Error::from(VerifyError::new(
             identifier.clone(),
@@ -278,6 +392,7 @@ fn flag_policies(
     certificate_identity: Option<&str>,
     certificate_oidc_issuer: Option<&str>,
     key: Option<&KeyRef>,
+    instance: &SigstoreAuthority,
 ) -> anyhow::Result<Vec<CompiledPolicy>> {
     // Clap refuses a key beside the certificate flags, so this order never drops a flag pair.
     if let Some(key) = key {
@@ -288,7 +403,11 @@ fn flag_policies(
     let (Some(identity), Some(issuer)) = (certificate_identity, certificate_oidc_issuer) else {
         return Ok(Vec::new());
     };
-    Ok(vec![CompiledPolicy::exact(identity.to_owned(), issuer.to_owned())])
+    Ok(vec![CompiledPolicy::exact_on(
+        identity.to_owned(),
+        issuer.to_owned(),
+        instance.clone(),
+    )])
 }
 
 /// Every signer round a verifying command must pass, in order; empty when nothing covers the package.
@@ -306,9 +425,10 @@ pub(super) async fn resolve_rounds(
     certificate_identity: Option<&str>,
     certificate_oidc_issuer: Option<&str>,
     key: Option<&KeyRef>,
+    instance: &SigstoreAuthority,
 ) -> anyhow::Result<Vec<Round>> {
     if key.is_some() || certificate_identity.is_some() {
-        let flags = flag_policies(identifier, certificate_identity, certificate_oidc_issuer, key)?;
+        let flags = flag_policies(identifier, certificate_identity, certificate_oidc_issuer, key, instance)?;
         return Ok(vec![Round::flags(flags)]);
     }
 
@@ -343,6 +463,26 @@ pub(super) fn rounds_need_trust_root(rounds: &[Round]) -> bool {
         .flat_map(|round| &round.policies)
         .flat_map(|policy| &policy.backends)
         .any(|backend| matches!(backend, ocx_trust::PolicyBackend::Keyless(_)))
+}
+
+/// The Sigstore instances the keyless entries of `rounds` name, public first; `selected` alone when none does.
+///
+/// A policy-mode run judges each entry against its own instance's root, one pass per instance.
+pub(super) fn round_instances(rounds: &[Round], selected: &SigstoreAuthority) -> Vec<SigstoreAuthority> {
+    let named: std::collections::BTreeSet<SigstoreAuthority> = rounds
+        .iter()
+        .flat_map(|round| &round.policies)
+        .flat_map(|policy| &policy.backends)
+        .filter_map(|backend| match backend {
+            ocx_trust::PolicyBackend::Keyless(keyless) => Some(keyless.instance.clone()),
+            ocx_trust::PolicyBackend::Key(_) => None,
+        })
+        .collect();
+    if named.is_empty() {
+        vec![selected.clone()]
+    } else {
+        named.into_iter().collect()
+    }
 }
 
 /// The in-effect project's `[[trust.policy]]` set, empty without a project file: the one `ocx package`
@@ -385,8 +525,10 @@ pub(crate) fn explicit_trust_root_path(value: std::path::PathBuf) -> std::path::
     }
 }
 
-/// The operator-named trust-root override: `--sigstore-trusted-root`, then `OCX_SIGSTORE_TRUSTED_ROOT`.
-fn explicit_trust_root(trusted_root: Option<&std::path::Path>) -> Option<std::path::PathBuf> {
+/// The operator-named trust-root override for the selected instance: `--sigstore-trusted-root`, then
+/// `OCX_SIGSTORE_TRUSTED_ROOT`. Only the selected instance's pass calls this; every other pass hands the
+/// resolvers `None`, so the override never reaches a private instance's own root.
+pub(super) fn selected_trust_root_override(trusted_root: Option<&std::path::Path>) -> Option<std::path::PathBuf> {
     trusted_root
         .map(std::path::Path::to_path_buf)
         .or_else(|| {
@@ -397,19 +539,20 @@ fn explicit_trust_root(trusted_root: Option<&std::path::Path>) -> Option<std::pa
         .map(explicit_trust_root_path)
 }
 
-/// Resolves the trust root: `--sigstore-trusted-root`, then `OCX_SIGSTORE_TRUSTED_ROOT`, on top of
+/// Resolves the trust root: the already-resolved `trusted_root` override (see [`selected_trust_root_override`]) on top of
 /// `ocx_sign::verify::resolve_trust_root`'s ladder, which auto-verify shares.
 pub(super) async fn resolve_trust_root(
     context: &crate::app::Context,
     identifier: &ocx_oci::PackageRef,
+    instance: &SigstoreAuthority,
     rekor_cache_key: &str,
     offline: bool,
     trusted_root: Option<&std::path::Path>,
 ) -> anyhow::Result<TrustRoot> {
-    let explicit = explicit_trust_root(trusted_root);
-    let home_trusted_root = ocx_config::loader::ConfigLoader::home_sigstore_trusted_root_path();
-    ocx_sign::verify::resolve_trust_root(
-        explicit.as_deref(),
+    let home_trusted_root = ocx_config::loader::ConfigLoader::home_sigstore_trusted_root_path_for(instance);
+    ocx_sign::verify::resolve_instance_trust_root(
+        instance,
+        trusted_root,
         context.config_trust_sigstore(),
         home_trusted_root.as_deref(),
         &ocx_sign::sign::state::SigningStatePaths::new(context.file_structure().state.root()),
@@ -429,15 +572,17 @@ pub(super) async fn trust_for_rounds(
     context: &crate::app::Context,
     identifier: &ocx_oci::PackageRef,
     rounds: &[Round],
+    instance: &SigstoreAuthority,
     rekor_cache_key: &str,
     offline: bool,
     trusted_root: Option<&std::path::Path>,
 ) -> anyhow::Result<(TrustRoot, ocx_sign::verify::Transparency)> {
     if rounds_need_trust_root(rounds) {
-        let root = resolve_trust_root(context, identifier, rekor_cache_key, offline, trusted_root).await?;
+        let root = resolve_trust_root(context, identifier, instance, rekor_cache_key, offline, trusted_root).await?;
         Ok((root, ocx_sign::verify::Transparency::Verify))
     } else {
-        let root = resolve_local_trust_root_or_empty(context, identifier, rekor_cache_key, trusted_root).await?;
+        let root =
+            resolve_local_trust_root_or_empty(context, identifier, instance, rekor_cache_key, trusted_root).await?;
         Ok((root, ocx_sign::verify::Transparency::VerifyIfRootAvailable))
     }
 }
@@ -447,13 +592,14 @@ pub(super) async fn trust_for_rounds(
 pub(super) async fn validate_explicit_trust_root(
     context: &crate::app::Context,
     identifier: &ocx_oci::PackageRef,
+    instance: &SigstoreAuthority,
     rekor_cache_key: &str,
     trusted_root: Option<&std::path::Path>,
 ) -> anyhow::Result<()> {
-    if explicit_trust_root(trusted_root).is_none() {
+    if trusted_root.is_none() {
         return Ok(());
     }
-    resolve_local_trust_root_or_empty(context, identifier, rekor_cache_key, trusted_root)
+    resolve_local_trust_root_or_empty(context, identifier, instance, rekor_cache_key, trusted_root)
         .await
         .map(drop)
 }
@@ -463,13 +609,14 @@ pub(super) async fn validate_explicit_trust_root(
 pub(super) async fn resolve_local_trust_root_or_empty(
     context: &crate::app::Context,
     identifier: &ocx_oci::PackageRef,
+    instance: &SigstoreAuthority,
     rekor_cache_key: &str,
     trusted_root: Option<&std::path::Path>,
 ) -> anyhow::Result<TrustRoot> {
-    let explicit = explicit_trust_root(trusted_root);
-    let home_trusted_root = ocx_config::loader::ConfigLoader::home_sigstore_trusted_root_path();
-    let local = ocx_sign::verify::resolve_local_trust_root(
-        explicit.as_deref(),
+    let home_trusted_root = ocx_config::loader::ConfigLoader::home_sigstore_trusted_root_path_for(instance);
+    let local = ocx_sign::verify::resolve_local_instance_trust_root(
+        instance,
+        trusted_root,
         context.config_trust_sigstore(),
         home_trusted_root.as_deref(),
         &ocx_sign::sign::state::SigningStatePaths::new(context.file_structure().state.root()),
@@ -709,7 +856,7 @@ mod leg_exit_code_tests {
 mod tests {
 
     //! Unit tests for [`resolve_override_token`] (C-S1-4),
-    //! [`resolve_endpoint`] (the Sigstore endpoint precedence), and the
+    //! [`resolve_public_rekor`], and the
     //! attest-path error contract and `--predicate` read that moved here with
     //! their helpers.
 
@@ -718,7 +865,7 @@ mod tests {
 
     /// C-083 — both explicit doors (`--sigstore-trusted-root`,
     /// `OCX_SIGSTORE_TRUSTED_ROOT`) take the two spellings
-    /// `[trust.sigstore] trusted_root` reads, and nothing narrows: every bare
+    /// `the Sigstore instance table trusted_root` reads, and nothing narrows: every bare
     /// path that works today round-trips byte for byte.
     #[test]
     fn explicit_trust_root_takes_a_bare_path_or_a_file_url() {
@@ -746,67 +893,82 @@ mod tests {
         }
     }
 
-    /// A `[trust.sigstore]` block pinning both endpoints at a self-hosted stack.
-    fn self_hosted() -> ocx_trust::SigstoreTrust {
-        ocx_trust::SigstoreTrust {
+    /// A the Sigstore instance table block pinning both endpoints at a self-hosted stack.
+    fn self_hosted() -> ocx_trust::SigstoreInstances {
+        ocx_trust::SigstoreInstances::with_public(ocx_trust::SigstoreInstance {
             fulcio_url: Some("https://fulcio.corp.example".to_string()),
             rekor_url: Some("https://rekor.corp.example".to_string()),
             ..Default::default()
-        }
+        })
     }
 
-    /// The full precedence triple, per endpoint: builtin when nothing is set,
-    /// config over builtin, flag over config.
-    ///
-    /// Swapping the `flag.or(from_config)` order in [`resolve_endpoint`] reds
-    /// the third row of each table.
+    /// The Rekor precedence: built-in when nothing is set, the public table over the built-in, the flag over both.
     #[test]
-    fn an_endpoint_resolves_flag_over_config_over_builtin() {
+    fn the_public_rekor_resolves_flag_over_config_over_builtin() {
         let cfg = self_hosted();
-        let cases = [
-            (
-                SigstoreEndpoint::Fulcio,
-                DEFAULT_FULCIO_URL,
-                "https://fulcio.corp.example",
-                "https://fulcio.flag.example",
-            ),
-            (
-                SigstoreEndpoint::Rekor,
-                ocx_oci::endpoint::DEFAULT_REKOR_URL,
-                "https://rekor.corp.example",
-                "https://rekor.flag.example",
-            ),
-        ];
-        for (endpoint, builtin, configured, flag) in cases {
-            assert_eq!(resolve_endpoint(None, None, endpoint), builtin, "{endpoint:?}: builtin");
-            assert_eq!(
-                resolve_endpoint(None, Some(&cfg), endpoint),
-                configured,
-                "{endpoint:?}: config must beat the builtin default"
-            );
-            assert_eq!(
-                resolve_endpoint(Some(flag), Some(&cfg), endpoint),
-                flag,
-                "{endpoint:?}: the flag must beat config"
-            );
-        }
+        assert_eq!(resolve_public_rekor(None, None), ocx_oci::endpoint::DEFAULT_REKOR_URL);
+        assert_eq!(resolve_public_rekor(None, Some(&cfg)), "https://rekor.corp.example");
+        assert_eq!(
+            resolve_public_rekor(Some("https://rekor.flag.example"), Some(&cfg)),
+            "https://rekor.flag.example"
+        );
     }
 
-    /// A `[trust.sigstore]` block that sets only one endpoint must not drag the
-    /// other off its default — the two fields are independent decisions.
+    /// A named instance reads its own table; the public table never answers for it.
     #[test]
-    fn a_half_filled_config_leaves_the_other_endpoint_alone() {
-        let cfg = ocx_trust::SigstoreTrust {
-            rekor_url: Some("https://rekor.corp.example".to_string()),
-            ..Default::default()
-        };
+    fn a_named_instance_resolves_its_own_rekor() {
+        let corp = SigstoreAuthority::parse("fulcio.corp.example").expect("an authority");
+        let tables: ocx_trust::SigstoreInstances = serde_json::from_value(
+            serde_json::json!({ "fulcio.corp.example": { "rekor_url": "https://rekor.other.example" } }),
+        )
+        .expect("a table set");
         assert_eq!(
-            resolve_endpoint(None, Some(&cfg), SigstoreEndpoint::Fulcio),
-            DEFAULT_FULCIO_URL
+            resolve_instance_rekor(None, Some(&tables), &corp),
+            "https://rekor.other.example"
         );
         assert_eq!(
-            resolve_endpoint(None, Some(&cfg), SigstoreEndpoint::Rekor),
-            "https://rekor.corp.example"
+            resolve_instance_rekor(None, Some(&self_hosted()), &corp),
+            ocx_oci::endpoint::DEFAULT_REKOR_URL,
+            "the public table is not the named instance's"
+        );
+    }
+
+    /// The identity flags build an entry on the instance `--sigstore` names, the public one without it.
+    #[test]
+    fn the_flag_entry_carries_the_named_instance() {
+        let corp = SigstoreAuthority::parse("fulcio.corp.example").expect("an authority");
+        for (instance, expected) in [
+            (&corp, &corp),
+            (&SigstoreAuthority::public(), &SigstoreAuthority::public()),
+        ] {
+            let policies = flag_policies(
+                &test_identifier(),
+                Some("me"),
+                Some("https://issuer.example"),
+                None,
+                instance,
+            )
+            .expect("flags compile");
+            let [policy] = policies.as_slice() else {
+                panic!("one policy");
+            };
+            let [ocx_trust::PolicyBackend::Keyless(keyless)] = policy.backends.as_slice() else {
+                panic!("one keyless backend");
+            };
+            assert_eq!(&keyless.instance, expected);
+        }
+    }
+
+    /// A table that sets no Rekor leaves the public one.
+    #[test]
+    fn a_table_without_a_rekor_leaves_the_builtin_rekor() {
+        let cfg = ocx_trust::SigstoreInstances::with_public(ocx_trust::SigstoreInstance {
+            fulcio_url: Some("https://fulcio.sigstore.dev".to_string()),
+            ..Default::default()
+        });
+        assert_eq!(
+            resolve_public_rekor(None, Some(&cfg)),
+            ocx_oci::endpoint::DEFAULT_REKOR_URL
         );
     }
 
@@ -814,33 +976,26 @@ mod tests {
     /// `[managed]` payload can carry one, so it must hit the same SSRF guard
     /// and be refused identically (CWE-918).
     ///
-    /// The positive half is load-bearing — without it a validator that refused
-    /// *everything* would pass the negative half unnoticed.
+    /// The positive half is load-bearing: a validator that refused *everything*
+    /// would otherwise pass the negative half unnoticed.
     #[test]
     fn a_forbidden_config_url_is_refused_exactly_like_a_forbidden_flag_url() {
         use ocx_oci::endpoint::validate_sigstore_url;
 
-        let forbidden = "http://fulcio.corp.example";
-        let hostile = ocx_trust::SigstoreTrust {
-            fulcio_url: Some(forbidden.to_string()),
+        let forbidden = "http://rekor.corp.example";
+        let hostile = ocx_trust::SigstoreInstances::with_public(ocx_trust::SigstoreInstance {
+            rekor_url: Some(forbidden.to_string()),
             ..Default::default()
-        };
+        });
 
-        let via_config = resolve_endpoint(None, Some(&hostile), SigstoreEndpoint::Fulcio);
-        let via_flag = resolve_endpoint(Some(forbidden), None, SigstoreEndpoint::Fulcio);
+        let via_config = resolve_public_rekor(None, Some(&hostile));
+        let via_flag = resolve_public_rekor(Some(forbidden), None);
         assert_eq!(via_config, via_flag, "both tiers must yield the same URL to validate");
-        assert!(
-            validate_sigstore_url(&via_config, "--fulcio-url").is_err(),
-            "plain-http config endpoint must be refused"
-        );
-        assert!(validate_sigstore_url(&via_flag, "--fulcio-url").is_err());
+        assert!(validate_sigstore_url(&via_config, "--rekor-url").is_err());
+        assert!(validate_sigstore_url(&via_flag, "--rekor-url").is_err());
 
-        // The guard can say yes: an https config endpoint passes.
-        let allowed = resolve_endpoint(None, Some(&self_hosted()), SigstoreEndpoint::Fulcio);
-        assert!(
-            validate_sigstore_url(&allowed, "--fulcio-url").is_ok(),
-            "an https config endpoint must pass the same guard"
-        );
+        let allowed = resolve_public_rekor(None, Some(&self_hosted()));
+        assert!(validate_sigstore_url(&allowed, "--rekor-url").is_ok());
     }
 
     fn test_identifier() -> ocx_oci::PackageRef {
@@ -1000,6 +1155,7 @@ mod tests {
         let err = resolve_sigstore_pair(
             None,
             &test_identifier(),
+            false,
             Some("http://fulcio.evil.example"),
             Some("http://rekor.evil.example"),
         )
@@ -1019,7 +1175,7 @@ mod tests {
     /// hardcoding one flag name.
     #[test]
     fn the_pair_refuses_rekor_and_names_that_flag() {
-        let err = resolve_sigstore_pair(None, &test_identifier(), None, Some("file:///etc/passwd"))
+        let err = resolve_sigstore_pair(None, &test_identifier(), false, None, Some("file:///etc/passwd"))
             .expect_err("a non-http scheme is refused");
         let message = envelope(&err)["error"]["message"].as_str().expect("message").to_owned();
         assert!(message.contains("--rekor-url"), "wrong flag named: {message}");
@@ -1029,8 +1185,10 @@ mod tests {
     /// without this, a helper that refused everything would pass the two above.
     #[test]
     fn the_pair_resolves_the_builtin_defaults() {
-        let (fulcio, rekor) =
-            resolve_sigstore_pair(None, &test_identifier(), None, None).expect("the builtin defaults are valid");
+        let (fulcio, rekor) = resolve_sigstore_pair(None, &test_identifier(), false, None, None)
+            .expect("the builtin defaults are valid")
+            .endpoints(true)
+            .expect("the public table has a Rekor");
         assert_eq!(fulcio.as_str().trim_end_matches('/'), DEFAULT_FULCIO_URL);
         assert_eq!(
             rekor.as_str().trim_end_matches('/'),
@@ -1038,22 +1196,176 @@ mod tests {
         );
     }
 
+    /// A private stack's table, keyed by the authority of its Fulcio.
+    fn private_stack() -> ocx_trust::SigstoreInstances {
+        toml::from_str(
+            "[\"localhost:5555\"]\nfulcio_url = \"http://localhost:5555\"\n\
+             rekor_url = \"http://localhost:3000\"\nrekor_upload = true\n",
+        )
+        .expect("a private table")
+    }
+
+    fn selected(
+        configured: Option<&ocx_trust::SigstoreInstances>,
+        key_mode: bool,
+        fulcio: Option<&str>,
+        rekor: Option<&str>,
+    ) -> SigningSelection {
+        select_signing_instance(configured, key_mode, fulcio, rekor)
+    }
+
+    #[test]
+    fn keyless_without_a_fulcio_flag_signs_on_the_public_instance() {
+        let pick = selected(None, false, None, None);
+        assert_eq!(pick.authority, Some(ocx_trust::SigstoreAuthority::public()));
+        assert_eq!(pick.fulcio_url, ocx_trust::instance::PUBLIC_FULCIO_URL);
+        assert_eq!(pick.rekor_url.as_deref(), Some(ocx_trust::instance::PUBLIC_REKOR_URL));
+        // A private table is never picked without its flag.
+        let pick = selected(Some(&private_stack()), false, None, None);
+        assert_eq!(pick.authority, Some(ocx_trust::SigstoreAuthority::public()));
+    }
+
+    #[test]
+    fn keyless_with_a_fulcio_flag_takes_the_table_of_that_authority() {
+        let pick = selected(Some(&private_stack()), false, Some("http://localhost:5555"), None);
+        assert_eq!(pick.authority.expect("table").as_str(), "localhost:5555");
+        assert_eq!(pick.fulcio_url, "http://localhost:5555");
+        assert_eq!(pick.rekor_url.as_deref(), Some("http://localhost:3000"));
+        assert_eq!(pick.rekor_upload, Some(true));
+    }
+
+    #[test]
+    fn a_rekor_flag_beats_the_selected_tables_rekor() {
+        let pick = selected(
+            Some(&private_stack()),
+            false,
+            Some("http://localhost:5555"),
+            Some("http://localhost:4000"),
+        );
+        assert_eq!(pick.rekor_url.as_deref(), Some("http://localhost:4000"));
+    }
+
+    #[test]
+    fn keyless_with_a_fulcio_flag_no_table_names_gets_no_rekor_default() {
+        let pick = selected(
+            Some(&private_stack()),
+            false,
+            Some("https://fulcio.other.example"),
+            None,
+        );
+        assert_eq!(pick.authority, None);
+        assert_eq!(pick.fulcio_url, "https://fulcio.other.example");
+        assert_eq!(pick.rekor_url, None, "must not fall back to the public Rekor");
+        assert_eq!(pick.rekor_upload, None);
+        let pick = selected(
+            None,
+            false,
+            Some("https://fulcio.other.example"),
+            Some("https://rekor.other.example"),
+        );
+        assert_eq!(pick.rekor_url.as_deref(), Some("https://rekor.other.example"));
+    }
+
+    #[test]
+    fn the_public_fulcio_flag_selects_the_public_table_even_when_none_is_declared() {
+        let pick = selected(None, false, Some("https://fulcio.sigstore.dev/"), None);
+        assert_eq!(pick.authority, Some(ocx_trust::SigstoreAuthority::public()));
+        assert_eq!(pick.rekor_url.as_deref(), Some(ocx_trust::instance::PUBLIC_REKOR_URL));
+    }
+
+    #[test]
+    fn key_mode_without_a_rekor_flag_uses_the_public_table_and_its_rekor_upload() {
+        let mut configured = ocx_trust::SigstoreInstances::with_public(ocx_trust::SigstoreInstance {
+            rekor_upload: Some(true),
+            ..Default::default()
+        });
+        configured.merge(private_stack());
+        let pick = selected(Some(&configured), true, None, None);
+        assert_eq!(pick.authority, Some(ocx_trust::SigstoreAuthority::public()));
+        assert_eq!(pick.rekor_upload, Some(true));
+        assert_eq!(pick.rekor_url.as_deref(), Some(ocx_trust::instance::PUBLIC_REKOR_URL));
+    }
+
+    #[test]
+    fn key_mode_selects_the_table_whose_rekor_authority_the_flag_names() {
+        let pick = selected(Some(&private_stack()), true, None, Some("http://localhost:3000"));
+        assert_eq!(pick.authority.expect("table").as_str(), "localhost:5555");
+        assert_eq!(pick.rekor_upload, Some(true));
+        // Another authority on the same host is another instance.
+        let pick = selected(Some(&private_stack()), true, None, Some("http://localhost:3001"));
+        assert_eq!(pick.authority, None);
+        assert_eq!(pick.rekor_upload, None);
+        assert_eq!(pick.rekor_url.as_deref(), Some("http://localhost:3001"));
+    }
+
+    #[test]
+    fn key_mode_with_the_public_rekor_flag_selects_the_public_table() {
+        let pick = selected(None, true, None, Some("https://rekor.sigstore.dev"));
+        assert_eq!(pick.authority, Some(ocx_trust::SigstoreAuthority::public()));
+    }
+
+    /// A key-mode fulcio flag is clap's refusal, so the selector never reads it for the choice.
+    #[test]
+    fn key_mode_ignores_the_fulcio_flag_for_selection() {
+        let pick = selected(Some(&private_stack()), true, Some("http://localhost:5555"), None);
+        assert_eq!(pick.authority, Some(ocx_trust::SigstoreAuthority::public()));
+    }
+
+    #[test]
+    fn an_upload_with_no_rekor_url_refuses_with_the_table_named_and_no_upload_does_not() {
+        let target = resolve_sigstore_pair(
+            None,
+            &test_identifier(),
+            false,
+            Some("https://fulcio.other.example"),
+            None,
+        )
+        .expect("endpoints validate");
+        let error = target.endpoints(true).expect_err("an upload has nowhere to go");
+        assert!(
+            matches!(
+                error.downcast_ref::<ocx_config::error::Error>(),
+                Some(ocx_config::error::Error::SigstoreRekorUrlMissing { .. })
+            ),
+            "{error:#}"
+        );
+        let target = resolve_sigstore_pair(
+            None,
+            &test_identifier(),
+            true,
+            None,
+            Some("https://rekor.other.example"),
+        )
+        .expect("endpoints validate");
+        assert!(target.endpoints(false).is_ok());
+    }
+
     /// The verify-side single is a different error family at the same exit
     /// code: `sbom` and `verify` must not report a sign-side kind, and a
-    /// bad `[trust.sigstore].fulcio_url` must not fail a command that never
+    /// bad `the Sigstore instance table.fulcio_url` must not fail a command that never
     /// contacts Fulcio.
     #[test]
     fn the_rekor_single_refuses_through_the_verify_family() {
-        let broken_fulcio = ocx_trust::SigstoreTrust {
+        let broken_fulcio = ocx_trust::SigstoreInstances::with_public(ocx_trust::SigstoreInstance {
             fulcio_url: Some("file:///etc/passwd".to_string()),
             ..Default::default()
-        };
-        let ok = resolve_rekor_endpoint(Some(&broken_fulcio), &test_identifier(), None)
-            .expect("a Fulcio typo cannot fail a command that never calls Fulcio");
+        });
+        let ok = resolve_rekor_endpoint(
+            Some(&broken_fulcio),
+            &test_identifier(),
+            None,
+            &SigstoreAuthority::public(),
+        )
+        .expect("a Fulcio typo cannot fail a command that never calls Fulcio");
         assert_eq!(ok.as_str().trim_end_matches('/'), ocx_oci::endpoint::DEFAULT_REKOR_URL);
 
-        let err = resolve_rekor_endpoint(None, &test_identifier(), Some("http://rekor.evil.example"))
-            .expect_err("plain http on a non-loopback host is an SSRF risk");
+        let err = resolve_rekor_endpoint(
+            None,
+            &test_identifier(),
+            Some("http://rekor.evil.example"),
+            &SigstoreAuthority::public(),
+        )
+        .expect_err("plain http on a non-loopback host is an SSRF risk");
         assert!(
             err.downcast_ref::<VerifyError>().is_some(),
             "the verify path must refuse with a VerifyError, not a SignError: {err:#}"

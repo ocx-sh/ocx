@@ -251,6 +251,12 @@ pub trait IndexImpl: Send + Sync {
         self.box_clone()
     }
 
+    /// A view whose `warn`-mode trust warnings go to the debug log, for background probes the
+    /// user did not ask for; the warning stays for a caller whose result depends on the catalog.
+    fn quiet_view(&self) -> Box<dyn IndexImpl> {
+        self.box_clone()
+    }
+
     /// A view that reads the local copies only, whatever the ambient [`ChainMode`](super::ChainMode),
     /// and writes nothing into the local index; it never dials a source.
     ///

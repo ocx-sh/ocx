@@ -344,13 +344,16 @@ ocx package sbom [OPTIONS] <IDENTIFIER>
 | --- | --- | --- |
 | `--certificate-identity` | `IDENTITY` | Expected certificate SAN (exact match) |
 | `--certificate-oidc-issuer` | `URL` | Expected certificate OIDC issuer (exact match) |
+| `--dependencies` |  | Cover the named package and every package in its dependency closure |
 | `--key` | `REF` | Sign or verify with a key pair instead of keyless Sigstore |
 | `--no-cache` |  | Bypass the referrers-capability cache for this invocation |
+| `--no-dependencies` |  | Cover the named package alone |
 | `--no-verify` |  | List documents without verifying anything; `--output` still writes the document, with one stderr warning naming the referrer digest |
 | `--output`, `-o` | `PATH` | Write the SBOM document to PATH ("-" for stdout). Several candidates of one type resolve to the newest; otherwise exit 65 (`multiple_attestations`), a terminal exits 64; under `--no-verify` a stderr warning names the referrer digest |
 | `--platform`, `-p` | `PLATFORM` | Platform of an image index to act on; defaults to the host platform |
 | `--rekor-url` | `URL` | Rekor transparency-log endpoint |
 | `--signature-format` | `FORMAT` | Signature wire format to accept: bundle or simplesigning |
+| `--sigstore` | `AUTHORITY` | Sigstore instance the signer used, named by the host of its Fulcio (`host[:port]`) |
 | `--sigstore-trusted-root` | `PATH` | Trust-root override: a Sigstore trusted-root JSON (or a directory holding trusted_root.json), named by a bare path or a file:// one. A file over 1 MiB or unreadable exits 74 |
 | `--summary` |  | Parse each SBOM and report component counts (CycloneDX 1.5-1.7 only) |
 | `--type` | `TYPE` | Restrict to one predicate type (for example cyclonedx or spdx) |
@@ -449,6 +452,7 @@ ocx package verify [OPTIONS] <IDENTIFIER>
 | `--platform`, `-p` | `PLATFORM` | Platform of an image index to act on; defaults to the host platform |
 | `--rekor-url` | `URL` | Rekor transparency-log endpoint |
 | `--signature-format` | `FORMAT` | Signature wire format to accept: bundle or simplesigning |
+| `--sigstore` | `AUTHORITY` | Sigstore instance the signer used, named by the host of its Fulcio (`host[:port]`) |
 | `--sigstore-trusted-root` | `PATH` | Trust-root override: a Sigstore trusted-root JSON (or a directory holding trusted_root.json), named by a bare path or a file:// one. A file over 1 MiB or unreadable exits 74 |
 | `--type` | `TYPE` | Restrict to one predicate type (for example cyclonedx or spdx); requires `--attestation` |
 

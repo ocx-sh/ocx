@@ -12,7 +12,10 @@ use error::Result;
 
 pub mod error;
 
-pub use self::ocx_index::{IndexBase, IndexFetch, IndexTransport, OcxIndex, OcxIndexConfig, ReqwestIndexTransport};
+pub use self::ocx_index::{
+    Freshness, IndexBase, IndexFetch, IndexTransport, OcxIndex, OcxIndexConfig, ReqwestIndexTransport,
+};
+pub use catalog_verifier::{CatalogVerdict, CatalogVerifier};
 pub use file_transport::FileIndexTransport;
 pub use local_index::Config as LocalConfig;
 pub use local_index::LocalIndex;
@@ -23,11 +26,14 @@ pub use oci_index::OciIndex;
 pub use oci_index::OciIndexConfig;
 pub use regenerate::{RegenerateOutcome, regenerate_catalog};
 pub use store::{CatalogEntryStatus, CatalogTransaction, IndexStore, RootReadResult, SOURCE_LOCK_TIMEOUT};
+pub use trust_error::IndexTrustError;
 pub use wire::{
-    CatalogDocument, CatalogIndex, IndexFormatConfig, IndexRoot, RootTag, SUPPORTED_FORMAT_VERSION, YankMarker,
+    CATALOG_PATH, CATALOG_SIGNATURE_PATH, CatalogDocument, CatalogIndex, IndexFormatConfig, IndexRoot, RootTag,
+    SUPPORTED_FORMAT_VERSION, YankMarker,
 };
 pub use wire_writer::{serialize_catalog, serialize_config, serialize_root};
 
+pub mod catalog_verifier;
 mod chained_index;
 pub mod export;
 mod file_transport;
@@ -36,8 +42,10 @@ pub use index_impl::DeclaredPublishers;
 mod local_index;
 mod oci_index;
 mod ocx_index;
+mod refused_source;
 mod regenerate;
 mod store;
+pub mod trust_error;
 mod wire;
 pub mod wire_writer;
 
@@ -199,6 +207,17 @@ impl Index {
         }
     }
 
+    /// The chain source for a namespace whose `index_signature = "enforce"` cannot be checked because a
+    /// registry-role `[mirrors]` entry pulled its index off: authoritative for `namespace`, it refuses every
+    /// read with [`error::Error::IndexCatalogThroughMirror`] and never touches the network.
+    pub fn refusing_catalog_through_mirror(namespace: String) -> Self {
+        Self {
+            inner: Box::new(refused_source::RefusedSource::new(namespace)),
+            rules: ocx_oci::ssrf::proxy_rules(),
+            blob_lookup: Arc::default(),
+        }
+    }
+
     /// Test seam: wrap a mock `IndexImpl` without going through `from_chained`.
     #[cfg(any(test, feature = "__testing"))]
     pub fn from_impl(inner: impl index_impl::IndexImpl + 'static) -> Self {
@@ -276,6 +295,16 @@ impl Index {
     pub fn read_only_view(&self) -> Self {
         Self {
             inner: self.inner.read_only_view(),
+            rules: self.rules.clone(),
+            blob_lookup: self.blob_lookup.clone(),
+        }
+    }
+
+    /// A view whose `warn`-mode catalog trust warnings go to the debug log instead of the terminal,
+    /// for a background probe nobody asked for. `enforce` still refuses.
+    pub fn quiet_view(&self) -> Self {
+        Self {
+            inner: self.inner.quiet_view(),
             rules: self.rules.clone(),
             blob_lookup: self.blob_lookup.clone(),
         }
@@ -480,7 +509,7 @@ impl Index {
             return Err(error::Error::NotInIndex {
                 identifier: identifier.to_string(),
                 namespace: identifier.registry().to_string(),
-                base_url: base_url.to_string(),
+                base_url: self::ocx_index::redact_url(base_url),
             });
         }
         match self.inner.refuse_unrouted(identifier) {
@@ -570,7 +599,7 @@ impl Index {
     }
 
     /// Whether a source in this index is the configured owner of `registry` (no I/O).
-    fn serves_registry(&self, registry: &str) -> bool {
+    pub fn serves_registry(&self, registry: &str) -> bool {
         self.inner.serves_registry(registry)
     }
 
@@ -2046,6 +2075,7 @@ mod tests {
     #[derive(Clone)]
     struct EmptyIndexSource {
         jurisdiction: Jurisdiction,
+        base_url: &'static str,
     }
 
     const EMPTY_INDEX_BASE_URL: &str = "https://index.example.invalid";
@@ -2071,7 +2101,7 @@ mod tests {
             self.jurisdiction
         }
         fn index_base_url(&self) -> Option<&str> {
-            Some(EMPTY_INDEX_BASE_URL)
+            Some(self.base_url)
         }
         fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {
             Box::new(self.clone())
@@ -2156,6 +2186,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let source = Index::from_impl(EmptyIndexSource {
             jurisdiction: Jurisdiction::Authoritative,
+            base_url: EMPTY_INDEX_BASE_URL,
         });
         let logical = versioned_logical_id();
         let error = chained_with(&directory, vec![source])
@@ -2187,6 +2218,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let source = Index::from_impl(EmptyIndexSource {
             jurisdiction: Jurisdiction::Authoritative,
+            base_url: EMPTY_INDEX_BASE_URL,
         });
         let error = chained_with(&directory, vec![source])
             .route(&versioned_logical_id())
@@ -2198,6 +2230,24 @@ mod tests {
         );
     }
 
+    /// The refusal carries the base URL for display only; its `Debug` must not print userinfo either.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn not_in_index_never_holds_userinfo_from_the_base_url() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = Index::from_impl(EmptyIndexSource {
+            jurisdiction: Jurisdiction::Authoritative,
+            base_url: "https://user:hunter2@index.example.invalid/base",
+        });
+        let error = chained_with(&directory, vec![source])
+            .route_for_dial(&versioned_logical_id())
+            .await
+            .expect_err("an authoritative index's miss is NotInIndex");
+        let debug = format!("{error:?}");
+        assert!(matches!(error, error::Error::NotInIndex { .. }), "{debug}");
+        assert!(!debug.contains("hunter2") && !debug.contains("user:"), "{debug}");
+        assert!(debug.contains("https://***@index.example.invalid/base"), "{debug}");
+    }
+
     /// And so does `route_to_materialize`: a pull must not read an index-owned
     /// name from the host it spells.
     #[tokio::test(flavor = "multi_thread")]
@@ -2205,6 +2255,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let source = Index::from_impl(EmptyIndexSource {
             jurisdiction: Jurisdiction::Authoritative,
+            base_url: EMPTY_INDEX_BASE_URL,
         });
         let error = chained_with(&directory, vec![source])
             .route_to_materialize(&versioned_logical_id())
@@ -2224,6 +2275,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let source = Index::from_impl(EmptyIndexSource {
             jurisdiction: Jurisdiction::Authoritative,
+            base_url: EMPTY_INDEX_BASE_URL,
         });
         let routed = chained_with(&directory, vec![source])
             .route_local(&versioned_logical_id())
@@ -2240,6 +2292,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let source = Index::from_impl(EmptyIndexSource {
             jurisdiction: Jurisdiction::FallThrough,
+            base_url: EMPTY_INDEX_BASE_URL,
         });
         let logical = versioned_logical_id();
         let routed = chained_with(&directory, vec![source])

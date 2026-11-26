@@ -70,6 +70,9 @@ Content-addressed storage, a local index, persistent state, stable symlinks, and
       <Node name="host/" icon="🖥️">
         <Description slot="description">the host-capability record, <code>capabilities.json</code></Description>
       </Node>
+      <Node name="index_catalog/" icon="🧾">
+        <Description slot="description">per-source highest signed-catalog <code>expires</code> verified on this host, the rollback high-water mark</Description>
+      </Node>
       <Node name="referrers/" icon="🔗">
         <Description slot="description">per-registry cache of whether the registry supports the referrers API</Description>
       </Node>
@@ -263,6 +266,14 @@ Two distinct platform keys pointing at the same manifest digest is legitimate, a
 
 The two keys differ. One names the binary's native architecture and the other a host that can run it by translation, but both may point at the same bytes. [OCI image index][oci-image-index] entries are content-addressed. The digest identifies the *bytes*, and neither the spec nor OCX requires a one-to-one mapping between platform descriptors and content. A generic OCI client that deduplicates identical layers across platform entries relies on the same property.
 
+### Index catalog record \{#index-catalog-record\}
+
+A signed index catalog carries an `expires` time. For each index source, OCX records the highest `expires` this host has verified. A later catalog with a lower `expires` is refused as a rollback.
+
+The record lives in `state/index_catalog/`. Each source has one file, named by the sha256 of the source namespace, holding `{"expires_high_water": "<RFC 3339 time>"}`.
+
+Delete a source's file, or the directory, to reset it. Rollback protection then restarts from the next verified catalog. A catalog signed with a large `--expires-in-days` makes every later, shorter-lived catalog read as a rollback. Delete the file to recover. See [Index signatures][signing-index].
+
 ## Symlinks \{#symlinks\}
 
 Package paths embed the digest: `~/.ocx/packages/ocx.sh/sha256/ab/c123…/`. That path changes on every upgrade. You cannot put it in a shell profile, an IDE config, or a build file and expect it to still work next month.
@@ -357,6 +368,7 @@ When the selected package declares [`entrypoints`][metadata-entry-points], the c
 [fs-packages]: #packages
 [user-storage]: ../guides/stable-paths.mdx#stable-paths
 [in-depth-indices]: ./indices.md
+[signing-index]: ./signing.mdx#index-signatures
 [public-index]: ./public-index.mdx
 [local-index]: ./local-index.mdx
 [toolchain-tree]: ./toolchain-tree.mdx

@@ -32,6 +32,7 @@ pub mod index_catalog;
 pub mod index_common;
 pub mod index_list;
 pub mod index_regenerate;
+pub mod index_sign;
 pub mod index_sync;
 pub mod index_update;
 pub mod init;

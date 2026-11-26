@@ -16,6 +16,7 @@ use url::Url;
 
 use super::error::{TrustRootLoadReason, VerifyErrorKind};
 use ocx_oci::endpoint::{resolve_sigstore_url, sigstore_http_client};
+use ocx_trust::SigstoreAuthority;
 
 /// The public-good Sigstore TUF repository.
 // Must equal `sigstore`'s unexported constant, or the SSRF guard clears a host the fetch never dials
@@ -62,9 +63,25 @@ pub struct TrustRoot {
 
     /// Rekor log keys; when empty, the pipeline TOFU-fetches one online.
     rekor_keys: BTreeMap<String, Vec<u8>>,
+
+    /// The Sigstore instance this material belongs to; `None` is the public instance.
+    instance: Option<SigstoreAuthority>,
 }
 
 impl TrustRoot {
+    /// The Sigstore instance this trust root verifies for.
+    #[must_use]
+    pub fn instance(&self) -> SigstoreAuthority {
+        self.instance.clone().unwrap_or_else(SigstoreAuthority::public)
+    }
+
+    /// Tag this trust root as the material of `instance`.
+    #[must_use]
+    pub fn for_instance(mut self, instance: SigstoreAuthority) -> Self {
+        self.instance = Some(instance);
+        self
+    }
+
     /// Load the public-good Sigstore trust root over TUF, caching targets in `cache_dir`.
     ///
     /// # Errors
@@ -110,6 +127,7 @@ impl TrustRoot {
             der_certs,
             ctfe_keys: root.ctfe_keys().map(owned).unwrap_or_default(),
             rekor_keys: root.rekor_keys().map(owned).unwrap_or_default(),
+            instance: None,
         })
     }
 
@@ -123,6 +141,7 @@ impl TrustRoot {
             der_certs,
             ctfe_keys,
             rekor_keys,
+            instance: None,
         }
     }
 
@@ -186,6 +205,19 @@ impl TrustRoot {
             .values()
             .next()
             .map(|der| pem::encode(&pem::Pem::new("PUBLIC KEY", der.clone())))
+    }
+
+    /// The Rekor key as PEM when the root pins exactly one, else `None`.
+    ///
+    /// With one key a verify against this root necessarily used it, so it is the key a cache writer may record;
+    /// with two the verify may have used either, and recording the wrong one hands a later offline verify a key
+    /// that fails every entry.
+    pub fn single_rekor_key_pem(&self) -> Option<String> {
+        let mut keys = self.rekor_keys.values();
+        match (keys.next(), keys.next()) {
+            (Some(only), None) => Some(pem::encode(&pem::Pem::new("PUBLIC KEY", only.clone()))),
+            _ => None,
+        }
     }
 
     /// The pinned Rekor key for `log_id_hex`, as PEM.

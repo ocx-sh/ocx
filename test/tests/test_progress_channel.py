@@ -27,8 +27,9 @@ from pathlib import Path
 
 import pytest
 
-from src import OcxRunner, PackageInfo
+from src import OcxRunner, PackageInfo, static_index
 from src.helpers import assert_shim_dir_exists, make_package, write_ocx_toml
+from src.index_signing import configure_index
 from src.terminal import requires_pty, run_on_a_terminal
 
 EXIT_SUCCESS = 0
@@ -155,6 +156,34 @@ def test_a_cached_exec_paints_nothing_on_the_terminal(
     )
     _assert_terminal_untouched(
         terminal, "a cached exec must draw nothing — no spinner, no cleared frame"
+    )
+
+
+def test_the_background_update_probe_prints_no_index_trust_warning(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """The self-update probe reads the `ocx.sh` catalog; an unsigned one never reaches the terminal.
+
+    `ocx.sh` defaults to `index_signature = "warn"`. The probe runs behind a command
+    that needs nothing from the index, so its trust verdict belongs in the debug
+    log: the warning is for a command whose result depends on that catalog.
+    """
+    root = tmp_path / "index"
+    root.mkdir()
+    static_index.write_config(root)
+    static_index.write_catalog(root, {})
+    with static_index.running(root) as server:
+        configure_index(ocx, server)
+        script = _script(tmp_path, "probe", f'"{ocx.binary}" clean --dry-run >/dev/null\n')
+        status, terminal = run_on_a_terminal(script, cwd=tmp_path, env=ocx.env)
+        asked_for_the_catalog = any(
+            record.path.endswith("c/index.json") for record in server.requests
+        )
+
+    assert status == EXIT_SUCCESS, f"status={status}\nterminal:\n{terminal}"
+    assert asked_for_the_catalog, "the probe never read the ocx.sh catalog, so this test proves nothing"
+    _assert_terminal_untouched(
+        terminal, "the update probe must not surface an index trust warning"
     )
 
 

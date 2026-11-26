@@ -6,6 +6,8 @@
 
 use serde::Deserialize;
 
+use crate::error::Error;
+
 // No `deny_unknown_fields`, for the fleet forward-compat reason stated on `crate::Config`.
 /// Configuration for a single `[registries.<name>]` entry.
 ///
@@ -65,6 +67,51 @@ pub struct RegistryConfig {
     /// then refused (exit 81, `publishers_required`), and the error names `ocx index update`.
     #[serde(default)]
     pub signatures: Option<SignatureRequirement>,
+
+    /// The signers allowed to sign this registry's index, in the shape of an index `publishers` array.
+    ///
+    /// Replaces the built-in list for the registry. Entries are kept raw here and compiled where the index is
+    /// checked, so a malformed entry fails at that point.
+    #[serde(default)]
+    #[schemars(with = "Option<Vec<serde_json::Value>>")]
+    pub index_publishers: Option<Vec<toml::Value>>,
+
+    /// Whether this registry's index must carry a valid signature: `off`, `warn` or `enforce`.
+    ///
+    /// Defaults to `warn` for `ocx.sh`, which has a built-in signer list, and for any registry that sets
+    /// `index_publishers`; every other registry defaults to `off`. `enforce` needs a signer list.
+    ///
+    /// `enforce` cannot hold for a namespace a local registry-role `[mirrors."<namespace>"]` entry pulls
+    /// off its index: that combination is refused with exit 78. The table key must be spelled as clients
+    /// spell the registry (lowercase, port as typed), or the entry is never applied.
+    #[serde(default)]
+    pub index_signature: Option<IndexSignatureMode>,
+
+    /// Whether an expired index catalog is refused: `check` or `ignore`. Defaults to `check`.
+    #[serde(default)]
+    pub index_expiry: Option<IndexExpiryMode>,
+}
+
+/// The `index_signature` setting of a `[registries."<registry>"]` entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum IndexSignatureMode {
+    /// Do not check the index signature.
+    Off,
+    /// Check it and log one warning per source on any failure, then continue.
+    Warn,
+    /// Check it and refuse on any failure.
+    Enforce,
+}
+
+/// The `index_expiry` setting of a `[registries."<registry>"]` entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum IndexExpiryMode {
+    /// Refuse a catalog past its `expires`.
+    Check,
+    /// Accept a catalog past its `expires`.
+    Ignore,
 }
 
 /// The `signatures` setting of a `[registries."<registry>"]` entry.
@@ -83,10 +130,69 @@ pub enum SignatureRequirement {
     Unknown(String),
 }
 
+/// The spelling clients match for the `[registries."<key>"]` key `key`, when `key` is not it.
+///
+/// Clients compare the registry exactly as an identifier spells it after the loader and the index sources fold
+/// it: lowercase, with a numeric port in plain decimal. A key with an uppercase letter, or a port written with
+/// leading zeros, never equals what a client carries, so its entry is never applied.
+#[must_use]
+pub fn unmatched_registry_key_spelling(key: &str) -> Option<String> {
+    let lowercase = key.to_ascii_lowercase();
+    let matching = match lowercase.rsplit_once(':') {
+        Some((host, port)) => port
+            .parse::<u16>()
+            .map_or_else(|_| lowercase.clone(), |port| format!("{host}:{port}")),
+        None => lowercase,
+    };
+    (matching != key).then_some(matching)
+}
+
 impl RegistryConfig {
     /// Mark this entry as system-locked — non-overridable by lower tiers.
     pub fn lock_as_system(&mut self) {
         self.system_locked = true;
+    }
+
+    /// Check the index-signing keys of the entry named `registry`.
+    ///
+    /// `has_builtin_signers` says whether ocx ships a signer list for this registry, which satisfies `enforce`.
+    ///
+    /// # Errors
+    /// [`Error::IndexPublishersMissing`] for `index_signature = "enforce"` with no signers at all;
+    /// [`Error::IndexPublishersInvalid`] for an `index_publishers` entry that is malformed (an entry from a
+    /// newer ocx is not malformed, and is kept).
+    pub fn validate_index_signing(&self, registry: &str, has_builtin_signers: bool) -> Result<(), Error> {
+        if self.index_signature == Some(IndexSignatureMode::Enforce)
+            && self.index_publishers.is_none()
+            && !has_builtin_signers
+        {
+            return Err(Error::IndexPublishersMissing {
+                registry: registry.to_owned(),
+            });
+        }
+        let Some(entries) = self.index_publishers.as_ref() else {
+            return Ok(());
+        };
+        let value = serde_json::to_value(entries).map_err(|error| Error::IndexPublishersInvalid {
+            registry: registry.to_owned(),
+            reason: error.to_string(),
+        })?;
+        let reasons: Vec<String> = ocx_trust::parse_publishers(&value)
+            .entries
+            .into_iter()
+            .filter_map(|entry| match entry {
+                ocx_trust::PublisherEntry::Invalid { index, reason } => Some(format!("entry {index}: {reason}")),
+                _ => None,
+            })
+            .collect();
+        // An empty list parses as one invalid entry; it is judged where it is used, as no usable signer.
+        if entries.is_empty() || reasons.is_empty() {
+            return Ok(());
+        }
+        Err(Error::IndexPublishersInvalid {
+            registry: registry.to_owned(),
+            reason: reasons.join("; "),
+        })
     }
 
     /// Merge `other` into `self`: `other`'s `Some` values win, unless `self` is system-locked.
@@ -112,12 +218,59 @@ impl RegistryConfig {
         if other.signatures.is_some() {
             self.signatures = other.signatures;
         }
+        if other.index_publishers.is_some() {
+            self.index_publishers = other.index_publishers;
+        }
+        if other.index_signature.is_some() {
+            self.index_signature = other.index_signature;
+        }
+        if other.index_expiry.is_some() {
+            self.index_expiry = other.index_expiry;
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_key_clients_never_carry_names_the_spelling_that_matches() {
+        let rows = [
+            ("ocx.sh", None),
+            ("localhost:5000", None),
+            ("registry.corp:99999", None),
+            ("OCX.SH", Some("ocx.sh")),
+            ("Ghcr.io", Some("ghcr.io")),
+            ("localhost:05000", Some("localhost:5000")),
+            ("Registry.Corp:0443", Some("registry.corp:443")),
+        ];
+        for (key, expected) in rows {
+            assert_eq!(unmatched_registry_key_spelling(key).as_deref(), expected, "key {key}");
+        }
+    }
+
     use super::*;
+
+    #[test]
+    fn index_signing_keys_deserialize_and_merge_last_tier_wins() {
+        let mut lower: RegistryConfig = toml::from_str(
+            "index_signature = \"warn\"\nindex_expiry = \"check\"\nindex_publishers = [{ kind = \"keyless\", identity = \"a\", oidc_issuer = \"i\" }]\n",
+        )
+        .expect("lower parses");
+        assert_eq!(lower.index_signature, Some(IndexSignatureMode::Warn));
+        assert_eq!(lower.index_expiry, Some(IndexExpiryMode::Check));
+        assert_eq!(lower.index_publishers.as_ref().map(Vec::len), Some(1));
+        let higher: RegistryConfig = toml::from_str("index_signature = \"enforce\"\n").expect("higher parses");
+        lower.merge(higher);
+        assert_eq!(lower.index_signature, Some(IndexSignatureMode::Enforce));
+        assert_eq!(lower.index_expiry, Some(IndexExpiryMode::Check));
+        assert_eq!(lower.index_publishers.as_ref().map(Vec::len), Some(1));
+    }
+
+    #[test]
+    fn unknown_index_signature_value_is_a_parse_error() {
+        assert!(toml::from_str::<RegistryConfig>("index_signature = \"strict\"\n").is_err());
+        assert!(toml::from_str::<RegistryConfig>("index_expiry = \"never\"\n").is_err());
+    }
 
     // ── Test 3.1.2: RegistryConfig::merge None-preserves ────────────────────
     // Plan: unit test gap — lower has Some(index), higher has None → lower preserved.
@@ -401,5 +554,45 @@ mod tests {
             entry.trusted_hosts.is_none(),
             "a typo'd key must never widen the trust set"
         );
+    }
+
+    #[test]
+    fn enforce_without_any_signer_is_refused_and_a_signer_source_satisfies_it() {
+        let enforce: RegistryConfig = toml::from_str("index_signature = \"enforce\"\n").expect("parses");
+        let error = enforce
+            .validate_index_signing("corp.example", false)
+            .expect_err("no signers");
+        assert!(
+            matches!(error, Error::IndexPublishersMissing { ref registry } if registry == "corp.example"),
+            "{error:?}"
+        );
+        enforce
+            .validate_index_signing("ocx.sh", true)
+            .expect("the built-in list satisfies enforce");
+        let with_list: RegistryConfig = toml::from_str(
+            "index_signature = \"enforce\"\nindex_publishers = [{ kind = \"keyless\", identity = \"a\", oidc_issuer = \"i\" }]\n",
+        )
+        .expect("parses");
+        with_list
+            .validate_index_signing("corp.example", false)
+            .expect("an explicit list satisfies enforce");
+        let warn: RegistryConfig = toml::from_str("index_signature = \"warn\"\n").expect("parses");
+        warn.validate_index_signing("corp.example", false)
+            .expect("only enforce needs a list");
+    }
+
+    #[test]
+    fn a_malformed_index_publishers_entry_is_refused_and_a_newer_kind_is_kept() {
+        let validate = |entries: &str| {
+            toml::from_str::<RegistryConfig>(&format!("index_publishers = {entries}\n"))
+                .expect("parses")
+                .validate_index_signing("corp.example", false)
+        };
+        let error = validate("[{ kind = \"keyless\", identity = \"a\" }]").expect_err("no oidc_issuer");
+        assert!(matches!(error, Error::IndexPublishersInvalid { .. }), "{error:?}");
+        let error = validate("[\"keyless\"]").expect_err("not an object");
+        assert!(matches!(error, Error::IndexPublishersInvalid { .. }), "{error:?}");
+        validate("[{ kind = \"future\" }]").expect("an entry from a newer ocx narrows, never refuses the file");
+        validate("[]").expect("an empty list is judged where it is used, not here");
     }
 }

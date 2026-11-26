@@ -2170,6 +2170,7 @@ class TestSubsystemCliCommandsTableCoverage:
         "index_update": "index update",
         "index_sync": "index sync",
         "index_regenerate": "index regenerate",
+        "index_sign": "index sign",
         # Managed-config group subcommands (file stem -> "config <verb>").
         "config_setup": "config setup",
         "config_update": "config update",
