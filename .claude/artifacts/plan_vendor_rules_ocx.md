@@ -8,11 +8,11 @@
 - **Tier-grammar:** 5
 - **Updated:** 2026-11-26
 - **Active phase:** 5 — ocx side landed (CW, P1-P10, I1); rules_ocx side and X with the other sub-orchestrator
-- **Step:** /hex-execute → RV2 closed, launcher blobs re-cut (`cd864016`); awaiting a /hex-review re-check
+- **Step:** /hex-review → round 3 (high, ocx side, head `6718aacf`): Needs Work — 0 Block, 3 Warn (batch failure line untested, `.cargo/config.toml` outside the shim workflow's `paths:`, design § 4.1 path rules behind the code); converged
 - **Feature branch:** ocx `hex/bazel-rbe-rules-ocx` (pipelines on `hex/bazel-rbe-rules-ocx--<pipeline>`, worktrees under `.agents/worktrees/`); rules_ocx one branch `hex/bazel-rbe-rules-ocx` (§ rules_ocx branch mechanics)
 - **Last update:** 2026-11-26 (after cd864016: build(shim): launcher blobs re-cut from the review round two sources)
-- **Next:** /hex-review .claude/artifacts/plan_vendor_rules_ocx.md
-- **Reviewed:** 9e3040cdfc9b2f7d76c61f63727c13c3ee100990
+- **Next:** /hex-execute .claude/artifacts/plan_vendor_rules_ocx.md
+- **Reviewed:** 6718aacfee1c2450a5b910e7ebe9bbe858fd306f
 
 ---
 
