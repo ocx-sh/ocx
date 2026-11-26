@@ -1,18 +1,17 @@
-# Plan: `ocx vendor`, the direct launcher, and rules_ocx under remote execution
+# Plan: `ocx vendor`, the direct launcher, and rules_ocx under remote execution — second run: unified launcher model, short vendored layout, rules_ocx package locking
 
 ## Status
 
 - **Plan:** plan_vendor_rules_ocx
-- **State:** executing
+- **State:** plan-approved
 - **Tier:** high
 - **Tier-grammar:** 5
 - **Updated:** 2026-11-26
-- **Active phase:** 5 — ocx side landed (CW, P1-P10, I1); rules_ocx side and X with the other sub-orchestrator
-- **Step:** /hex-review → round 3 (high, ocx side, head `6718aacf`): Needs Work — 0 Block, 3 Warn (batch failure line untested, `.cargo/config.toml` outside the shim workflow's `paths:`, design § 4.1 path rules behind the code); converged
-- **Feature branch:** ocx `hex/bazel-rbe-rules-ocx` (pipelines on `hex/bazel-rbe-rules-ocx--<pipeline>`, worktrees under `.agents/worktrees/`); rules_ocx one branch `hex/bazel-rbe-rules-ocx` (§ rules_ocx branch mechanics)
-- **Last update:** 2026-11-26 (after cd864016: build(shim): launcher blobs re-cut from the review round two sources)
+- **Active phase:** 0 — second run planned (§ Second run); first run landed (ocx `9c9e32d4`, rules_ocx `401c9c4`)
+- **Step:** /hex-plan → plan-approved (second run)
+- **Feature branch:** ocx `hex/bazel-rbe-rules-ocx` (pipelines on `hex/bazel-rbe-rules-ocx--<pipeline>`, worktrees under `.agents/worktrees/`); rules_ocx one branch `hex/bazel-rbe-rules-ocx`, its worktree `/home/mherwig/dev/ocx-sh/rules_ocx/.agents/worktrees/hex-bazel-rbe-rules-ocx` shared by the rules_ocx pipelines of a wave (DP-43)
+- **Last update:** 2026-11-26 (after 3db147f6: decision record for the unified launcher model, with amendments)
 - **Next:** /hex-execute .claude/artifacts/plan_vendor_rules_ocx.md
-- **Reviewed:** 6718aacfee1c2450a5b910e7ebe9bbe858fd306f
 
 ---
 
@@ -356,12 +355,14 @@ One step (sonnet). New files with final public attributes and docstrings, bodies
 Gate: buildifier clean; `bazel build //ocx/...` and `bazel test //ocx/tests/...` per § Worker rules, the old suites green, the new red.
 Commit `chore: vendor reader and set rule contract stubs`.
 
-## Parallelization
+## Parallelization (first run — landed)
+
+Kept as history. Every row is landed; the second run's table is § Parallelization below.
 
 | Pipeline | Repo | Scope | Expected files | Wave | Depends on | Marks | Status |
 |---|---|---|---|---|---|---|---|
 | CW | . | contract wave: C-001 real; stubs for C-002…C-024 surfaces; DP-1 | as § Contract wave CW | 0 | — | | merged |
-| CW-R | rules_ocx | contract wave: stubs for C-RO-02…C-RO-10, C-RO-12, C-RO-13, C-RO-16, C-RO-17 | as § Contract wave CW-R | 0 | CW | | pending |
+| CW-R | rules_ocx | contract wave: stubs for C-RO-02…C-RO-10, C-RO-12, C-RO-13, C-RO-16, C-RO-17 | as § Contract wave CW-R | 0 | CW | | merged |
 | P1 | . | C-014, C-015 (decode); V-62, V-72, V-73 units | `crates/ocx_env_apply/src/**`; `crates/ocx_util/src/{path,list}.rs`, `crates/ocx_util/Cargo.toml` and the `ocx_util` row of `scripts/crate_map.toml` (only if `ocx_util` keeps a use of a moved symbol); the 15 caller files of design § 12 A1; every other file using a moved symbol (candidates: `ocx_cli/src/conventions.rs`, `ocx_cli/src/command/self_group/activate.rs`, `ocx_project/src/error.rs`, `ocx_setup/src/profiles.rs`, `ocx_shell/src/ci/{github,gitlab}_flavor.rs`, `ocx_shell/src/shell/{reconcile,tests_git_bash}.rs`); `crates/ocx_package/src/metadata/env/list.rs` (doc link) | 1 | CW | | merged |
 | P2 | . | C-021; V-40 | `crates/ocx_schema/src/{lib,main}.rs`, `crates/ocx_schema/BUILD.bazel`, `crates/ocx_sdkgen/src/**`, `crates/ocx_sdkgen/tests/{compat_gate.rs,compat_corpus/**}`, `crates/ocx_sdkgen/BUILD.bazel`, `website/schema.taskfile.yml` | 1 | CW | | merged |
 | P3 | . | C-007 (copy half), C-008, C-009; S-015 unit half | `crates/ocx_store/src/file_structure/{assemble.rs,vendor_layout.rs}`, `crates/ocx_store/src/hardlink.rs` | 1 | CW | review | merged |
@@ -373,18 +374,18 @@ Commit `chore: vendor reader and set rule contract stubs`.
 | P9 | . | goal criterion 1 docs; AI-config upkeep | `website/src/content/docs/reference/vendor-manifest.md`, `website/src/content/docs/guides/vendor.mdx`, `website/astro.config.mjs`, `AGENTS.md`, `.claude/rules/{arch-principles,subsystem-cli-commands,subsystem-package-manager,subsystem-file-structure,subsystem-interface-contract,product-context}.md` | 1 | CW | | merged |
 | I1 | . | integration gate: hub files regenerated once (§ Hub files), `cargo check --workspace --all-targets --locked`, the touched crates' unit suites, `task website:reference:generate` | the § Hub files list (ocx side) | 4 | P1…P9 | | merged |
 | P10 | . | ocx proofs: every ocx V-row green locally, mut rows, V-66 | `.claude/artifacts/evidence/vendor_rules_ocx/P10.md`, `test/fixtures/vendor/windows_amd64.manifest.json` (V-46 golden, written on Linux); code fixes in any file of a merged ocx pipeline, each named in `P10.md`, never a test unless it contradicts a contract | 5 | I1 | | merged |
-| R1 | rules_ocx | rig, baseline, the two rig questions | `e2e/rbe/**` except `e2e/rbe/{tests,workspace}/**` and `e2e/rbe/ocx-under-test.txt`; `taskfiles/rig.taskfile.yml`; `.bazelignore` | 1 | CW-R | | pending |
-| R2 | rules_ocx | C-RO-15; V-51 | `ocx/private/{download,manifest}.bzl`, `ocx/tests/download_test.bzl` (new), `e2e/install_binary/**` (new), `.github/actions/ocx-under-test/action.yml`, `.github/workflows/{verify-basic,verify-deep}.yml` | 1 | CW-R | | pending |
-| R3 | rules_ocx | C-RO-02…C-RO-07, C-RO-12, C-RO-13, C-RO-16, C-RO-17; S-003, S-009…S-011; V-48, V-49, V-69 | `ocx/private/{vendor_manifest,set_repo,set_rules}.bzl`, `ocx/private/repo_utils.bzl` (`make_isolated_ocx_env` only), `ocx/tests/{vendor_manifest,set_repo}_test.bzl`, `ocx/tests/testdata/**` except the CW-R example | 1 | CW-R | hard | pending |
-| R4 | rules_ocx | C-RO-08, C-RO-08b, C-RO-09…C-RO-11 (code); S-001, S-002, S-012, S-014; V-50 | `ocx/extensions.bzl`, `ocx/private/{hub,facts,platforms}.bzl`, `ocx/defs.bzl`, `ocx/tests/{facts,hub,platforms_map,platforms}_test.bzl` | 1 | CW-R | hard | pending |
-| R5 | rules_ocx | C-RO-14; V-18 | `scripts/check_ocx_interface.py`, `scripts/tests/test_check_ocx_interface.py`, `taskfiles/guard.taskfile.yml` | 1 | CW-R | | pending |
-| R6 | rules_ocx | cutover: old fetch paths deleted, Bazel 9 only, wiring (DP-7, DP-8, DP-9) | `ocx/private/{project,package}.bzl` (deleted), `ocx/private/repo_utils.bzl` (dead functions), `ocx/tests/{launcher,package,policy}_test.bzl`, `ocx/tests/BUILD.bazel`, `MODULE.bazel`, `MODULE.bazel.lock`, `.bcr/presubmit.yml`, `taskfile.yml`, `bazel/*.bazelrc` (Bazel 8 lines only), root `BUILD.bazel` (if a test label moves) | 2 | R1, R2, R3, R4, R5 | | pending |
-| R7 | rules_ocx | rig tests for every rig V-row; S-001…S-003, S-008…S-010, S-012, S-014 | `e2e/rbe/tests/**`, `e2e/rbe/workspace/**` | 2 | R1 | | pending |
-| R8 | rules_ocx | rig green on both backends locally; rules mut rows; V-31, V-65 numbers; the CI lane | `.github/workflows/verify-rbe.yml`, `e2e/rbe/RESULTS.md` (new column); code fixes in any file of a merged rules_ocx pipeline, each named in the evidence | 4 | R2, R6, R7, P7 | | pending |
-| R9 | rules_ocx | examples, `e2e/bzlmod`, docs, invariants 1 and 3 (C-RO-11 text); V-11, V-27c, V-45 | `examples/**`, `e2e/bzlmod/**`, `README.md`, `docs/**`, `AGENTS.md`, `agent-config/**`, `.claude/rules/**` (generated copies) | 4 | R6, P7 | | pending |
-| X | . + rules_ocx | integration: attested blobs, V-17, V-44, fixture parity, proof ledger, CI evidence | `.claude/artifacts/evidence/vendor_rules_ocx/X.md`, `crates/ocx_store/src/shims/**` and the SHA canaries in `crates/ocx_store/src/shim.rs`; rules_ocx `e2e/rbe/ocx-under-test.txt` | 6 | P10, R8, R9 | | pending |
+| R1 | rules_ocx | rig, baseline, the two rig questions | `e2e/rbe/**` except `e2e/rbe/{tests,workspace}/**` and `e2e/rbe/ocx-under-test.txt`; `taskfiles/rig.taskfile.yml`; `.bazelignore` | 1 | CW-R | | merged |
+| R2 | rules_ocx | C-RO-15; V-51 | `ocx/private/{download,manifest}.bzl`, `ocx/tests/download_test.bzl` (new), `e2e/install_binary/**` (new), `.github/actions/ocx-under-test/action.yml`, `.github/workflows/{verify-basic,verify-deep}.yml` | 1 | CW-R | | merged |
+| R3 | rules_ocx | C-RO-02…C-RO-07, C-RO-12, C-RO-13, C-RO-16, C-RO-17; S-003, S-009…S-011; V-48, V-49, V-69 | `ocx/private/{vendor_manifest,set_repo,set_rules}.bzl`, `ocx/private/repo_utils.bzl` (`make_isolated_ocx_env` only), `ocx/tests/{vendor_manifest,set_repo}_test.bzl`, `ocx/tests/testdata/**` except the CW-R example | 1 | CW-R | hard | merged |
+| R4 | rules_ocx | C-RO-08, C-RO-08b, C-RO-09…C-RO-11 (code); S-001, S-002, S-012, S-014; V-50 | `ocx/extensions.bzl`, `ocx/private/{hub,facts,platforms}.bzl`, `ocx/defs.bzl`, `ocx/tests/{facts,hub,platforms_map,platforms}_test.bzl` | 1 | CW-R | hard | merged |
+| R5 | rules_ocx | C-RO-14; V-18 | `scripts/check_ocx_interface.py`, `scripts/tests/test_check_ocx_interface.py`, `taskfiles/guard.taskfile.yml` | 1 | CW-R | | merged |
+| R6 | rules_ocx | cutover: old fetch paths deleted, Bazel 9 only, wiring (DP-7, DP-8, DP-9) | `ocx/private/{project,package}.bzl` (deleted), `ocx/private/repo_utils.bzl` (dead functions), `ocx/tests/{launcher,package,policy}_test.bzl`, `ocx/tests/BUILD.bazel`, `MODULE.bazel`, `MODULE.bazel.lock`, `.bcr/presubmit.yml`, `taskfile.yml`, `bazel/*.bazelrc` (Bazel 8 lines only), root `BUILD.bazel` (if a test label moves) | 2 | R1, R2, R3, R4, R5 | | merged |
+| R7 | rules_ocx | rig tests for every rig V-row; S-001…S-003, S-008…S-010, S-012, S-014 | `e2e/rbe/tests/**`, `e2e/rbe/workspace/**` | 2 | R1 | | merged |
+| R8 | rules_ocx | rig green on both backends locally; rules mut rows; V-31, V-65 numbers; the CI lane | `.github/workflows/verify-rbe.yml`, `e2e/rbe/RESULTS.md` (new column); code fixes in any file of a merged rules_ocx pipeline, each named in the evidence | 4 | R2, R6, R7, P7 | | merged |
+| R9 | rules_ocx | examples, `e2e/bzlmod`, docs, invariants 1 and 3 (C-RO-11 text); V-11, V-27c, V-45 | `examples/**`, `e2e/bzlmod/**`, `README.md`, `docs/**`, `AGENTS.md`, `agent-config/**`, `.claude/rules/**` (generated copies) | 4 | R6, P7 | | merged |
+| X | . + rules_ocx | integration: attested blobs, V-17, V-44, fixture parity, proof ledger, CI evidence | `.claude/artifacts/evidence/vendor_rules_ocx/X.md`, `crates/ocx_store/src/shims/**` and the SHA canaries in `crates/ocx_store/src/shim.rs`; rules_ocx `e2e/rbe/ocx-under-test.txt` | 6 | P10, R8, R9 | | merged |
 | RV1 | . | convergence gaps from /hex-review high 2026-11-26: C-004 (contradicts), C-009 (partial), C-017 (partial), C-021 (partial), V-23 (contradicts) | `crates/ocx_package_manager/src/tasks/vendor.rs`, `crates/ocx_package_manager/src/launcher/{direct,generate}.rs`, `crates/ocx_package_manager/src/tasks/render_toolchain.rs`, `crates/ocx_store/src/file_structure/vendor_layout.rs`, `crates/ocx_shim/src/direct.rs`, `taskfiles/contract.taskfile.yml`, `test/lint/test_contract_baseline.py`, the tests of each | 6 | P10 | | merged |
-| RV2 | . | convergence gap from /hex-review high round 2, 2026-11-26: C-021 (partial) | `taskfiles/contract.taskfile.yml`, `test/lint/test_contract_baseline.py` | 7 | RV1 | | pending |
+| RV2 | . | convergence gap from /hex-review high round 2, 2026-11-26: C-021 (partial) | `taskfiles/contract.taskfile.yml`, `test/lint/test_contract_baseline.py` | 7 | RV1 | | merged |
 
 ```mermaid
 graph TD
@@ -429,7 +430,7 @@ stubs in parallel with the code (red first) instead of waiting for it. P6 is not
 the critical path. `.`-side and `rules_ocx`-side pipelines are disjoint by `(Repo, path)`. Two deliberate sequential overlaps: P10's V-46 golden lies under
  P8's `test/fixtures/vendor/**` (P8 → P10), and R1 and R8 both write `e2e/rbe/RESULTS.md` (R1 → R7 → R8).
 
-## Steps
+## Steps (first run — landed)
 
 Model per step: `standard` = sonnet; `hard` pipelines start at sonnet `effort: high`; escalation to opus only by counter (the same step
 failed twice). **Cheap for sonnet:** CW, CW-R, P1, P2, P4, P6, P8, P9, I1, P10, R1, R2, R5, R6, R7, R8, R9, X. **Hard (sonnet high, opus on
@@ -720,6 +721,1053 @@ moved to an acceptance case with an in-control; F15-F17 notes. Re-validation (sa
 the push; N2 act 7 both before and after X step 4) and one Warn (P5 stalling on act 3) — all three fixed: the push precedes X step 3,
 act 7 follows X step 4, and the attested blobs land in X step 0 so P5 never waits. The renumbered step bodies were not re-checked line
 by line by the reviewer.
+
+---
+
+# Second run — unified launcher model, short vendored layout and rules_ocx package locking
+
+Everything above this line is the first run. Its pipelines landed (ocx head `9c9e32d4`, rules_ocx head `401c9c4`) and its
+Parallelization table is kept as history with every row `merged`. The sections below are the second run. Its table, headed
+`## Parallelization`, is the one `/hex-execute` reads.
+
+## Run 2 — overview
+
+Implements two accepted records, under the goal `.agents/goals/bazel-rbe-rules-ocx.md` § Context "Second run":
+
+- ocx: [`adr_unified_launcher.md`](./adr_unified_launcher.md) ("the launcher record": rulings R-U1…R-U10, § 3-§ 13, rows
+  V-L01…V-L60, § 16 consumer requirements) and its companion [`system_design_vendor_rules_ocx.md`](./system_design_vendor_rules_ocx.md)
+  § 4.0-4.2, C-012, C-020, C-025…C-032.
+- rules_ocx: `.agents/adr/adr_0003_package_locking.md` ("ADR 0003": fact v2, kinds, the `update` targets, MR-1…MR-14, § Test plan)
+  and the amended `.agents/adr/adr_0002_vendor_tool_sets.md`, both in the rules_ocx worktree
+  `/home/mherwig/dev/ocx-sh/rules_ocx/.agents/worktrees/hex-bazel-rbe-rules-ocx`.
+
+Neither record is redesigned here. Research is not repeated: `.agents/research/research_launcher-atomic-publish-and-runfiles.md`,
+`research_launcher-platform-primitives.md`, `research_bazel-extension-facts-lock.md`. Discovery for this run: one
+architecture-explorer and three explorers (2026-11-26), folded into the file sets below.
+
+**Classification.** Feature. Scope large (two repositories, 25 pipelines). Reversibility: one-way door Medium for the record
+`NAME.launch` once homes hold it (the launcher record, Metadata), two-way for the vendored layout and `vendor-manifest` v2 until a
+release writes them. Tier `high` as the caller set it (DP-12 still applies). Run config: architect inline (accepted records),
+research skip, adversary off; Review = one `reviewer:spec` on the decomposition only.
+
+**What ships.** ocx: the short vendored layout `l/`, `p/<HEX16>/{c,e}` with `VendorLayout` owning every name; one record
+`NAME.launch` with an inner `kind` (`direct`, `package`, `deferred`, `toolchain`) and one native launcher in vendored trees and in
+homes on every OS; package launchers in `<package dir>/launchers/<G>/`, deferred tools in `deferred/<G>/`, toolchain renders in
+`shells/default-<16 hex>/` behind a switched `active` with stamp v2; refresh by generation (issue 679); `ocx clean` retires
+superseded launcher directories as kind `launchers`; the runfiles manifest root stage; `vendor-manifest` v2 with `record_path`,
+`index_digest`, `index_lookups`; the fixes of goal item 7; amended records and user pages; rebuilt launcher blobs and a dev build.
+rules_ocx: package locking by platform manifest digests in `MODULE.bazel.lock` facts (`v` 2), `update` targets per hub and for
+all, paths read from the manifest only, docs and fixtures on the short layout, the pin on the dev build of the final ocx head.
+
+## Run 2 — decisions recorded by this plan
+
+Numbering continues from the first run. Each is decided under goal-loop authority.
+
+| ID | Decision | Reason |
+|---|---|---|
+| DP-33 | The rename `ocx_env_apply::direct` → `launch` (`DirectSidecar` → `DirectRecord` with `kind`, `SIDECAR_EXTENSION` → `RECORD_EXTENSION = "launch"`, `SidecarError` → `RecordError`) is done in the contract wave with every caller rewired, as real code. The other three record kinds, `LaunchRecord::decode`, `validate` per kind and `peek_kind` are stubs there. | Callers sit in `ocx_shim`, `launcher/{direct,generate}.rs`, `tasks/{render_toolchain,vendor}.rs` (explorer). A parallel transitional module would leave a deletion of `direct.rs` for after the blob round, and `crates/ocx_env_apply/**` is a blob input. Stability tiers: rename in place. |
+| DP-34 | All launcher program source (`crates/ocx_shim/**`, `crates/ocx_env_apply/**`) changes in CW2 and pipeline LA only. After act B, no step edits a launcher input: `crates/ocx_shim/**`, `crates/ocx_env_apply/**`, `Cargo.lock` (the closure of those two crates), `Cargo.toml` `[profile.shim]`/`[profile.release]` and workspace dependency entries, `.cargo/config.toml`, `rust-toolchain.toml`, the shim line of `taskfiles/rust.taskfile.yml`, the `env:` block and target list of `.github/workflows/build-windows-shims.yml` (`scripts/shim_inputs.py`). A fix that needs one reopens act B; the goal allows one or two rounds, so a second round is the last. | The committed blobs are rebuilt once (goal § Emphasis). The recency gate reds on any source edit of either crate (explorer). |
+| DP-35 | Every `Cargo.toml` edit (the workspace root and every crate manifest), every `Cargo.lock` and every `scripts/crate_map.toml` edit of this run lands in CW2. LA and PB need two `windows-sys` feature groups the root `Cargo.toml:344` list lacks (`Win32_System_ProcessStatus` for `GetMappedFileNameW`; `Win32_System_IO` and `Win32_System_Ioctl` for `DeviceIoControl` with `FSCTL_SET_REPARSE_POINT`); CW2 step 1 adds them. Features are not locked, so `Cargo.lock` stays byte-identical. Discovery found no new crate edge (`ocx_store`, `ocx_config`, `ocx_shim`, `ocx_package`, `ocx_package_manager` already depend on `ocx_env_apply`, `crate_map.toml:33-118`). | DP-1 of the first run; keeps `Cargo.lock` out of every later pipeline (DP-34). |
+| DP-36 | TR depends on EP. Both edit `launcher/body.rs` (EP deletes the package and deferred script bodies, TR the trampoline and `.exec` bodies) and the unused functions would otherwise warn in the other pipeline. | Two pipelines never share a file concurrently; a dead-code split would need an allow-attribute. |
+| DP-37 | VF may edit `launcher/generate.rs` (`generate_direct` only) and `tasks/render_toolchain.rs` (`render_direct_bin` only), which EP and TR own later. No pipeline of wave 1 besides VF touches them. | `tasks/vendor.rs` calls both (explorer); sequential ownership is allowed, concurrent is not. |
+| DP-38 | `CleanKind::Launchers` needs no ledger entry and no version bump: IC-15 makes an added enum value additive (`subsystem-interface-contract.md` IC-15). V-L41 shows the compat gate accepting the addition and redding on its removal. `__OCX_LAUNCHER_DEPTH` is a registry row copied from the shape of `OCX_BINARY_PIN` (`crates/ocx_env/src/vars.rs:19`); if it appears in `cli.json`, the row is an addition. No step of this run changes a gated document in a way that needs a ledger entry; a red compat gate at I2 is a finding, never a waiver. | The explorer's "ledger entry needed" for `CleanKind` contradicts IC-15; IC-15 wins. |
+| DP-39 | `task verify:scoped --force` invokes Bazel through the workspace rc files (`.bazelrc` imports `bazel/baseline.bazelrc`, which sets the shared cache URL). A step runs `python3 scripts/scoped_gate.py --plan` first. If the plan routes no Bazel lane, it runs `task verify:scoped --force` with scratch `HOME` and `OCX_HOME`. If it routes one, it runs the other lanes by hand (`cargo fmt`, `cargo clippy -p <crate> --all-targets --locked -- -D warnings`, `cargo test -p <crate>`, the named acceptance modules) and records "verify:scoped not run: routes a Bazel lane (rc-file rule)". CI is the full gate. | The rule "every Bazel call uses `--ignore_all_rc_files`" binds; `task` has no knob to pass it. |
+| DP-40 | Before act B, the embedded blobs are the first run's launcher, which reads `.direct` only. A worker that wants an end-to-end check before B builds the host launcher (`cargo build -p ocx_shim --profile shim --locked`), copies it over `crates/ocx_store/src/shims/ocx-shim-x86_64-unknown-linux-musl` and its `RECORDED_SHA256` row in its own worktree, builds `ocx`, tests, then restores both with `git checkout --`. It never stages either file. The merge-time file-set check rejects a branch that carries them. | No build seam swaps the embedded blob (explorer); `include_bytes!` is compile time. |
+| DP-41 | The junction proof (V-L31, V-L32) runs in the new job `junction-proof` in `basic-repo.yml` on `windows-latest`: once as the runner's user and once as a standard local user the job creates (`New-LocalUser`, then `Start-Process -Credential -Wait`). The meta-orchestrator reads its result after act M2 and tells TR which Windows switch to build: variant A, `retarget_link` in place; variant B′, today's `symlink::replace_atomic`, with the pull-request text stating the exception (M6 of the launcher record). | M6 has no run-time fallback; the switch is chosen before TR launches. Hosted runners run elevated, so the standard-user leg is built explicitly. |
+| DP-42 | `ShimBinStore` and `hardlink::update` are deleted by TR's last step when no caller remains. The files under `.bin/ocx-shim/` on disk stay (R-U2). | The launcher record § 13: the store stays "until no writer remains and are then deleted (internal)". |
+| DP-43 | rules_ocx pipelines of one wave share the branch worktree (goal, recorded decision). Each worker runs only its own named Bazel test targets, with `--ignore_all_rc_files` and its own `--output_user_root=$SCRATCH/run2/<pipeline>/bazel`. A load error from a file outside its set is retried after 5 minutes and never edited. IR runs the whole suite. | A half-edited sibling file can break a package load; named targets limit what a run loads. |
+| DP-44 | System design C-RO-01 ("the only ocx argv rules_ocx builds are … `vendor` … and … `package vendor`") and C-RO-14 are amended to admit the two argv forms of ADR 0003 § The `update` targets: `ocx --project <scratch>/ocx.toml update --no-pull …` and `ocx --index <dir> index update <identifier>`, only inside the generated update program. RU changes `scripts/check_ocx_interface.py` to match; DOC2 amends the two lines. | ADR 0003 is the newer accepted record and requires those calls; the guard would red on them. |
+| DP-45 | ADR 0003 MR-3 says a record is "the launcher's basename, minus one `.exe`, plus `.launch`" on every OS; the launcher record (V-L05) strips `.exe` on Windows only. rules_ocx reads `record_path` verbatim and derives nothing, so no behaviour differs. RD appends one sentence to MR-3: "The name is whatever `record_path` says; rules_ocx never derives it." RM's tests use a Unix tool named `foo.exe` with record `foo.exe.launch` from the fixture. | Quoted in § Run 2 — record contradictions; wording only. |
+| DP-46 | Two dev builds. D1 after act B (the vendored format and the new launcher are on the branch), so rules_ocx local and CI work runs against a real build early; D2 at the final ocx head after the last review cycle, which the final pin names (goal rules_ocx item 4). | "Land the vendored format first, because the dev build and rules_ocx depend on it" (goal § Emphasis); the final pin must name the final head. |
+| DP-47 | The user-page list is built by search (`website/src/content/docs/`, names `.shim`, `.shimref`, `.exec`, `.direct`, `entrypoints/`, `shells/default`, `selections/default`, `render_stamp`, `trampoline`, `ocx clean`, `--enable_runfiles`). The research file § 2 lists decision-record sentences and the test surface, not pages. | The brief pointed at § 2; § 2 holds no page list. |
+| DP-48 | Each pipeline builds in its own `CARGO_TARGET_DIR=$SCRATCH/run2/target-<pipeline>` (DP-15). `$SCRATCH` = `/tmp/claude-1000/-home-mherwig--herdr-worktrees-ocx-uno/884fced7-d8ab-48af-8366-591f3a7bc90b/scratchpad`. | As the first run. |
+
+## Run 2 — record contradictions found while planning
+
+1. ADR 0003 MR-3: "named `NAME.launch` (the launcher's basename, minus one `.exe`, plus `.launch`)". The launcher record V-L05:
+   "`/a/foo.exe` → `/a/foo.exe.launch` (Unix)". Resolved by DP-45; no behaviour conflict, because rules_ocx reads `record_path`.
+2. System design C-RO-01: "The only ocx argv rules_ocx builds are `ocx --format json vendor …` and `ocx --format json package vendor …`".
+   ADR 0003: "Run `ocx --project SCRATCH/ocx.toml update --no-pull ARGS`" and "run `ocx --index <snapshot dir> index update <identifier>`".
+   Resolved by DP-44.
+3. The architecture explorer reported that `CleanKind::Launchers` "breaks the machine interface, so … ledger entry plus a bumped
+   version". IC-15: "Enum values and union variants are open in the schema; adding one is additive". Resolved by DP-38.
+
+Nothing in the two records was found impossible to plan. The § 14 amendments of the launcher record are already present in the seven
+records (each names `adr_unified_launcher`); DOC2 step 1 checks each amendment text and applies any that is missing.
+
+## Run 2 — owner's rules (bind every step; copied into every worker brief)
+
+- Launcher files are built complete in a staging directory and published with one rename or one link switch. A published launcher
+  directory is never edited. No design relies on old and new files working side by side.
+- Nothing writes into a launcher directory that an older `ocx` published (`entrypoints/`, `shims/…`, `shells/default`,
+  `render_stamp.json`).
+- One launcher program and one record file with an inner `kind` key, the same on Linux, macOS and Windows.
+- `manifest.json` is the only interface between `ocx vendor` and rules_ocx. rules_ocx derives no file name itself.
+- A lock holds one platform manifest digest per platform and never the digest of an image index.
+- Do not re-implement any environment, package-content or other construction method; adjust the current interfaces (§ Reuse table
+  of the first run still applies: composer, `select_tool_set`, `resolve_selected_tools`, `DirWalker`, `assemble_from_layers_with_layouts`).
+- Reuse pull requests 784 (ocx) and 36 (rules_ocx); nothing needs a second pull request.
+- Never edit `CHANGELOG.md`. Never write a rollout or user count anywhere. `.serena/project.yml` stays untouched and out of every commit.
+- Every Bazel call: `ocx exec bazel -- --ignore_all_rc_files --output_user_root=$SCRATCH/run2/<pipeline>/bazel <cmd>`. Every `ocx`,
+  `task` and `grim` call: `OCX_HOME=$SCRATCH/run2/<pipeline>/home HOME=$SCRATCH/run2/<pipeline>/user OCX_NO_CONFIG=1`, or it is
+  reported as not run. Never the shared Bazel remote cache, never the real `~/.ocx`.
+- No push, no pull-request act, no issue act, no workflow dispatch by a worker. No git write in the rules_ocx repository by a worker.
+- Secrets and credential-bearing logs are never written to any file.
+- ocx commits on pipeline branches: `git add <explicit paths>`, `git commit --no-verify`, Conventional Commits whose subject is the
+  changelog line; `chore:` for `.claude/**` and `.agents/**`; `refactor:` for behaviour-free renames; no `Co-Authored-By`.
+- Never stage `crates/ocx_store/src/shims/**`, `crates/ocx_store/src/shim_inputs.sha256` or the `RECORDED_SHA256` rows of
+  `crates/ocx_store/src/shim.rs`: act B owns them (DP-40).
+- A step that needs a file outside its pipeline's Expected files stops and reports. A new error variant in
+  `crates/ocx_package_manager/src/error.rs` or a new rung in `crates/ocx_cli/src/exit.rs` is declared in CW2; a step that needs
+  another stops and reports.
+- Verification per step: the named failing test first (red against the stubs, failing line recorded), then green, then DP-39. Never a
+  local full `task verify`.
+- Evidence: each pipeline writes only `.claude/artifacts/evidence/vendor_rules_ocx/run2/<pipeline>.md` (rules_ocx pipelines: the
+  orchestrator writes it in ocx from the final report). Red-proof protocol of the first run (§ Red-proof protocol) applies unchanged.
+
+## Run 2 — component contracts
+
+Normative text is the cited section of the record; each line here is what a test asserts. IDs C-101… (ocx) and C-RO-18… (rules_ocx)
+continue the first run's C-001…C-032 and C-RO-01…C-RO-17, which stay in force as amended by the records.
+
+### ocx — record (`ocx_env_apply::launch`, the launcher record § 3.1-3.3)
+
+- **C-101** `LaunchRecord::decode(bytes, windows)` accepts one valid record per kind and refuses: an extra key, a key of a sibling
+  kind, an unknown key in an `env[]` entry, a missing, unknown or duplicate `kind`, a struct `kind` other than the peek,
+  `schema_version` ≠ 1, more than 1 MiB, a NUL in any string (`RecordError` variant per case) [V-L01].
+- **C-102** `encode` is compact JSON of the kind's struct, `kind` first, fields in declaration order, then `\n`; byte-equal to the
+  four § 3.3 examples [V-L02].
+- **C-103** Per-kind validation of § 3.2: `toolchain` `tier = project` ⇔ `project_root` present and absolute, else `TierMismatch`;
+  `@VENDOR_DIR@` outside `direct` → `TokenOutsideDirect`; `package_root` absolute; `deferred.identifier` pinned; `ocx` absolute, not
+  a batch file [V-L03, V-L04].
+- **C-104** `record_path_for(launcher, windows)`: `C:\a\cmake.exe` → `C:\a\cmake.launch` with `windows`; `/a/foo.exe` →
+  `/a/foo.exe.launch` without [V-L05].
+- **C-105** `peek_kind(bytes)` returns the `kind` of any JSON object holding a valid `kind`, ignoring every other key (a
+  `schema_version: 2` record included), `None` otherwise; never validates [V-L39].
+
+### ocx — launcher program (`crates/ocx_shim`, § 3.4, § 5)
+
+- **C-106** The launcher reads only `NAME.launch`. A launcher beside only `.shim`, `.shimref`, `.exec` or `.direct` exits 78 naming
+  the expected `NAME.launch`; the one-line parsers and `SIDECAR_PROBE_ORDER` are gone [V-L08; C-020].
+- **C-107** Home kinds build exactly the frozen argv of § 3.4's table (`launcher exec <root> -- NAME …`, `launcher shim <id> --
+  NAME …`, `--project <root> exec -- NAME …`, `--global exec -- NAME …`); `toolchain` alone removes `OCX_GLOBAL`, `OCX_PROJECT`; every
+  home kind increments `__OCX_LAUNCHER_DEPTH` [V-L07].
+- **C-108** Program resolution: non-empty `OCX_BINARY_PIN` (absolute, else 78) → record `ocx` (toolchain) → the launcher's own
+  `PATH` walk skipping empty and relative entries, its own directory and any candidate with a sibling `ocx.launch`; a batch program
+  is 78 on every rung; Unix `execve` of the absolute path, Windows `lpApplicationName` always set; an empty pin is unset [V-L06,
+  V-L10, V-L11, V-L12].
+- **C-109** `__OCX_LAUNCHER_DEPTH` ≥ 32 → 78 "launcher loop"; an entry point named `ocx` starts the real `ocx` at depth 1 [V-L13,
+  V-L14].
+- **C-110** Home kinds read the record beside the kernel's image path `I` (`/proc/self/exe`, ` (deleted)` → 78; `proc_pidpath`;
+  Windows mapped file resolved by handle); `NAME` is `I`'s file name; no stat-then-open compare [V-L15…V-L19].
+- **C-111** Kind `direct` keeps the started-path rules and root stages 0-2; stage 3 reads the runfiles manifest per § 5 step 6
+  (sources, bounds 64 MiB / 64 KiB / 4096 candidates / 16 MiB, escaping, UTF-8 root on Windows, dedupe before the cap, root
+  hygiene, `$RUNFILES_MANIFEST_FILE` only when it lists `P`); 78 only when no tree and no manifest gives a root [V-L43…V-L49; C-012,
+  C-027, MR-4, MR-13].
+- **C-112** The Windows batch-spawn failure line (`crates/ocx_shim/src/direct.rs:755-763`, "failed to start … through cmd.exe: exit …;
+  hint") is printed with the length-limit hint when `length_limit_hint` returns one [carried review Warn 1; `basic-repo.yml ›
+  unit-native (windows-latest)`].
+- **C-113** Each of the six blobs is ≤ 512 KiB and starts every record kind on its own OS [V-L57, V-L58, V-L36].
+
+### ocx — vendored format (`VendorLayout`, `tasks::vendor`, `ocx_package::vendor`, § 3.5, § 4.2)
+
+- **C-114** The vendored tree is exactly `manifest.json`, `l/NAME[.exe]` + `l/NAME.launch`, `p/<HEX16>/c/…`, `p/<HEX16>/e/NAME[.exe]` +
+  `NAME.launch`; every name comes from `VendorLayout`; the composer's vendor lane takes `p/<HEX16>/c` from `ComposePaths::vendor(token_root,
+  keys)`; the selection environment names the same paths as `packages[]` [V-L50; C-026].
+- **C-115** `VendorLayout::package_keys` refuses two digests sharing a `HEX16` with `PackageKeyClash { first, second }`; `ocx vendor`
+  exits 65 `vendor_path_unrepresentable` naming both [V-L51].
+- **C-116** `check_relative_path` refuses a segment equal to `_ocx_reserved` (ASCII case-insensitive) with
+  `PathViolation::ReservedSegment`; a package path holding one → 65 [V-L56; C-025].
+- **C-117** `manifest.json` has `schema_version: 2` and validates against the v2 schema; `tools[]` and `packages[].entrypoints[]` carry
+  `record_path` exactly when `launcher_path` is present [V-L53, V-L50; MR-1, MR-3].
+- **C-118** `packages[].index_digest` is present on a root resolved through an image index, absent for a platform-manifest
+  identifier and every dependency; `index_lookups[] {path, found}` lists, with `--index`, every path read under it, relative,
+  `/`-separated, sorted, deduplicated, and is absent without `--index` [V-L54, V-L55; C-031, C-032].
+- **C-119** A vendor run with `--index DIR` leaves `DIR` byte-identical, a digest-addressed package included (`place_package`,
+  `verify_selection` on `read_only_view()`) [V-L60; C-030, R-U10].
+- **C-120** A bare platform manifest identifier vendors for `-p P` with `platform = P`, `available_platforms = ["any"]`, exit 0
+  [V-L59; C-029, R-U9].
+- **C-121** A declared binary the content lacks is refused with 65; the message names the package identifier, says its `binaries`
+  claim lists `<name>`, a program the content does not hold, and that the publisher must correct the claim [V-L52; R-U1, C-028].
+- **C-122** A tool or entry-point name ending in `.launch` (ASCII case-insensitive) is refused by `ocx vendor` with 65; names equal
+  after case folding collapse on a Windows or macOS target [V-L27, vendor half].
+- **C-123** `check_relative_path` agrees with every path rule of system design § 4.1 (a table test, one case per rule) [carried
+  review Warn 3].
+
+### ocx — home layout and publish (§ 4.1, § 4.3, § 6)
+
+- **C-124** `LauncherGeneration::of(b"", 1, 1)` = `d7c9115eb03568da`; `render_fingerprint("0123456789abcdef", {"cmake" → § 4.1
+  record})` = `202755de66972decba3905023b7f5f3303c0472810eec3a7f0ffe02691de8f68`; `host()` is `None` on a host with no blob.
+- **C-125** `publish_dir(staged, target)`: Unix replaces an absent or empty target, maps `ENOTEMPTY`/`EEXIST` to `AlreadyThere`;
+  Windows publishes only onto an absent target; `staged` stays for the caller. `retarget_link(target, link)`: Unix stages a sibling
+  link exclusively and renames it over `link`; Windows sets the junction data in place; an absent link is created; a non-link is an
+  error. `retire_dir(dir)`: acts only on a real directory, renames to `.gc-<random>` then removes; a refused rename leaves `dir`
+  whole (`LeftForLater`); `EXDEV` removes in place; sweeps sibling `.gc-*` and `.staging-*` [V-L21, V-L22, V-L30, V-L31, V-L32].
+- **C-126** `TempStore::scratch(prefix)` creates the lock file before the directory and holds it until drop; `ocx clean` skips it
+  [V-L26].
+- **C-127** Package entry points: on pull, `launchers/<G>/` is written into the locked temp package directory; on first use,
+  `compose_roots` runs § 6.2 steps 1-8 (completeness check, retire an incomplete or linked `D`, stage in a scratch, `mkdir` of
+  `launchers` without `-p`, `publish_dir`, `AlreadyThere` → winner checked, `D` on `PATH` in place of `entrypoints`, read-only
+  fallback to a complete `entrypoints/` with one warning, else 77 or 74 naming the path); `entrypoints/` is never written
+  [V-L20…V-L25].
+- **C-128** Every home launcher is a byte copy of the embedded host blob (link count 1); a Windows home holds `NAME.exe` and
+  `NAME.launch` only, no extensionless script [V-L37, V-L38].
+- **C-129** Deferred tools live under `deferred/<G>/<registry>/<repo>/<alg>/<2>/<30>/{digest, refs/blobs/, l/}`, staged in
+  `fs.temp.scratch("deferred")`, published with `publish_dir`; the composer emits `<tree>/l` [V-L26; carried: clean deleting the
+  staging directory].
+- **C-130** A home writer skips a `.launch`-suffixed name with one warning [V-L27, home half].
+
+### ocx — toolchain render, prompt gate, detection, refresh, clean (§ 6.4, § 8, § 10-§ 12)
+
+- **C-131** A render with new content publishes `shells/default-<16 hex>/bin/{NAME[.exe], NAME.launch}` from an exclusive
+  `.staging-<16 hex>` and switches `active`; a repeated render is a no-op by the v2 stamp fingerprint; a render whose stamp directory is
+  intact but `active` names another directory re-switches without publishing; `refuse_symlinked_home(_leaves)` runs before staging;
+  the render deletes nothing; the v2 stamp (`render_stamp.v2.json`) is written last [V-L28, V-L35].
+- **C-132** Neither render nor clean writes, renames or deletes `shells/default`, `entrypoints/`, `shims/…`, `render_stamp.json` or
+  `.bin/ocx-shim/*` [V-L29; R-U2].
+- **C-133** Prompt gate: v2 first (stamp present, `active` names `shells/<shell_dir>`, bin fingerprint matches), then v1 exactly as
+  today; any other target refused; unknown `v` reads absent [V-L33].
+- **C-134** An older `ocx` and the new one rendering and prompting alternately on one home: every launcher starts; the older prompt
+  omits the project entry only while `active` names a new directory [V-L34].
+- **C-135** `is_ocx_trampoline`: true for a native trampoline (sibling record peeks `toolchain`), an old `.exec` pair, an old marker
+  script, a `schema_version: 2` trampoline record; false for `package` and `deferred`; a FIFO at the record path does not hang; two
+  project homes on one `PATH` do not loop (65) [V-L39, V-L40].
+- **C-136** `ocx_setup::run` phase 1.6: when `$OCX_HOME/ocx.lock` exists, render the global home; a failure warns, never fails setup;
+  after `ocx self update` to a build with a new blob, `active` names a new directory [V-L42].
+- **C-137** `ocx clean` retires non-current `launchers/<G'>`, `deferred/<G'>`, and every `shells/default-<16 hex>`, `.staging-*`,
+  `.gc-*` that is neither the stamp's `shell_dir` nor `previous_shell_dir`, under the home's `toolchain-render` lock, reported as
+  `launchers`; `--dry-run` only reports; a Windows refusal leaves the directory whole [V-L30, V-L41, V-L32].
+- **C-138** On Windows the `active` switch has no window without `active`: the two `junction_proof_*` tests pass in `junction-proof`
+  (variant A); if they fail, TR builds variant B′ and a `cfg(windows)` unit asserts that the render calls `symlink::replace_atomic`, and
+  the pull request states the exception (DP-41) [V-L31, V-L32].
+
+### ocx — carried fixes and records
+
+- **C-139** `build-windows-shims.yml` lists every file `scripts/shim_inputs.py` hashes in both `paths:` lists (`.cargo/config.toml`
+  included) [carried review Warn 2].
+- **C-140** `generate_is_idempotent` asserts: a second generation over a complete `launchers/<G>` returns `AlreadyThere` and leaves the
+  directory byte-identical [carried].
+- **C-141** Two acceptance cases: a private dependency's binary is reachable from the program an entry point starts; an entry point is
+  started by bare name through `PATH` [carried].
+- **C-142** The doc comment at `crates/ocx_package_manager/src/tasks/pull.rs:466-472` states what the code does after EP (review row,
+  no red) [carried].
+- **C-143** The seven records carry the § 14 amendments verbatim; C-RO-01/C-RO-14 carry DP-44; every user page that names a changed
+  surface is current (review row) [goal ocx item 8].
+
+### rules_ocx (ADR 0003; amends C-RO-02…C-RO-04, C-RO-07, C-RO-10, C-RO-12, C-RO-17)
+
+- **C-RO-18** Declaration kinds in order `project`, `pinned` (`@sha256:<64 hex>`), `index`, `tag`; an identifier with a bad first
+  character → X7 (§ Declaration kinds).
+- **C-RO-19** Fact key `<tier>|<name>`, value `v` 2 with `kind`, `tools` per platform, `available_platforms`, `pins[platform]` (bare
+  platform manifest digests only, never an image index), `snapshot.files` for `index`; a v1 value or a non-digest pin is a miss
+  (§ Fact key and value) [MR-5, MR-8].
+- **C-RO-20** On a miss the extension runs, per platform, `ocx --format json [--remote] [--frozen] … vendor|package vendor -o OUT -p P
+  --omit-links --manifest-only`; `--remote` for `tag` only (a tag resolves on a fresh home), `--frozen` for `index` only; step 8's
+  same-index check retries once, then X3; `hub_platform_error` runs on the recorded value; `reproducible = True` (§ Extension
+  algorithm) [MR-6, MR-7, MR-9, MR-12; goal rules item 4].
+- **C-RO-21** A `tag` or `pinned` set vendors `<declared repo>@<pins[P]>` with `-p P`, no `--remote`; an `index` set keeps
+  `--index … --frozen` and `watch_tree`; a failed set fetch adds the X6 hint except on exit 65 (§ Set repository per kind) [MR-10].
+- **C-RO-22** `cross_check` fails when the vendored root digest differs from `expected_digest`, with the clause `the root package is
+  sha256:<actual> where the fact recorded sha256:<expected>`; the message tail is `run bazel run @<name>//:update` for `tag`/`pinned`,
+  the snapshot text for `index`, `run bazel mod deps --lockfile_mode=update` for `project`; a clause with an empty expected value is
+  skipped (§ Set and hub checks).
+- **C-RO-23** The set repository moves every top-level entry of the vendor output and reads only `manifest.json` by name; launcher and
+  record paths come from `launcher_path`/`record_path`; `ocx_tool` links both under their manifest basenames side by side; the parser
+  has no fixed `packages`/`selections` prefix; `schema_version` ≠ 2 → X5; a missing `index_lookups` under `--index` → X9 (§ Paths
+  from the manifest) [MR-1…MR-4, MR-11].
+- **C-RO-24** `ocx_update` writes `plan.txt` in the fixed field order (golden); a tag value outside `A-Za-z0-9._:/@+=,-`, with `..` or
+  userinfo, or a path holding `"`, `%` or a newline → E10; selection refuses in the order E9, E3, E1, E2 before any `ocx` call; no
+  declaration → `rules_ocx: no ocx declarations`, exit 0 [goal rules item 2].
+- **C-RO-30** The program runs per kind: `pinned` → E4, a dependency's file → E5, a write target outside the workspace → E12, `project`
+  on a scratch copy with `ocx update --no-pull` (MR-14), `index` with `ocx index update`, an `ocx` failure → E6 and the loop goes on;
+  then one nested `bazel --noblock_for_lock mod deps --lockfile_mode=update --repo_env=RULES_OCX_UPDATE=<names>` (E7, E11); a
+  missing `bazel` → E8; Windows ARGS with `& | < > ^ %` or `"` → E13; exit code by § The `update` targets step 4.
+- **C-RO-31** Each hub BUILD has `alias(name = "update")`; `@rules_ocx//:update` exists; a tool named `update` is refused by
+  `hub_content_error`.
+- **C-RO-25** `ocx.lock` is published by a unique temporary file and a rename; a symlinked `ocx.lock` → E14 (§ Publishing).
+- **C-RO-26** Each declaration and platform prints one result line, `sha256:<old> -> sha256:<new>` or `unchanged`; a set
+  `RULES_OCX_UPDATE` prints W1 on every evaluation (§ Output lines).
+- **C-RO-27** Without a runfiles tree a vendored tool starts on Windows and Linux (`manifest_runfiles_test`, Linux twin with
+  `--noenable_runfiles --spawn_strategy=local`, `bazel coverage`); consumer docs and the e2e/example rc files drop
+  `--enable_runfiles` (§ Runfiles and Windows) [MR-13; V-L46…V-L49].
+- **C-RO-28** Fixtures and `docs/guides/windows-path-length.md` follow the short layout; `vendor_manifest_example.json` is a byte
+  copy of ocx `crates/ocx_package/src/vendor/example.json` [goal rules item 3].
+- **C-RO-29** `e2e/rbe/ocx-under-test.txt` names the dev build of the final ocx head [goal rules item 4].
+
+## Run 2 — scenarios
+
+- **S-101 Upgrade on an existing Windows home.** A home an older `ocx` built (`.exe` + `.shim`/`.shimref`/`.exec`) gets the new `ocx`.
+  The next `ocx exec` composes `launchers/<G>` and `deferred/<G>/…`; the next render switches `active` to `shells/default-<hex>`. Old
+  `.exe` files stay and start their tools through frozen command lines. Error: a read-only home composes the old `entrypoints/` with
+  one warning, or fails naming the path (77 permission, 74 otherwise).
+- **S-102 Two `ocx` versions on one home.** The older prompt in `bin` mode omits project tools while a new render is active; the
+  older render heals `active` to `shells/default`; the new render re-switches without publishing. Error: none; every state is
+  complete (C-134).
+- **S-103 Upgrade of `ocx` with a new launcher blob.** `ocx self update` → phase 1.6 renders the global home into a new directory.
+  Error: a render failure prints a warning and setup succeeds.
+- **S-104 Concurrent first use.** Two `ocx exec` start at once on a package without `launchers/<G>`: both exit 0, one directory
+  exists. Error: an incomplete `D` from a crash is retired and republished; `LeftForLater` falls back as S-101's error.
+- **S-105 Clean after upgrade.** `ocx clean` reports old generations as `launchers`; `--dry-run` reports only. Error: on Windows a
+  directory with a running `.exe` stays whole for a later clean.
+- **S-106 Vendored tool on Windows Bazel without `--enable_runfiles`.** The launcher finds its root through the runfiles manifest.
+  Error: neither tree nor manifest → 78 naming up to eight candidates and the `--enable_runfiles` hint.
+- **S-107 Short layout.** `ocx vendor -o out cmake` writes `l/cmake` + `l/cmake.launch` and `p/<HEX16>/c/…`. Errors: two packages
+  sharing a `HEX16` → 65 naming both digests; a tool named `x.launch` → 65; a path segment `_ocx_reserved` → 65.
+- **S-108 node 26.13.1.** `ocx vendor` refuses with 65 and a message naming `ocx.sh/nodejs/node:26.13.1`, its `binaries` claim
+  `corepack`, and the publisher's fix; `--manifest-only` succeeds (C-028).
+- **S-109 Vendor with `--index`.** The index directory is byte-identical afterwards; the manifest lists `index_lookups`.
+- **S-110 Locked tag in Bazel.** `ocx.package(name = "jq", package = "…/jq:1.8")` on a fresh machine writes a fact with one platform
+  manifest digest per platform; each set vendors `<repo>@<pin>`; after the tag moves, a clean output base builds the old content.
+  Errors: a platform outside the index → `hub_platform_error` at resolve time; a pin gone from the registry → X6; offline with no
+  fact → X1.
+- **S-111 `bazel run @jq//:update`.** Only that fact moves; `@rules_ocx//:update` moves all or the named ones; a pinned hub prints E4.
+  Errors: E1, E2, E3, E9 with exit 64 and no ocx call; E11 on a held output-base lock; E14 on a symlinked `ocx.lock`.
+- **S-112 Old launchers by kind on disk.** A launcher started beside only `.direct` exits 78 naming `NAME.launch` (C-106).
+
+## Run 2 — error taxonomy
+
+| Surface | Code / text | Cause | Remediation shown |
+|---|---|---|---|
+| launcher | 78, names `NAME.launch` | no record, wrong kind, malformed, schema ≠ 1 | rewrite by the `ocx` that owns the directory (first use or render) |
+| launcher | 78 "no ocx found on PATH" | no pin, no baked `ocx`, no `ocx` on `PATH` outside launcher directories | install `ocx` or set `OCX_BINARY_PIN` |
+| launcher | 78 "launcher loop" | depth ≥ 32 | the two launchers named by the trace |
+| launcher | 78 "runfiles manifest larger than 64 MiB" / line over 64 KiB / NUL | hostile or broken manifest | none; Bazel's manifest is bounded |
+| launcher | 78 no vendored root, ≤ 8 candidates, Windows hint | neither tree nor manifest | `--enable_runfiles` or stage the manifest |
+| `ocx vendor` | 65 `vendor_path_unrepresentable` | `HEX16` clash, `.launch` name, `_ocx_reserved` segment, missing declared binary | message names the package(s) and the fix |
+| composition | 77 / 74 naming the path | read-only or foreign-owned home without a complete `entrypoints/` | fix permissions, or run once as the owner |
+| render | warning, exit unchanged | render failure in setup phase 1.6 | next render point heals |
+| rules_ocx | X1…X9, E1…E14, W1 | ADR 0003 § Error texts | each text names its fix |
+
+## Run 2 — ecosystem crate API changes
+
+ocx-mirror (the lockstep repository, `/home/mherwig/dev/ocx-sh/ocx-mirror`) was searched for every symbol below on 2026-11-26. It names
+`ocx_index::IndexStore` (constructor and readers), `ocx_env` constants and `ocx_util::fs::{persist_temp_file, path_exists_lossy}`; it
+names nothing in `ocx_env_apply`, `ocx_package::vendor` or `ocx_config::env::is_ocx_trampoline`. This run has no grant there.
+
+| Crate (tier) | Change | Kind | Lockstep effect |
+|---|---|---|---|
+| `ocx_env_apply` (ecosystem) | module `direct` → `launch`; `DirectSidecar` → `DirectRecord` (+ `kind`); `SIDECAR_EXTENSION` → `RECORD_EXTENSION`; `SidecarError` → `RecordError` (+ variants); new `LaunchKind`, `LaunchRecord`, `PackageRecord`, `DeferredRecord`, `ToolchainRecord`, `ToolchainTier`, `peek_kind`, `record_path_for`, `MAX_RECORD_BYTES`, `MAX_PEEK_BYTES` | **break** (rename in place, DP-33) | none: ocx-mirror names no `ocx_env_apply` item |
+| `ocx_package` (ecosystem) | `vendor::SCHEMA_VERSION` 1 → 2; new optional fields `record_path` (tools, entry points), `index_digest` (packages), `index_lookups` (manifest), type `IndexLookup` | **break** for struct literals (new pub fields) | none: ocx-mirror names no `ocx_package::vendor` item |
+| `ocx_index` (ecosystem) | `IndexStore::with_lookup_recorder`, `IndexStore::lookup_recorder`, type `LookupRecorder`; one private field; `new`, `with_locks_root`, `refusing_links`, `machine_local` unchanged | additive | none; `IndexStore` keeps `Debug`, `Clone` |
+| `ocx_util` (ecosystem) | new `fs::publish` (`publish_dir`, `retarget_link`, `retire_dir`, `Published`, `Retired`) | additive | none |
+| `ocx_env` (ecosystem) | registry row `__OCX_LAUNCHER_DEPTH` | additive | none |
+| `ocx_config` (ecosystem) | `is_ocx_trampoline` signature unchanged, one more true case | behaviour | none |
+| `ocx_store`, `ocx_package_manager`, `ocx_setup`, `ocx_cli` | internal | — | — |
+
+The two breaks are unavoidable by the records (rename in place; manifest v2 fields) and reach no consumer. Act M9 runs
+`task satellite:verify` before finalize to show it.
+
+## Run 2 — interface records
+
+| Document | Change | Ledger / version |
+|---|---|---|
+| `vendor-manifest` | v2 (R-U4) | no baseline exists; no ledger entry (R-U4, DP-2); golden regenerated by I2 |
+| `reports` (`ocx clean`) | `CleanKind` gains `launchers` | additive (IC-15, DP-38); no entry; V-L41 shows the gate |
+| `cli.json` | possibly a `__OCX_LAUNCHER_DEPTH` env row | additive; no entry |
+| errors document, exit codes, slugs | none new (65, 74, 77, 78 reused) | — |
+| `VendorReport` v1 | values change (paths), schema unchanged | — |
+
+## Run 2 — the launcher binary round and the dev builds (meta-orchestrator; never a worker's)
+
+What a pipeline may assume:
+
+- **Before act B** the embedded blobs are the first run's launcher. An `ocx` built from the branch writes `NAME.launch` records that
+  the embedded launcher cannot read: unit tests are unaffected; acceptance cases that start a launcher are red. Workers in wave 1
+  test the launcher through `crates/ocx_shim`'s own tests (the test binary is built from source) and may use DP-40 for an end-to-end
+  check on Linux. rules_ocx Starlark unit tests need no `ocx`.
+- **After act B** the embedded blobs are LA's launcher on all six targets. Acceptance runs end to end on Linux; Windows and macOS rows
+  are proven by the CI jobs of § Run 2 — platform proofs. No step edits a launcher input (DP-34).
+- **After D1** rules_ocx runs against a published dev build carrying the short layout, `vendor-manifest` v2 and the new launcher.
+  Before D1 (and before act B) rules_ocx has only the first run's pin (`0.6.8-pr784_20261126125712`, schema 1, old layout); RM's
+  parser refuses it, so rules_ocx is not pushed until IR has written the D1 pin.
+
+Acts, in order:
+
+- **M1** — after CW2 and CW-R2 merge: nothing external.
+- **M2** — after PB and CI2 have merged (early push, for the `junction-proof` result), or after all of wave 1 of ocx if LA is already
+  merged by then: push `hex/bazel-rbe-rules-ocx` (PR 784). When LA merges later, push once more for act B. The
+  pull-request run of `build-windows-shims.yml` builds six artifacts; its recency and digest gates are red by design (stale committed
+  blobs). Acceptance jobs are red where wave-1 tests are red first; that is expected on a draft. Read the `junction-proof` job and
+  decide variant A or B′ for TR (DP-41).
+- **B** — the launcher binary round, the procedure of commit `cd864016`, `crates/ocx_store/src/shim.rs` module doc (`:4-11`) and
+  `subsystem-ci.md` § Windows Shim Build: download the six artifacts of M2's run; copy them into `crates/ocx_store/src/shims/` with
+  mode 100755; set the six `RECORDED_SHA256` rows in `shim.rs`'s test module; write `python3 scripts/shim_inputs.py --print` into
+  `crates/ocx_store/src/shim_inputs.sha256`; commit `build(shim): launcher blobs cut for the launch record`; push. Watch
+  `build-windows-shims.yml` (size gate V-L57, recency, digest) and `launcher-blobs.yml` (six legs, V-L58, V-L36) green; an
+  infrastructure red is rerun once.
+- **D1** — dispatch `release.yml` with `mode=dev` on the branch at B's head; record the identifier and digest for IR.
+- **M3** — after IR: commit (Conventional) and push the rules_ocx branch (PR 36); its CI runs against D1.
+- **M4** — after PF: push ocx; the PR CI runs every new acceptance case.
+- **D2** — after the last review/execute cycle: dispatch `release.yml` `mode=dev` at the final ocx head; hand it to X2.
+- **M5** — after X2: commit and push rules_ocx; dispatch its `verify-deep.yml` and `verify-rbe.yml`.
+- **M6** — before `/hex-finalize`: dispatch ocx `verify-deep.yml` on the final head (goal, recorded decision); rules_ocx deep run.
+- **M9** — before finalize: `OCX_MIRROR_DIR=/home/mherwig/dev/ocx-sh/ocx-mirror task satellite:verify` with scratch `HOME`/`OCX_HOME`
+  (ecosystem crates changed); a red follows the goal's § Issue resolution (no grant in ocx-mirror).
+
+## Run 2 — platform proofs (no step claims a Windows or macOS result from this host)
+
+| Row | Proven by |
+|---|---|
+| V-L06, V-L39 (Windows) | `basic-repo.yml › unit-native (windows-latest)` |
+| V-L19 | `basic-repo.yml › unit-native (windows-latest)` and `unit-native (macos-latest)` |
+| C-112 (batch failure line) | `basic-repo.yml › unit-native (windows-latest)` |
+| V-L08 (Windows), V-L58, V-L36 | `launcher-blobs.yml` six legs; V-L36 also `unit-native (macos-latest)` |
+| V-L57 | `build-windows-shims.yml › build` |
+| V-L09, V-L11, V-L34 (Windows), V-L38 | `deep-repo.yml › acceptance-native (windows-latest)` (act M6) |
+| V-L31, V-L32 | `basic-repo.yml › junction-proof` (new); red → variant B′ ships and the pull request says so (DP-41) |
+| V-L46, V-L47 | rules_ocx `verify-deep.yml` Windows leg with `--noenable_runfiles` (act M5) |
+| ADR 0003 `windows-update-target` | rules_ocx `verify-deep.yml › windows-update-target` (new) |
+
+## Run 2 — hub files
+
+ocx, regenerated once by I2 and by no other pipeline: `crates/ocx_schema/tests/golden/{cli,cli-schema,reports,errors,vendor-manifest}.json`,
+`crates/ocx_sdkgen/tests/golden/rust/**`, `website/src/content/docs/reference/command-line/**` and every page `task
+website:reference:generate` writes (with `vendor-manifest.md` if the schema task generates it; otherwise DOC2 owns it), `test/SUITE_FLOOR`,
+`test/limits/**`, `ACCEPTANCE_MODULE_TARGETS` and its assertion if a module count changes, `MODULE.bazel.lock` if `bazel mod deps
+--lockfile_mode=error` reds. `crates/ocx_schema/contract/baseline/**` is never edited (release rotation only). `Cargo.lock` is CW2's
+(DP-35). rules_ocx: `MODULE.bazel.lock` and `docs/defs.md` (stardoc), regenerated by IR.
+
+## Run 2 — contract wave CW2 (ocx, wave 0)
+
+One pipeline, serial steps, one merge. Stub rule of the first run: what an existing code path reaches is real and behaves as today;
+only what nothing calls yet may be `unimplemented!()`. Gate: `cargo check --workspace --all-targets --locked`, `cargo test -p
+ocx_test_support --test workspace_structure`, the unit suites of every touched crate green except the new contract tests, which compile
+and are red (failing lines in the evidence). Model: sonnet.
+
+1. **Record rename and record types** (DP-33). Files: `crates/ocx_env_apply/src/{launch.rs (git mv from direct.rs), lib.rs}`; callers
+   `crates/ocx_shim/src/{direct.rs,core.rs,main.rs}` (rename only; `core.rs:124` `DIRECT_EXTENSION` follows `RECORD_EXTENSION`),
+   `crates/ocx_package_manager/src/launcher/{direct.rs,generate.rs}`, `crates/ocx_package_manager/src/tasks/{render_toolchain.rs,vendor.rs}`;
+   `scripts/launcher_blob_check.sh` hand-written records (`:43`, `:82`, `:95`, `:110`, expected stderr `:76`, `:84`) so
+   `launcher-blobs.yml` stays meaningful; root `Cargo.toml` `windows-sys` features `Win32_System_ProcessStatus`, `Win32_System_IO`,
+   `Win32_System_Ioctl` (DP-35; `Cargo.lock` unchanged, checked by `git diff --exit-code Cargo.lock`); `crates/ocx_env/src/vars.rs` (+ its tests) registry row `__OCX_LAUNCHER_DEPTH`. Real:
+   `DirectRecord` with `kind` and `schema_version`, `RECORD_EXTENSION`, `encode`, `record_path_for`, `DirectRecord`'s existing
+   validation. Stubs: `PackageRecord`, `DeferredRecord`, `ToolchainRecord` validation, `LaunchRecord::decode`, `peek_kind`. Red tests:
+   V-L01…V-L05 cases. The existing `ocx_shim` and `ocx_env_apply` unit suites pass with `.launch` in place of `.direct`. Must not touch:
+   layout paths, launcher behaviour beyond the rename. Commit `feat(vendor)!: the vendored launcher record is NAME.launch with a kind key`.
+2. **Vendored format contract.** Files: `crates/ocx_package/src/vendor.rs`, `crates/ocx_package/src/vendor/*.rs`,
+   `crates/ocx_package/src/vendor/example.json` (v2, short layout, `record_path`, `index_digest`, `index_lookups`; § 4.1 of the system
+   design); `crates/ocx_store/src/file_structure/vendor_layout.rs` (stubs: `PackageKey`, `PackageKeyClash`, `package_keys`,
+   `RESERVED_SEGMENTS`, `relative_record`, `relative_entrypoint_record`, the new `PathViolation::ReservedSegment`);
+   `crates/ocx_index/src/{store.rs,lib.rs}` (stubs: `LookupRecorder`, `IndexStore::with_lookup_recorder`, `lookup_recorder`);
+   `crates/ocx_package_manager/src/lib.rs` (stub `PackageManager::index_lookups() -> Option<Vec<IndexLookup>>`);
+   `crates/ocx_package_manager/src/tasks/vendor.rs` (only what the type change forces: `record_path: None`, `index_digest: None`,
+   `index_lookups: None`). Real: `SCHEMA_VERSION = 2`, the v2 types, the round-trip test of `example.json`. Red tests: `package_keys`
+   clash, reserved segment, recorder records a found and an absent path. Commit `feat(vendor)!: vendor manifest schema version 2 types`.
+3. **Home layout contract.** Files: `crates/ocx_util/src/{fs.rs,fs/publish.rs}` (stubs `publish_dir`, `retarget_link`, `retire_dir`,
+   `Published`, `Retired`); `crates/ocx_store/src/launcher_generation.rs` (new; stubs `LauncherGeneration::{of,host,as_str}`,
+   `render_fingerprint`, real `HOME_LAUNCHER_REVISION = 1`) and its `lib.rs` line; `crates/ocx_store/src/file_structure/shim_store.rs`
+   (real: `ShimStore::new(root, marker)`, `shims` keeps `bin`), `crates/ocx_store/src/file_structure.rs` (real: `deferred(&G)`,
+   `deferred_root()`), `crates/ocx_store/src/file_structure/package_store.rs` (real: `PackageDir::launchers(&LauncherGeneration)` =
+   `<package dir>/launchers/<G>` and `PackageDir::launchers_root()`, beside `entrypoints()` at `:121` and its `PinnedPackageRef` twin at
+   `:220`; EP and GC read them and never edit the file), `crates/ocx_store/src/file_structure/temp_store.rs` (real: `scratch`, `LockedScratch`, moved from
+   `crates/ocx_package_manager/src/tasks/export_archive.rs:31-56`, whose caller is rewired), `toolchain_store.rs` (real `render_dir`,
+   stub `active_target_name`), `state_store.rs` (real: `RenderStampV2`, `render_stamp_v2_file`, `global_render_stamp_v2_file`, read
+   and write mirroring v1, unknown `v` reads absent); `crates/ocx_package_manager/src/tasks/toolchain_names.rs` (real:
+   `is_record_name`, ASCII case-insensitive `.launch` suffix); `crates/ocx_cli/src/api/data/clean.rs` (real: `CleanKind::Launchers`,
+   `Display`). Error variants every later pipeline needs, declared here: none beyond the existing ones is foreseen (65 via
+   `VendorError`, I/O classification for 74/77); a pipeline that needs one stops and reports. Red tests: C-124 goldens, C-125
+   semantics per OS (Unix cases here). C-126 gets a green characterization test here (the move is real); its red is EP.4's mutation
+   (V-L26). Commit `chore: launcher generation and publish contract stubs`.
+
+## Run 2 — contract wave CW-R2 (rules_ocx, wave 0, after CW2)
+
+One step (sonnet), in the rules_ocx worktree, no git write. Files: `ocx/private/update_repo.bzl` (new: `ocx_update_repo` rule with its
+attributes; pure helpers `plan_content`, `check_value`, `select_declarations` with `fail("unimplemented")` bodies) and the program
+templates it names (`ocx/private/update.sh.tpl`, `ocx/private/update.bat.tpl`, empty with a header line); `ocx/private/facts.bzl` (new
+stubs only: `declaration_kind`, `fact_value_v2`, `fact_decode_v2`, `index_inputs`, `same_index_check`); `ocx/private/set_repo.bzl`
+(real attribute declarations `expected_digest`, `hub`, `kind` on `ocx_set_repo`, unused); `ocx/tests/update_repo_test.bzl` (new, red)
+and red cases appended to `ocx/tests/{facts,hub,set_repo,vendor_manifest}_test.bzl`; `ocx/tests/BUILD.bazel` registration; every `bzl_library` target and dependency this run needs in `ocx/BUILD.bazel` and
+`ocx/private/BUILD.bazel` (new files included), so no later pipeline edits a BUILD file; a pipeline that needs another target stops
+and reports;
+`ocx/tests/testdata/vendor_manifest_example.json` replaced by a byte copy of ocx `crates/ocx_package/src/vendor/example.json` after
+CW2 step 2 (and its `.bzl` twin if one embeds it). Gate: buildifier clean; `bazel test` of the old suites green and the new cases red,
+per § Run 2 — owner's rules. Report the diff to the orchestrator, which commits.
+
+## Run 2 — pipelines
+
+Model per step: `standard` = sonnet. `hard` pipelines start at sonnet `effort: high`; opus only by counter (the same step failed
+twice). **Opus by policy:** LA step 8 (security audit of the lookup and program resolution, the launcher record § 20; `hex.md`
+`reviewer:security: deep-reasoning`). Each step: specify (red against the stubs, failing line recorded) → implement (green) → DP-39 →
+its own commit. Every pipeline: **must not touch** anything outside its Expected files, `CHANGELOG.md`, `.serena/project.yml`, the
+blob files of act B; the lines below name the nearest temptations.
+
+### LA — the launcher program and the record decoder (mark `hard`)
+
+Expected files: `crates/ocx_env_apply/src/**`, `crates/ocx_shim/**` except `crates/ocx_shim/Cargo.toml` (CW2, DP-35). Must not touch: any
+other crate, any `Cargo.toml` or `Cargo.lock`, the blobs.
+
+1. Record decode and validation (C-101, C-103, C-105): `LaunchRecord::decode`, per-kind `validate`, `peek_kind`, NUL scan, 1 MiB bound.
+   Red first: CW2's V-L01…V-L05 cases. Then `cargo test -p ocx_env_apply`. Commit `feat(launcher): one record file with four kinds`.
+2. Dispatch on the record (C-106): the launcher reads `record_path_for`; `SIDECAR_PROBE_ORDER`, `parse_one_line`, `parse_shim_sidecar`,
+   `parse_shimref_sidecar`, `parse_exec_sidecar` and their tests deleted; a launcher beside only an old sidecar exits 78 naming
+   `NAME.launch`. Red first: V-L08 unit. Commit `feat(launcher)!: the launcher reads only NAME.launch`.
+3. Home kinds (C-107, C-108, C-109): the four argv builders keep the frozen tokens (`core.rs:389-402` constants; the golden pairs with
+   `launcher/body.rs` tokens stay); program resolution rungs; empty pin = unset; `__OCX_LAUNCHER_DEPTH` + 1 and the 32 limit; the NULL
+   rung deleted. Red first: V-L06, V-L07, V-L10, V-L12, V-L14 units. Commit `feat(launcher): home launchers resolve ocx without
+   searching their own directory`.
+4. Image path on Linux (C-110): `LookupFs::image_path` on the trait, `RealFs` and `FakeFs`; Linux `/proc/self/exe` with ` (deleted)` → 78;
+   home kinds read beside `I`; `direct` keeps `P` plus the inode check. Red first: V-L15…V-L18 units. Commit `feat(launcher): home
+   launchers read the record beside the loaded image`.
+5. Image path on macOS and Windows (C-110): `proc_pidpath`; `GetMappedFileNameW` → `\\?\GLOBALROOT` open → `GetFinalPathNameByHandleW`.
+   Red first: V-L19 `cfg(target_os = "macos")` and `cfg(windows)` units written against the stub (`cargo check --target
+   x86_64-pc-windows-gnullvm -p ocx_shim` if the target is installed, else reported as not run); green in CI only. Commit
+   `feat(launcher): image path on macOS and Windows`.
+6. Runfiles manifest stage (C-111): `LookupFs::read_lines`, the § 5 step 6 parser and bounds, the `$RUNFILES_MANIFEST_FILE` rule, root
+   hygiene, Windows UTF-8 root decode. Red first: V-L43, V-L44, V-L45 units. Commit `feat(launcher): find the vendored root through the
+   runfiles manifest`.
+7. Carried Warn 1 and budget (C-112, C-113): red first, a `cfg(windows)` test of the batch failure line (`crates/ocx_shim/tests/batch_spawn.rs`
+   or a unit beside `spawn_batch`) asserting the message and hint, shown red by a one-word change of the message in a scratch copy; then
+   the `SHIM_SIZE_BUDGET` check on a host build (`cargo build -p ocx_shim --profile shim --locked`, size recorded). Commit
+   `test(launcher): the batch start failure line is covered`.
+8. Security audit (opus, `security-auditor` skill) of § 5 and § 3.4 as implemented: CWE-427 search order, manifest parsing bounds,
+   FIFO and non-regular files, depth guard, environment trust. Findings are fixed inside LA's file set before merge, each with its
+   own red test; anything outside is reported. Evidence `run2/LA-security.md`.
+
+### VF — the vendored format (mark `hard`)
+
+Expected files: `crates/ocx_store/src/file_structure/vendor_layout.rs`, `crates/ocx_package_manager/src/composer.rs`,
+`crates/ocx_package_manager/src/tasks/{vendor.rs,resolve.rs}`, `crates/ocx_package_manager/src/launcher/direct.rs`,
+`crates/ocx_package_manager/src/launcher/generate.rs` (`generate_direct` only) and `crates/ocx_package_manager/src/tasks/render_toolchain.rs`
+(`render_direct_bin` only) (DP-37), `crates/ocx_package/src/vendor.rs`, `crates/ocx_package/src/vendor/*.rs`. Must not touch: the
+home lanes of `composer.rs` (`:759-767`, `:993-1000`), `crates/ocx_index/**`, launcher source.
+
+1. Layout names (C-114 names, C-115, C-116, C-123): `VendorLayout` functions of § 4.2, `package_keys` with the full-digest clash check,
+   the reserved segment, a table test with one case per path rule of system design § 4.1 (carried Warn 3). Red first: CW2's cases and
+   the table test. Commit `feat(vendor): short vendored layout names`.
+2. Composer vendor lane (C-114 lane): `ComposePaths::vendor(token_root, keys)` replaces `VENDOR_PACKAGE_SUFFIX_COMPONENTS` and the
+   hand-written tail of `VendorLane::package_dir`; `install_path_for` returns content and entry-point directories; the caller at
+   `tasks/resolve.rs:700`. Red first: the `composer.rs` vendor-lane units (`:8146`, `:8160`) on the new paths. Commit
+   `refactor(vendor): the composer takes vendored paths from VendorLayout`.
+3. Tree paths (C-114): `place_package`, `write_entrypoint_launchers`, `write_selection_launchers` write `l/` and `p/<HEX16>/{c,e}`;
+   `relative_launcher_dir` users (`vendor.rs:525`); in-file tests at `vendor.rs:2254-2271`, `:2336`, `:2350`. Red first: those tests on
+   the new paths. Commit `feat(vendor)!: vendored trees use the short layout`.
+4. Manifest fields (C-117, C-118 `index_digest`, C-122): `build_manifest` writes `record_path` for every launcher; `read_closures` keeps
+   `chain[0]` as `SelectedRoot.index_digest`, written for roots only; `.launch` names refused (65) with `is_record_name`; in-file tests
+   at `:2749`, `:1435-1524`. Red first: a manifest unit asserting `record_path` and `index_digest`. Commit `feat(vendor): the manifest
+   lists record paths and the selecting index`.
+5. Read-only view, lookups, refusal text (C-118 `index_lookups`, C-119, C-121): `place_package` and `verify_selection` on
+   `manager.read_only_view()`; `index_lookups` from `PackageManager::index_lookups()`, sorted and deduplicated; the R-U1 message in
+   `ensure_binary_targets_exist`. C-120 needs no code (met today, `tasks/vendor.rs:310-312`); VA.2 holds its test. Red first: a unit
+   that seeds a writable index and asserts no write; the message text. Commit `fix(vendor): a vendor run writes nothing into the index
+   directory`.
+
+### IX — the index lookup recorder
+
+Expected files: `crates/ocx_index/src/**`, `crates/ocx_cli/src/app/context.rs`, `crates/ocx_package_manager/src/lib.rs`
+(`index_lookups` only). Must not touch: `IndexStore::new` and the other constructors' signatures (ocx-mirror calls them), any other
+manager method.
+
+1. Recording (C-118 lookups half): the five `read_index_document` call sites (`store.rs:157`, `:396`, `:415`, `:432`, `:480`) record
+   `{path relative to the store root, found}`; the recorder survives `Clone` and `read_only_view`. Red first: CW2's recorder cases.
+2. Attachment: `context.rs:358-363` attaches a recorder only when `--index` is given; `PackageManager::index_lookups()` returns it.
+   Red first: a unit on the manager. Commit `feat(vendor): record the index paths a vendor run reads`.
+
+### PB — publish primitives and the generation key (mark `review`)
+
+Expected files: `crates/ocx_util/src/fs/publish.rs`, `crates/ocx_store/src/launcher_generation.rs`,
+`crates/ocx_store/src/file_structure/toolchain_store.rs` (`active_target_name` only). Must not touch: callers, `symlink.rs`,
+`hardlink.rs`.
+
+1. Generation key (C-124): `of`, `host`, `render_fingerprint` with the two goldens of § 4.1. Red first: CW2's goldens.
+2. `publish_dir` and `retire_dir` (C-125): Unix and Windows arms; `retire_dir` sweeps `.gc-*`, `.staging-*`. Red first: V-L21, V-L22
+   (two concurrent publishes converge), V-L30 outcome cases at the helper level.
+3. `retarget_link` (C-125, C-138): Unix staged link + rename; Windows `FSCTL_SET_REPARSE_POINT` in place; two `#[ignore]` Windows tests
+   named `junction_proof_retarget_under_lookup` (10000 retargets against a concurrent lookup loop, a second concurrent retargeter, a
+   directory-symlink `active` healed) and `junction_proof_retire_running_exe` (V-L32); `active_target_name`. Red first: the Unix
+   retarget unit. Commit `feat(store): publish, retarget and retire helpers for launcher directories`.
+
+### CI2 — launcher CI (wave 1; lands before act M2)
+
+Expected files: `.github/workflows/{build-windows-shims,basic-repo,launcher-blobs}.yml`, `scripts/launcher_blob_check.sh`,
+`scripts/tests/{test_shim_inputs,test_launcher_blob_check}.py`, `.claude/tests/test_workflows.py` (only if a new glob needs a row).
+Must not touch: the `env:` block and target list of `build-windows-shims.yml` (blob inputs, DP-34), any deploy or release workflow.
+
+1. Carried Warn 2 (C-139): a test in `scripts/tests/test_shim_inputs.py` asserting every file `shim_inputs.py` hashes appears in both
+   `paths:` lists of `build-windows-shims.yml`; red today (`.cargo/config.toml` missing, observed), green after adding it. Commit
+   `ci(shim): rebuild the launcher blobs when the cargo configuration changes`.
+2. Every record kind per blob (C-113, V-L58, V-L36): red first, a `test_launcher_blob_check.py` case expecting the new case names;
+   `launcher_blob_check.sh` cases for `direct`, `package`, `deferred`, `toolchain` (a stub `ocx` on `PATH` that prints its argv), the
+   old-sidecar 78 case, and the macOS signature and quarantine cases. Commit `ci(shim): check each committed launcher with every record
+   kind`.
+3. `junction-proof` job (DP-41): `windows-latest`, runs the two `junction_proof_*` tests as the runner user and as a created standard
+   user; `permissions: contents: read`; pinned action SHAs as the file's other jobs; `.claude/tests/test_workflows.py` green. Commit
+   `ci: prove the in-place junction retarget on Windows`.
+
+### VA — vendor acceptance (written against the stubs, red first)
+
+Expected files: `test/tests/{test_vendor,test_package_vendor,test_vendor_launcher,test_vendor_parity}.py`, `test/src/vendor_fixtures.py`,
+`test/fixtures/vendor/**` except `windows_amd64.manifest.json` (PF). Must not touch: other test modules, `test/src/` helpers other than
+`vendor_fixtures.py`, `test/BUILD.bazel`.
+
+1. Layout and records (V-L27 vendor half, V-L50, V-L53, V-L56): `/content/` → `/c/`, `l/` paths, `.launch` records with `kind`,
+   `record_path` present and the file existing, `_ocx_reserved` refused, `x.launch` refused; the parity rewrite at
+   `test_vendor_parity.py:108` maps `<home>/packages/…` to `@VENDOR_DIR@/p/<HEX16>/c`.
+2. Manifest fields and behaviour (V-L52, V-L54, V-L55, V-L59, V-L60): a fixture with a missing declared binary and the message text;
+   `index_digest` per root kind; `index_lookups` with and without `--index`; bare platform manifest; index directory tree hash
+   unchanged. Commit `test(vendor): short layout, record paths and manifest v2 fields`.
+
+### HA1 — launcher acceptance (red first)
+
+Expected files: `test/tests/{test_entrypoints,test_entrypoints_crossplat,test_launcher_exec,test_trampoline_exec,test_lazy_loading,test_windows_shim,test_exec_env_compat}.py`,
+`test/src/launcher_fixtures.py` (new: the stub `ocx` that prints its argv, shared by HA1's modules). Must not touch:
+`test/src/toolchain_fixtures.py` (HA2), `test/conftest.py`, `test/BUILD.bazel`.
+
+1. Entry points (V-L13, V-L20, C-141, S-104): an entry point named `ocx`; two packages with `ocx` entry points; an `ocx-previous` install
+   gains `launchers/<G>` at the next `ocx exec` with `entrypoints/` byte-identical; two concurrent `ocx exec` on a package without
+   `launchers/<G>` both exit 0 and one directory exists; a private dependency's binary reachable from the program an entry point starts;
+   an entry point started by bare name through `PATH`.
+2. Launcher behaviour (V-L07, V-L10, V-L14, V-L40, S-112): frozen argv per kind through the stub `ocx`; the `PATH` walk with the
+   launcher's directory first; depth-32 loop → 78; two project homes on `PATH` → 65; a launcher beside only `NAME.direct` exits 78
+   naming `NAME.launch`.
+3. Windows and compatibility (V-L09, V-L11, V-L38, S-101): old `.exe` + `.shim`/`.exec` placed on disk start through the new `ocx`
+   (`test_exec_env_compat.py` with Windows bodies); a planted `ocx.exe` is never started; a Windows home holds `.exe` and `.launch` only
+   and starts from cmd, PowerShell, Git Bash (Windows-only cases, green in act M6). S-101's read-only error path is unit-only (V-L25,
+   EP.3), because the suite may run as root. Commit `test(launcher): one launcher per home kind`.
+
+### HA2 — render, clean, setup and the remaining modules (red first)
+
+Expected files (fixed by a search on 2026-11-26 for `.direct`, `.shim`, `.shimref`, `.exec`, `entrypoints/`, `shells/default`,
+`render_stamp` under `test/`): `test/tests/{test_toolchain_render,test_toolchain_cli,test_toolchain_activate,test_toolchain_env,test_toolchain_offline_after_pull,test_clean,test_self_update,test_self_setup}.py`,
+`test/tests/{test_dependencies,test_exec_modes,test_execution_records,test_package_inspect_closure,test_patches,test_project_env,test_project_pull}.py`
+(edited only where a hit names a changed surface; false hits are listed in the evidence), `test/src/{toolchain_fixtures,shell_matrix}.py`.
+Must not touch: VA's and HA1's modules, `test/conftest.py`.
+
+1. Render and gate (V-L28, V-L34): a new directory per new content, a repeated render writes nothing; `ocx-previous` and the new `ocx`
+   alternating on one home.
+2. Clean and setup (V-L30, V-L41, V-L42): retirement as `launchers`, `--dry-run`; `ocx self update` to a build with a new blob makes
+   `active` name a new directory.
+3. The other modules of the list: paths and file names follow the new layout. Commit `test(toolchain): render directories, clean and
+   refresh after upgrade`.
+
+### DOC2 — records, user pages and AI config
+
+Expected files: `.claude/artifacts/{adr_windows_exe_shim,adr_package_entry_points,adr_toolchain_activation,system_design_toolchain_activation,adr_exec_env_model,adr_self_update_handoff,adr_vendor_rules_ocx_remote_execution,system_design_vendor_rules_ocx}.md`;
+`website/src/content/docs/**` except generated pages (§ Run 2 — hub files); `.claude/rules/{subsystem-file-structure,subsystem-package-manager,subsystem-ci,arch-principles,product-context}.md`.
+Skill `docs`; rules `docs-quality.md`, `docs-style.md`, `subsystem-website.md`. Must not touch: `CHANGELOG.md`, code, the launcher
+record itself.
+
+1. Records (C-143): for each § 14 amendment, grep its replacement text in the target record (pass) or apply it verbatim (then grep
+   again); the evidence lists one line per amendment. Amend C-RO-01 and C-RO-14 (DP-44). Commit `chore: decision records follow the
+   unified launcher model`.
+2. User pages (DP-47): `explanation/{entry-points,deferred-packages,storage,toolchain-render,toolchain-tree,toolchain-activation,launcher-forwarding,records-launcher-frames}`,
+   `guides/{vendor,clean-up,update-ocx,stable-paths,install-options}`, `reference/{vendor-manifest (if hand-written),environment
+   (`__OCX_LAUNCHER_DEPTH` if the registry lint wants a section),glossary,metadata/entry-points}`, `publishing/entry-points`,
+   `troubleshooting/shell`; then every other page the DP-47 search lists, edited only where it names a changed surface. Red first: the
+   DP-47 search run over the vendored-layout and launcher pages lists old names; green when it lists none outside history notes. No
+   migration prose (AGENTS.md § Stability tiers). Commit `docs: launchers, records and the short vendored layout`.
+3. AI config: `subsystem-file-structure.md` (`deferred/`, `launchers/<G>`, `shells/default-<hex>`, stamp v2), `subsystem-package-manager.md`,
+   `subsystem-ci.md` (§ Windows Shim Build: record kinds, `junction-proof`), `arch-principles.md` glossary, `product-context.md` storage
+   tree; `task claude:tests` green (scratch `HOME`). Commit `chore: AI config follows the launcher generation layout`.
+
+### EP — package entry points, deferred tools and pull (wave 2)
+
+Expected files: `crates/ocx_package_manager/src/composer.rs` (home lanes), `crates/ocx_package_manager/src/launcher/{generate.rs,body.rs,launcher.rs}`,
+`crates/ocx_package_manager/src/tasks/{prepare_lazy.rs,pull.rs,materialize_lazy.rs}`. Depends on VF, PB. Reads, never edits,
+`package_store.rs` (CW2). Must not touch: `render_toolchain.rs`, the trampoline and `.exec` bodies in `body.rs` (TR's), the vendor lane.
+
+1. Writer (C-128, C-130): `generate` writes `NAME[.exe]` (embedded host blob, 0755) and `NAME.launch` of kind `package` into a staging
+   directory; no script, no hardlink, no `.shim`, no Unix script on Windows; `.launch` names skipped with a warning; the package and
+   deferred script bodies and `shim_sidecar_body` deleted from `body.rs`, token constants kept. Red first: V-L37 and the Windows-target
+   listing unit (V-L38 writer half). Commit `feat(launcher): package entry points are native launchers with a package record`.
+2. Pull and idempotence (C-140, C-142): on pull, `launchers/<G>/` in the locked temp package directory (`pull.rs:696-707`);
+   `generate_is_idempotent` rewritten to assert C-140; the doc comment at `pull.rs:466-472` corrected. Red first: the idempotency
+   assertion against today's writer. Commit `fix(launcher): entry-point generation is idempotent`.
+3. First use (C-127): § 6.2 in `compose_roots`; the composer emits `launchers/<G>` in place of `entrypoints`; read-only fallback. Red
+   first: V-L21…V-L25 units (fault after the first launcher; concurrent first use; incomplete or linked `D`; package directory removed;
+   read-only tempdir, run as non-root). Commit `feat(launcher): write entry-point launchers on first use by generation`.
+4. Deferred tools (C-129): `prepare_lazy` under `fs.deferred(&G)`, staging in `fs.temp.scratch("deferred")`, `l/` last,
+   `publish_shim_dir` → `publish_dir`; `materialize_lazy.rs:18` and `prepare_lazy.rs:526` comments reworded. Red first: V-L26 (staging
+   survives `ocx clean`). Commit `fix(launcher): ocx clean no longer deletes a deferred tool while it is built`.
+
+### GC — `ocx clean` retires launcher directories (wave 2)
+
+Expected files: `crates/ocx_package_manager/src/tasks/clean.rs`, `crates/ocx_cli/src/command/clean.rs`, `crates/ocx_cli/src/api/data/clean.rs`
+(`Clean::new` signature only if needed). Depends on PB. Must not touch: the stores' layout code, `render_toolchain.rs` (it calls
+`refuse_symlinked_home` with today's signature and reads `RenderStampV2` through CW2's real reader).
+
+1. Package and deferred generations (C-137): non-current `launchers/<G'>` and `deferred/<G'>` retired with `retire_dir`, counted as
+   `launchers`; `deferred/<G>/…` walked with marker `l`, rooted in lock pins; old `shims/` unchanged; `.bin/ocx-shim` untouched. Red
+   first: V-L41 unit.
+2. Toolchain homes (C-137, C-132): for every home named by a v2 stamp (global and `state/projects/<key>/`), under its `toolchain-render`
+   lock after `refuse_symlinked_home`, retire `default-<16 hex>`, `.staging-*`, `.gc-*` except `shell_dir` and `previous_shell_dir`;
+   `default` never. Red first: V-L29 clean half, V-L30. Commit `feat(clean): ocx clean retires superseded launcher directories`.
+
+### TD — trampoline detection (wave 2)
+
+Expected files: `crates/ocx_config/src/env.rs`. Depends on LA (`peek_kind`). Must not touch: any other `ocx_config` file.
+
+1. C-135: rule 2 of § 11 for every OS, bounded regular-file read, `MAX_PEEK_BYTES`; rules 1 and 3 kept. Red first: V-L39 units (native
+   trampoline, schema-2 record, `package` false, FIFO). Commit `feat(toolchain): recognise native trampolines by their record`.
+
+### TR — toolchain render, prompt gate and setup refresh (wave 3, mark `hard`)
+
+Expected files: `crates/ocx_package_manager/src/tasks/render_toolchain.rs`, `crates/ocx_package_manager/src/{activation.rs,mutate.rs}`,
+`crates/ocx_package_manager/src/launcher/{body.rs,env_tests.rs,project_selector_tests.rs}`, `crates/ocx_store/src/file_structure/{state_store.rs,toolchain_store.rs,shim_bin_store.rs}`,
+`crates/ocx_store/src/{hardlink.rs,file_structure.rs}` (deletions of DP-42), `crates/ocx_setup/src/lib.rs`; `tasks/clean.rs` and
+`composer.rs` only to follow a changed `refuse_symlinked_home(_leaves)` signature. Depends on EP, GC, PB, and act M2's variant word
+(DP-41). Must not touch: `crates/ocx_util/src/fs/{publish,symlink}.rs`, launcher source.
+
+1. Publish a render (C-131): § 6.4 steps 1, 2, 4-8 on Unix: exposed names, records via `LaunchRecord::encode`, `G`, `F`; v2-stamp no-op;
+   exclusive `.staging-<16 hex>`; `default-<16 hex>` with at most eight tries; `retarget_link`; stamp v2 written last; the render
+   deletes nothing. Red first: V-L28, V-L35 units.
+2. Tree rework and switch (C-131, C-132, C-138): `ensure_shell_tree`, `heal_active`, `refuse_symlinked_home_leaves` and
+   `tree_own_directories` for `shells/default-<hex>` without writing `shells/default`; the re-switch of step 3; the Windows switch per
+   the variant (A `retarget_link`, B′ `symlink::replace_atomic`), with a `cfg(windows)` unit asserting which call runs. Red first:
+   V-L29 render half. Commit `feat(toolchain)!: each render with new content publishes a new directory and switches active`.
+3. Gate (C-133, C-134): v2-then-v1 gate in `activation.rs`; trampoline and `.exec` bodies deleted from `body.rs` (old ones stay
+   recognised by TD's rules 1 and 3); `env_tests.rs` builds fixtures without them. Red first: V-L33. Commit `feat(toolchain): the prompt
+   gate reads the v2 render stamp`.
+4. Setup (C-136): phase 1.6 between `ocx_setup/src/lib.rs:331` and `:343`. Red first: V-L42 unit. Commit `feat(setup): the update
+   hand-off refreshes the global toolchain`.
+5. Deletions (DP-42): `ShimBinStore` and its `file_structure.rs` accessor, `hardlink::update`, once `cargo check --workspace
+   --all-targets --locked` shows no caller. Commit `refactor(store): drop the launcher hardlink store`.
+
+### I2 — integration (wave 4)
+
+Expected files: § Run 2 — hub files (ocx). Depends on every ocx pipeline of waves 1-3. Must not touch: any non-hub file;
+`crates/ocx_schema/contract/baseline/**`; `Cargo.lock`. Steps: regenerate each hub file once, minimally; `cargo check --workspace
+--all-targets --locked`; the touched crates' unit suites; `task website:reference:generate`; the compat gate (V-L41 acceptance half,
+V-L53 schema half; red first: the gate run with the `launchers` value removed from the golden in a scratch copy). A red compat gate is
+a finding (DP-38). Commit `chore: regenerate goldens and generated references`.
+
+### PF — ocx proofs (wave 5)
+
+Expected files: `.claude/artifacts/evidence/vendor_rules_ocx/run2/PF.md`, `test/fixtures/vendor/windows_amd64.manifest.json` (V-46 golden,
+written on Linux); code fixes in a file of a merged ocx pipeline, each named in `PF.md`, at most one function per fix, never a launcher
+input (DP-34), never a test unless it contradicts a contract. A larger fix is reported, not made. Depends on I2; runs after act B.
+Steps: every local V-L row green (§ Run 2 — coverage), every `mut` row red then green per the first run's protocol, the named acceptance
+modules end to end.
+
+### RM — rules_ocx manifest reader, set repository, set rules (Repo rules_ocx)
+
+Expected files: `ocx/private/{vendor_manifest,set_repo,set_rules,versions,download}.bzl`, `ocx/tests/{vendor_manifest,set_repo,manifest}_test.bzl`,
+`ocx/tests/testdata/**` except the CW-R2 example, `ocx/tests/{dev_tools_test,ocx_tool_test}.sh` (only if they name `.direct`). Depends on
+CW-R2. Must not touch: BUILD files (CW-R2), `extensions.bzl`, `facts.bzl`, `hub.bzl`.
+
+1. Parser (C-RO-23): v2 only, X5 for 1; `record_path`; no fixed prefixes; field relations kept; X9. Red first: CW-R2 cases.
+2. Set repository and rules (C-RO-21, C-RO-22, C-RO-23): red first, the `set_repo_test` rows of ADR 0003 § Test plan (`cross_check`
+   root digest and tails, empty expected value skipped, vendor argv per kind); then move all top-level entries; `_TOP_LEVEL` and
+   `_sidecar()` gone; per-kind argv; X6 except exit 65; `ocx_tool` links launcher and record under manifest basenames; `versions.bzl`
+   messages say schema 2 (DP-45 fixture case `foo.exe` → `foo.exe.launch`).
+
+### RL — rules_ocx facts, extension, hub (Repo rules_ocx, mark `hard`)
+
+Expected files: `ocx/extensions.bzl`, `ocx/private/{facts,hub,platforms,repo_utils}.bzl`, `ocx/defs.bzl` (only if an export changes),
+`ocx/tests/{facts,hub,platforms_map,platforms}_test.bzl`. Depends on CW-R2. Must not touch: BUILD files, `set_repo.bzl`,
+`update_repo.bzl`.
+
+1. Facts (C-RO-18, C-RO-19): kinds, key, v2 value, hit rules, `RULES_OCX_UPDATE` read once, `fact_cacheable` removed. Red first: the
+   `facts_test` rows of ADR 0003 § Test plan.
+2. Resolve (C-RO-20): red first, the same-index and switch-scope `facts_test` rows; per-kind argv (`--remote` for `tag`, `--frozen` for
+   `index`), step 8's same-index check (retry once, X3), `hub_platform_error` on the recorded value, `reproducible = True`.
+3. Hub and wiring (C-RO-26, C-RO-31): red first, the `hub_test` rows; result lines and W1; the `ocx_update` repository declared through
+   CW-R2's rule; hub `alias(update)`; `update` reserved.
+
+### RU — rules_ocx update targets (Repo rules_ocx)
+
+Expected files: `ocx/private/{update_repo.bzl,update.sh.tpl,update.bat.tpl}`, `ocx/tests/update_repo_test.bzl`, `MODULE.bazel`
+(`use_repo` only), root `BUILD.bazel` (alias only), `scripts/check_ocx_interface.py`, `scripts/tests/test_check_ocx_interface.py`.
+Depends on CW-R2. Must not touch: `extensions.bzl`, `hub.bzl`, `ocx/BUILD.bazel`, `ocx/private/BUILD.bazel`.
+
+1. Plan and values (C-RO-24): `plan_content` golden, `check_value`, `select_declarations` order. Red first: the `update_repo_test` rows.
+2. Programs (C-RO-25, C-RO-30): `update.sh` and `update.bat` per § The `update` targets and § Publishing; the guard admits the two argv
+   forms of DP-44 only in the templates. Red first: the guard's script test for an `ocx update` outside the template.
+
+### RE — rules_ocx e2e (Repo rules_ocx, red first)
+
+Expected files: `e2e/rbe/tests/**`, `e2e/rbe/workspace/**`, `e2e/rbe/fixtures/**`. Depends on CW-R2. Must not touch:
+`e2e/rbe/ocx-under-test.txt`, `e2e/rbe/RESULTS.md`, `ocx/**`.
+
+1. `e2e/rbe/tests/test_package_lock.py` with every e2e row of ADR 0003 § Test plan; the changes to `test_caches_facts.py:96`,
+   `:173-186`; `test_remote_exec.py::test_tag_locked_tool_runs_remotely`. Reds recorded against the first run's pin where they are
+   observed today (`test_fresh_home_tag_resolves`); the rest red by their listed mutation at IR; greens at IR and X2.
+
+### RD — rules_ocx docs (Repo rules_ocx)
+
+Expected files: `README.md`, `docs/**` except `docs/defs.md`, `AGENTS.md`, `agent-config/**`, `.claude/rules/**` (regenerated copies),
+`site/**` (only through its port script if one generates it), `.agents/adr/adr_0003_package_locking.md` (DP-45 sentence only). Must not
+touch: code, examples, `CHANGELOG.md`.
+
+1. C-RO-27 docs half, C-RO-28 page half: red first, a search of the listed pages for `--enable_runfiles`, `.direct`, `selections/`,
+   `packages/` paths; then drop the `--enable_runfiles` requirements (`README.md:19`, `docs/concepts/design.md:43-44`,
+   `docs/guides/cross-platform.md:89`, `docs/guides/remote-cache.md:22,25`, `docs/tutorial.md:56`); the short layout in
+   `docs/concepts/{design,how-it-works}.md` and `docs/guides/windows-path-length.md` (recomputed example path); a page for the `update`
+   targets; `AGENTS.md:87` schema 2; invariants text per C-RO-11 and DP-44; the search lists none.
+
+### RP — rules_ocx platform jobs and examples (Repo rules_ocx)
+
+Expected files: `examples/**`, `e2e/bzlmod/**`, `.github/workflows/{verify-basic,verify-deep}.yml`, `taskfile.yml` (CI targets only). Must
+not touch: `.github/workflows/verify-rbe.yml`, release or publish workflows, `ocx/**`.
+
+1. C-RO-27, red first by today's behaviour: `examples/cross_platform:no_runfiles_test` asserts 78 on Windows today; becomes
+   `manifest_runfiles_test`; a tool calling another by bare name; drop the runfiles lines in `e2e/bzlmod/.bazelrc:5-6` and the three
+   example `.bazelrc` files; Linux twin `--noenable_runfiles --spawn_strategy=local` in `verify-basic.yml` (V-L48, 78 observed with the
+   first run's pin); `bazel coverage` of a target using a vendored tool (V-L49); a Windows non-ASCII workspace copy (V-L47);
+   `windows-update-target` (ADR 0003 § Platforms).
+
+### IR — rules_ocx integration (Repo rules_ocx, wave 2)
+
+Expected files: `MODULE.bazel.lock`, `docs/defs.md`, `e2e/rbe/ocx-under-test.txt` (the D1 pin), `e2e/rbe/RESULTS.md`; fixes in a file of
+a merged rules_ocx pipeline, at most one function per fix, named in the evidence. Depends on RM, RL, RU, RE, RD, RP, ocx VF, and acts B
+and D1. Must not touch: ocx files, `CHANGELOG.md`.
+
+1. Regenerate `MODULE.bazel.lock` (`bazel mod deps --lockfile_mode=update`, rc-file rule) and `docs/defs.md` (stardoc; if stardoc
+   does not build in the worktree, report it for the meta-orchestrator); buildifier; `bazel test //ocx/tests/...` (the whole suite).
+2. Against a local `cargo build -p ocx --locked` of the ocx branch after act B (`OCX_INSTALL_BINARY` + SHA, `--lockfile_mode=off`):
+   `e2e/bzlmod` and the rig on both backends; RE's rows green locally; write the D1 pin.
+
+### X2 — cross-repository integration (wave 6)
+
+Expected files: `.claude/artifacts/evidence/vendor_rules_ocx/run2/X2.md`; rules_ocx `e2e/rbe/ocx-under-test.txt` (the D2 pin). Depends
+on PF, IR, and act D2. Must not touch: code in either repository.
+
+1. Byte parity of rules_ocx `ocx/tests/testdata/vendor_manifest_example.json` with ocx `crates/ocx_package/src/vendor/example.json`;
+   write the D2 pin (C-RO-29); rig and `e2e/bzlmod` locally green against D2; collect the CI run URLs of § Run 2 — platform proofs after
+   acts M4, M5, M6 into `X2.md`.
+
+## Parallelization
+
+| Pipeline | Repo | Scope | Expected files | Wave | Depends on | Marks | Status |
+|---|---|---|---|---|---|---|---|
+| CW2 | . | contract wave: C-101…C-105 types, C-114…C-118 types, C-124…C-126 surfaces; DP-33, DP-35 | § Run 2 — contract wave CW2 | 0 | — | | pending |
+| CW-R2 | rules_ocx | contract wave: C-RO-18…C-RO-26, C-RO-30, C-RO-31 stubs, C-RO-28 fixture, every BUILD target | § Run 2 — contract wave CW-R2 | 0 | CW2 | | pending |
+| LA | . | C-101, C-103, C-105…C-113; V-L01…V-L08, V-L10, V-L12, V-L14…V-L19, V-L43…V-L45; carried Warn 1 | `crates/ocx_env_apply/src/**`, `crates/ocx_shim/**` | 1 | CW2 | hard | pending |
+| VF | . | C-114…C-119, C-121…C-123; V-L27 (vendor), V-L50, V-L51, V-L52, V-L54, V-L56, V-L60; R-U1, R-U6, R-U10; carried Warn 3 | § VF | 1 | CW2 | hard | pending |
+| IX | . | C-118 (lookups); V-L55; R-U7 | `crates/ocx_index/src/**`, `crates/ocx_cli/src/app/context.rs`, `crates/ocx_package_manager/src/lib.rs` | 1 | CW2 | | pending |
+| PB | . | C-124, C-125, C-138 (helper); V-L21, V-L22, V-L31, V-L32 (tests) | § PB | 1 | CW2 | review | pending |
+| CI2 | . | C-113 (checks), C-139; V-L31/V-L32 job, V-L36, V-L58; carried Warn 2 | § CI2 | 1 | CW2 | | pending |
+| VA | . | acceptance for C-114…C-122 (C-120 met today: V-L59, R-U9); S-107…S-109 | § VA | 1 | CW2 | | pending |
+| HA1 | . | acceptance for C-106…C-110, C-127, C-128, C-135, C-141; S-101, S-104, S-112 | § HA1 | 1 | CW2 | | pending |
+| HA2 | . | acceptance for C-131, C-134, C-136, C-137; S-102, S-103, S-105 | § HA2 | 1 | CW2 | | pending |
+| DOC2 | . | C-143; goal ocx item 8 (records, pages) | § DOC2 | 1 | CW2 | | pending |
+| EP | . | C-127…C-130, C-140, C-142; V-L20…V-L26, V-L27 (home), V-L37, V-L38 (writer) | § EP | 2 | VF, PB | | pending |
+| GC | . | C-132 (clean), C-137; V-L29 (clean), V-L30, V-L41 | § GC | 2 | PB | | pending |
+| TD | . | C-135; V-L39 | `crates/ocx_config/src/env.rs` | 2 | LA | | pending |
+| TR | . | C-131…C-134, C-136, C-138; V-L28, V-L29 (render), V-L33, V-L34, V-L35, V-L42; DP-42 | § TR | 3 | EP, GC, PB; act M2 (variant) | hard | pending |
+| I2 | . | hub files; V-L41 and V-L53 gate halves | § Run 2 — hub files (ocx) | 4 | LA, VF, IX, PB, CI2, VA, HA1, HA2, DOC2, EP, GC, TD, TR | | pending |
+| PF | . | every local V-L row green, `mut` rows red/green | § PF | 5 | I2; act B | | pending |
+| RM | rules_ocx | C-RO-21…C-RO-23; MR-1…MR-4, MR-10, MR-11 | § RM | 1 | CW-R2 | | pending |
+| RL | rules_ocx | C-RO-18…C-RO-20, C-RO-26, C-RO-31; MR-5…MR-9, MR-12; goal rules item 4 (`--remote`) | § RL | 1 | CW-R2 | hard | pending |
+| RU | rules_ocx | C-RO-24, C-RO-25, C-RO-30; MR-14; DP-44 guard | § RU | 1 | CW-R2 | | pending |
+| RE | rules_ocx | e2e rows of ADR 0003; S-110, S-111 | § RE | 1 | CW-R2 | | pending |
+| RD | rules_ocx | C-RO-27 (docs), C-RO-28 (pages); DP-45 | § RD | 1 | CW-R2 | | pending |
+| RP | rules_ocx | C-RO-27; V-L46…V-L49; MR-13; S-106 | § RP | 1 | CW-R2 | | pending |
+| IR | rules_ocx | integration; D1 pin; RE green locally | § IR | 2 | RM, RL, RU, RE, RD, RP, VF; acts B, D1 (after LA, CI2) | | pending |
+| X2 | . + rules_ocx | C-RO-29; fixture parity; CI evidence | § X2 | 6 | PF, IR; act D2 | | pending |
+
+```mermaid
+graph TD
+  subgraph W0[wave 0]
+    CW2 --> CWR2[CW-R2]
+  end
+  subgraph W1[wave 1]
+    LA; VF; IX; PB; CI2; VA; HA1; HA2; DOC2; RM; RL; RU; RE; RD; RP
+  end
+  subgraph W2[wave 2]
+    EP; GC; TD; IR
+  end
+  subgraph W3[wave 3]
+    TR
+  end
+  subgraph W4[wave 4]
+    I2
+  end
+  subgraph W5[wave 5]
+    PF
+  end
+  subgraph W6[wave 6]
+    X2
+  end
+  CW2 --> LA & VF & IX & PB & CI2 & VA & HA1 & HA2 & DOC2
+  CWR2 --> RM & RL & RU & RE & RD & RP
+  VF & PB --> EP
+  PB --> GC
+  LA --> TD
+  EP & GC & PB --> TR
+  M2(("act M2: junction-proof read")) --> TR
+  PB & CI2 --> M2
+  LA & CI2 --> B(("act B: blobs"))
+  B --> PF
+  B --> D1(("act D1")) --> IR
+  RM & RL & RU & RE & RD & RP & VF --> IR
+  LA & VF & IX & PB & CI2 & VA & HA1 & HA2 & DOC2 & EP & GC & TD & TR --> I2
+  I2 --> PF
+  PF & IR --> X2
+```
+
+External gates (the round nodes): M2 needs only PB and CI2 merged, because TR needs only the `junction-proof` result; if LA is still
+running then, M2 is an early push for that result alone, and a second push after LA starts act B. If LA is already merged, one push
+serves both. B needs LA and CI2; D1 needs B; IR needs D1; PF needs B; X2 needs D2.
+
+**Critical path:** CW2 → VF → EP → TR → I2 → PF → X2 (VF 5 steps, EP 4, TR 5). The second-longest chain is CW2 → LA (8 steps, one on
+opus) → B → PF; LA is the bottleneck of wave 1, and the early M2 push keeps TR from waiting on it. **Shippable after wave: 5**
+— the ocx half (short layout, manifest v2, one launcher and record on every OS, generation directories, render switch, clean, refresh,
+fixes, docs) once PF has merged; the rules_ocx half after X2, because its CI needs D2. **Parallelism:** wave 1 holds every pipeline that
+file-disjointness allows; VA, HA1, HA2 and RE write tests red first beside the code. Two deliberate serial chains: VF → EP (both edit
+`composer.rs`) and EP → TR (both edit `launcher/body.rs`, DP-36). rules_ocx wave-1 pipelines share one worktree and are file-disjoint
+(DP-43).
+
+## Run 2 — coverage
+
+Red kinds: **mut** = mutation in a scratch worktree, landed-grep, the row's own assertion red, reverted green (first run § Red-proof
+protocol); **in** = a permanent control case in the same test; **obs** = the red is today's observed behaviour, recorded before the
+change; **claim** = green only in the named CI job (§ Run 2 — platform proofs), red by a mutated test build in the same job or by the
+row's control case; **rev** = review row, no red.
+
+### Goal items
+
+| Item | Steps | Check (red / green) |
+|---|---|---|
+| ocx 1 short layout | CW2.2, VF.1-4, VA.1 | V-L50, V-L51 (mut / `test_vendor.py`, `ocx_store` unit) |
+| ocx 2 one record | CW2.1, LA.1-2, VF.4, EP.1, TR.1 | V-L01, V-L08, V-L50 (mut) |
+| ocx 3 native launcher in Unix homes, detection | EP.1, TR.1-3, TD.1 | V-L37, V-L38, V-L39 (mut; claim on Windows) |
+| ocx 4 atomic construction | PB.2-3, EP.3-4, TR.1-2, CI2.3 | V-L21, V-L28, V-L31 (mut; claim) |
+| ocx 5 issue 679 generations and refresh | PB.1, EP.3, TR.4, GC.1-2 | V-L20, V-L42, V-L41 (mut) |
+| ocx 6 runfiles manifest | LA.6, RP.1 | V-L43…V-L49 (mut; obs V-L48; claim V-L46, V-L47) |
+| ocx 7 fixes | VF.5 (node), LA.7, CI2.1, VF.1 (three Warns), HA1.1 (two tests), EP.4 (clean race), EP.2 (idempotent, doc comment) | V-L52; C-112; C-139 (obs); C-123; C-141; V-L26; C-140; C-142 (rev) |
+| ocx 8 records, pages, blobs, dev build | DOC2.1-3, act B, D1, D2 | C-143 (rev); V-L57, V-L58 (claim) |
+| rules 1 package locking | RL.1-2, RM.2, RE.1 | ADR 0003 facts_test and `test_moved_tag_keeps_the_locked_digests` (mut) |
+| rules 2 `update` targets | RU.1-2, RL.3, RE.1, RP.1 | `update_repo_test`, `test_hub_update_moves_only_that_declaration`, `windows-update-target` (mut; claim) |
+| rules 3 paths from the manifest, fixtures, page | RM.1-2, CW-R2, RD.1 | `vendor_manifest_test`, `test_hub_tool_finds_its_record` (mut) |
+| rules 4 pin, fresh-home tag | RL.2, IR.2, X2.1 | `test_fresh_home_tag_resolves` (obs / green after RL), C-RO-29 (rev) |
+
+### Rulings
+
+| Ruling | Step | Check |
+|---|---|---|
+| R-U1 | VF.5 | V-L52 |
+| R-U2 | GC.1 | V-L29 (`.bin/ocx-shim` unchanged) |
+| R-U3 | — | record of the architect's review, nothing to build |
+| R-U4 | CW2.2 | V-L53 |
+| R-U5 | LA.6 | V-L44 |
+| R-U6 | VF.4 | V-L54 |
+| R-U7 | IX.1-2, VF.5 | V-L55 |
+| R-U8 | VF.4, LA.6, RM.2 | V-L50, V-L46, V-L48 |
+| R-U9 | VA.2 (met today), RL.2 | V-L59, `test_platform_outside_the_index_is_refused` |
+| R-U10 | VF.5 | V-L60 |
+
+### V-L rows
+
+| Row | Step | Red | Green at |
+|---|---|---|---|
+| V-L01 | LA.1 | mut | local unit; `verify-basic.yml › test` |
+| V-L02 | LA.1 (golden in CW2.1) | mut | local unit |
+| V-L03, V-L04, V-L05 | LA.1 | mut | local unit |
+| V-L06 | LA.3 | mut | local unit; claim Windows unit-native |
+| V-L07 | LA.3, HA1.2 | mut | local unit and `test_launcher_exec.py`, `test_trampoline_exec.py`, `test_lazy_loading.py` |
+| V-L08 | LA.2 | mut | local unit; claim `launcher-blobs.yml` Windows |
+| V-L09 | HA1.3 | mut | claim `deep-repo.yml` acceptance-native Windows |
+| V-L10 | LA.3, HA1.2 | mut | local |
+| V-L11 | HA1.3 | mut | claim deep Windows |
+| V-L12 | LA.3 | mut | local unit |
+| V-L13 | HA1.1 | mut | local `test_entrypoints.py` |
+| V-L14 | LA.3, HA1.2 | mut | local |
+| V-L15…V-L18 | LA.4 | mut | local unit |
+| V-L19 | LA.5 | claim (test build with `GetModuleFileNameW`) | Windows and macOS unit-native |
+| V-L20 | HA1.1 | mut | local with `ocx-previous` |
+| V-L21…V-L25 | PB.2 (V-L21, V-L22 helper), EP.3 | mut | local unit (V-L25 as non-root) |
+| V-L26 | EP.4 | mut | local unit |
+| V-L27 | VF.4, EP.1, VA.1 | mut | local unit and `test_vendor.py` |
+| V-L28 | TR.1, HA2.1 | mut | local unit and `test_toolchain_render.py` |
+| V-L29 | TR.2, GC.2 | mut | local unit with a seeded older home |
+| V-L30 | PB.2, GC.2, HA2.2 | mut | local unit and `test_clean.py` |
+| V-L31, V-L32 | PB.3, CI2.3 | claim (remove-then-rename with a pause, test build) | `junction-proof` |
+| V-L33 | TR.3 | mut | local unit |
+| V-L34 | HA2.1 | mut | local with `ocx-previous`; claim deep Windows |
+| V-L35 | TR.1 | mut | local unit |
+| V-L36 | CI2.2, act B | in (one-byte-changed copy) | claim macOS unit-native, `launcher-blobs.yml` aarch64-apple-darwin |
+| V-L37 | EP.1 | mut | local unit |
+| V-L38 | EP.1, HA1.3 | mut | claim deep Windows (`test_windows_shim.py`) |
+| V-L39 | TD.1 | mut | local unit; claim Windows unit-native |
+| V-L40 | HA1.2 | mut | local `test_trampoline_exec.py` |
+| V-L41 | GC.1, HA2.2, I2 | mut (constant `G`; value removed from the schema) | local and compat gate in `verify-basic.yml › lint` |
+| V-L42 | TR.4, HA2.2 | mut | local `test_self_update.py` |
+| V-L43…V-L45 | LA.6 | mut | local unit |
+| V-L46, V-L47 | RP.1 | claim (manifest stage removed in a test build; ANSI read) | rules_ocx `verify-deep.yml` Windows |
+| V-L48 | RP.1 | obs (78 with the first run's pin) | rules_ocx job `test` / Linux twin |
+| V-L49 | RP.1 | obs or mut | rules_ocx job `test` |
+| V-L50 | VF.3, VF.4, VA.1 | mut | local `test_vendor.py`, `test_package_vendor.py` |
+| V-L51 | VF.1 | mut | local `ocx_store` unit |
+| V-L52 | VF.5, VA.2 | obs (today's message) | local `test_vendor.py` |
+| V-L53 | CW2.2, VA.1, I2 | mut (v1 written) | local; schema golden in lint |
+| V-L54 | VF.4, VA.2 | obs (absent today) | local `test_package_vendor.py` |
+| V-L55 | IX, VF.5, VA.2 | mut (recorder not attached) | local `test_vendor.py` |
+| V-L56 | VF.1, VA.1 | mut | local |
+| V-L57 | LA.7, act B | mut (budget lowered in scratch) | local host build; `build-windows-shims.yml › build` |
+| V-L58 | CI2.2, act B | in (a blob that accepts any record) | claim six legs |
+| V-L59 | VA.2 (met today, `tasks/vendor.rs:310-312`) | mut (a refusal added for a bare manifest) | local `test_package_vendor.py` |
+| V-L60 | VF.5, VA.2 | obs (dispatch object written today) | local `test_vendor.py` |
+
+### Consumer requirements
+
+| MR | ocx step | rules_ocx step |
+|---|---|---|
+| MR-1 | CW2.2 (V-L53) | RM.1 (X5) |
+| MR-2 | VF.1 (V-L56) | RM.2 (refuses a top-level `_ocx_reserved`) |
+| MR-3 | VF.4 (V-L50) | RM.1-2 (DP-45) |
+| MR-4 | LA.4-6 (C-111) | RM.2 (`test_hub_tool_finds_its_record`) |
+| MR-5 | — (met today) | RL.1 (pins) |
+| MR-6 | VA.2 (V-L59) | RL.2 (`hub_platform_error`) |
+| MR-7 | — (met today) | RL.2 |
+| MR-8 | VF.4 (V-L54) | RL.2 (same-index check) |
+| MR-9 | IX, VF.5 (V-L55) | RL.1 (snapshot inputs), RM.1 (X9) |
+| MR-10 | VF.5 (C-028) | RM.2 (X6 except 65) |
+| MR-11 | — (met today, VA.1 keeps it) | RM.2 |
+| MR-12 | VF.5 (V-L60) | RL.2 (`--remote`), RE.1 (`test_set_fetch_leaves_the_snapshot_unchanged`) |
+| MR-13 | LA.6 | RP.1 |
+| MR-14 | — (met today) | RU.2 (scratch copy, C-RO-30) |
+
+### Carried items
+
+| Item | Step | Check |
+|---|---|---|
+| Warn 1 `crates/ocx_shim/src/direct.rs:755-763` | LA.7 | C-112, claim Windows unit-native (mut: message text changed) |
+| Warn 2 `build-windows-shims.yml:20-55` | CI2.1 | C-139 (obs today) |
+| Warn 3 system design path rules | VF.1 | C-123 (mut: one rule removed) |
+| private dependency behind an entry point | HA1.1 | C-141 (mut: dependency `PATH` entry dropped) |
+| entry point by bare name through `PATH` | HA1.1 | C-141 (mut: `launchers/<G>` left off `PATH`) |
+| `ocx clean` deletes deferred staging | CW2.3, EP.4 | V-L26 |
+| `generate_is_idempotent` asserts nothing | EP.2 | C-140 (mut: second run rewrites) |
+| stale doc comment `tasks/pull.rs:466-472` | EP.2 | C-142 (rev) |
+| R-U10 read-only view | VF.5 | V-L60 |
+| R-U1 clearer refusal (issue 787) | VF.5 | V-L52 |
+| user pages for every changed surface | DOC2.2 | C-143 (rev; `/hex-review` docs seat) |
+
+## Run 2 — open questions
+
+None open. Every ambiguity met while planning is decided in § Run 2 — decisions recorded by this plan.
+
+## Run 2 — review record
+
+Round 1 (one round, plan-artifact scope): `reviewer:spec` (sonnet) on the decomposition. Verdict Needs Work: 2 Block, 8 Warn,
+4 Suggest. Mechanically clean: every C-1xx, C-RO-18…C-RO-29 and S-1xx in a Scope cell; every V-L row, ruling, MR item and goal item in
+§ Run 2 — coverage; waves equal 1 + the deepest dependency; DP-34 holds; no ledger gap; no local platform claim. Applied:
+
+- B1 `windows-sys` features for `GetMappedFileNameW` and `FSCTL_SET_REPARSE_POINT` had no owner → CW2 step 1 adds them (DP-35 amended;
+  `Cargo.lock` unchanged); LA no longer owns `crates/ocx_shim/Cargo.toml`.
+- B2 no owner for the `launchers/<G>` accessor → CW2 step 3 adds `PackageDir::launchers` in `package_store.rs`; EP and GC read it.
+- W3 C-120/V-L59 had no implementing step → marked met today (VF.5 text, VA scope, coverage row with its mutation red).
+- W4 S-112, S-104 had no acceptance step → HA1.1 and HA1.2; S-101's read-only path stated unit-only.
+- W5 HA2's set was a search at run time → fixed list from a search made now; HA1 owns a new `test/src/launcher_fixtures.py`.
+- W6 critical path ignored M2 → M2 needs only PB and CI2 (early push), B needs LA and CI2; gates drawn in the mermaid; second chain named.
+- W7 external acts missing from Depends-on → added to TR, PF, IR, X2.
+- W8 GC ↔ TR coupling on `refuse_symlinked_home` → TR depends on GC and follows any signature change in its callers.
+- W9 rules_ocx BUILD files → every `bzl_library` target is CW-R2's.
+- W10 oversized steps → VF.3 split (paths / manifest fields), EP.1 split (writer / pull and idempotence), TR.1 split (publish / tree rework
+  and switch), LA.4 split (Linux / macOS and Windows), RL.2 split (resolve / hub and wiring), IR.1 split (regeneration / local e2e).
+- W11 missing "must not touch" and red-first → a line per pipeline, red-first named for LA.7, RM.2, RL.2-3, RP.1, DOC2.2, I2; PF and IR
+  fixes bounded to one function.
+- W12 untestable contracts → C-138 rewritten as an outcome, C-RO-22 and C-RO-26 stated, C-RO-24 split into C-RO-24, C-RO-30, C-RO-31;
+  C-126's CW2 test is a green characterization test, its red is EP.4's.
+- S13 Status `plan-approved` set after this record. S14 `shim.rs` mentions hardlinks only in comments about VERSIONINFO; no caller, no
+  edit (it is not a blob input, but it is a `paths:` trigger). S15 C-RO-29 named in X2.1. S16 DOC2.1 greps each amendment.
+
+No re-validation round: no Block remained open after the fixes, and the plan-artifact scope runs one round.
+
+## Run 2 — red-proof log
+
+(The orchestrator folds one line per V-L row and per rules_ocx test here at merge, from `.claude/artifacts/evidence/vendor_rules_ocx/run2/`.)
+
 
 ## Red-proof log
 
