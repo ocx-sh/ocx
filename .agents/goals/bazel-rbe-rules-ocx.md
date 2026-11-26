@@ -7,8 +7,7 @@ Source: .agents/discussions/bazel-rbe-rules-ocx.md · Written: 2026-11-26 by /he
 - [x] "ocx has the vendor command in both tiers" — evidence: https://github.com/ocx-sh/ocx/pull/784 — `ocx vendor` and `ocx package vendor`; `test/tests/test_vendor.py` and `test/tests/test_package_vendor.py` pass in the pull request acceptance jobs on head `95759e78`.
 - [x] "ocx has a native launcher that starts a tool with no `ocx`" — evidence: https://github.com/ocx-sh/ocx/pull/784 — `crates/ocx_shim` with six committed blobs; the six native legs of `.github/workflows/launcher-blobs.yml` pass on head `95759e78`, and `vendor_launcher::launcher_starts_on_image_without_a_shell` passes.
 - [x] "rules_ocx builds every repository from the manifest alone" — evidence: https://github.com/ocx-sh/rules_ocx/pull/36 at `401c9c4` — `docs/concepts/design.md`; job `test` of https://github.com/ocx-sh/rules_ocx/actions/runs/45828193685 passes.
-- [ ] "rules_ocx has a remote-execution rig that runs in its CI" — evidence: the commit, PR comment or
-  artifact that satisfies it.
+- [x] "rules_ocx has a remote-execution rig that runs in its CI" — evidence: https://github.com/ocx-sh/rules_ocx/pull/36 — `e2e/rbe/` and `.github/workflows/verify-rbe.yml`; jobs `rig-buildbarn` and `rig-nativelink` pass in https://github.com/ocx-sh/rules_ocx/actions/runs/45828193723.
 - [ ] "The rules_ocx pull request is green against the build of the ocx pull request" — evidence: the commit, PR comment or
   artifact that satisfies it.
 - [ ] "Every check under Verification is shown red once and green once" — evidence: the commit, PR comment or
