@@ -118,17 +118,23 @@ impl ShimError {
                 "ocx-shim: ocx not found (set OCX_BINARY_PIN or add ocx to PATH)".to_string()
             }
             ShimError::OcxNotFound { pinned: Some(p) } => {
-                format!("ocx-shim: pinned ocx not found: {p} (OCX_BINARY_PIN points at a missing path)")
+                format!(
+                    "ocx-shim: pinned ocx not found: {} (OCX_BINARY_PIN points at a missing path)",
+                    escape_controls(p)
+                )
             }
             ShimError::SpawnFailure { win32, program } => {
-                format!("ocx-shim: failed to start {program}: win32 error {win32}")
+                format!(
+                    "ocx-shim: failed to start {}: win32 error {win32}",
+                    escape_controls(program)
+                )
             }
             ShimError::DirectRefused { reason } | ShimError::DirectArgumentRefused { reason } => {
                 format!("ocx-shim: {reason}")
             }
             #[cfg(unix)]
             ShimError::DirectExecFailed { program, reason, .. } => {
-                format!("ocx-shim: failed to start {program}: {reason}")
+                format!("ocx-shim: failed to start {}: {reason}", escape_controls(program))
             }
         }
     }
@@ -144,6 +150,19 @@ impl ShimError {
             _ => None,
         }
     }
+}
+
+/// `text` with each control character escaped as `{:?}` writes it, so a program path cannot drive the terminal.
+fn escape_controls(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for c in text.chars() {
+        if c.is_control() {
+            escaped.extend(c.escape_debug());
+        } else {
+            escaped.push(c);
+        }
+    }
+    escaped
 }
 
 /// The clause naming a path-length limit as the plausible cause of Win32 error `win32` starting `program`.
@@ -809,6 +828,23 @@ mod tests {
         );
         let not_a_spawn = ShimError::SidecarNotFound { stem_path: batch };
         assert_eq!(not_a_spawn.length_limit_hint(300), None);
+    }
+
+    #[test]
+    fn a_program_path_reaches_stderr_with_its_control_characters_escaped() {
+        let err = spawn_failure(2, "C:\\v\\to\u{1b}[31mol.exe");
+        assert_eq!(
+            err.stderr_message(),
+            "ocx-shim: failed to start C:\\v\\to\\u{1b}[31mol.exe: win32 error 2"
+        );
+        let pinned = ShimError::OcxNotFound {
+            pinned: Some("C:\\o\ncx.exe".to_string()),
+        };
+        assert!(
+            pinned.stderr_message().contains("C:\\o\\ncx.exe"),
+            "{}",
+            pinned.stderr_message()
+        );
     }
 
     #[test]
