@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "content": "present",
+  "platform": "windows/amd64",
+  "available_platforms": [
+    "windows/amd64"
+  ],
+  "vendor_id": "sha256:@DIGEST64@",
+  "dir_token": "@VENDOR_DIR@",
+  "packages": [
+    {
+      "identifier": "@REGISTRY@/@REPO@:1.0.0@sha256:@DIGEST64@",
+      "digest": "sha256:@DIGEST64@",
+      "package_dir": "packages/@REGISTRY@/sha256/@XX@/@DIGEST30@",
+      "content_dir": "packages/@REGISTRY@/sha256/@XX@/@DIGEST30@/content",
+      "dependencies": [],
+      "names_declared": true,
+      "entrypoints": [],
+      "tree": {
+        "files": [
+          {
+            "path": "packages/@REGISTRY@/sha256/@XX@/@DIGEST30@/content/bin/tool",
+            "executable": true
+          }
+        ],
+        "links": [],
+        "link_free_dirs": [
+          "packages/@REGISTRY@/sha256/@XX@/@DIGEST30@/content/bin"
+        ]
+      }
+    }
+  ],
+  "environments": [
+    {
+      "id": "selection:default",
+      "scope": {
+        "type": "selection",
+        "selection": "default"
+      },
+      "items": [
+        {
+          "key": "PATH",
+          "value": "@VENDOR_DIR@/packages/@REGISTRY@/sha256/@XX@/@DIGEST30@/content/bin",
+          "kind": "path"
+        },
+        {
+          "key": "@REPO_UPPER@_HOME",
+          "value": "@VENDOR_DIR@/packages/@REGISTRY@/sha256/@XX@/@DIGEST30@/content",
+          "kind": "constant"
+        }
+      ]
+    }
+  ],
+  "selections": [
+    {
+      "id": "default",
+      "groups": [
+        "default"
+      ],
+      "bindings": [
+        "tool"
+      ],
+      "roots": [
+        "sha256:@DIGEST64@"
+      ],
+      "environment": "selection:default",
+      "launcher_dir": "selections/default/shells/default/bin"
+    }
+  ],
+  "tools": [
+    {
+      "name": "tool",
+      "selection": "default",
+      "kind": "binary",
+      "package": "sha256:@DIGEST64@",
+      "environment": "selection:default",
+      "target_path": "packages/@REGISTRY@/sha256/@XX@/@DIGEST30@/content/bin/tool.exe",
+      "launcher_path": "selections/default/shells/default/bin/tool.exe"
+    }
+  ]
+}
