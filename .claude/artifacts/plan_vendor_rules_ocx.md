@@ -192,7 +192,7 @@ permanent control case in the same test (the check reports failure on a bad inpu
 | V-43 | P8 | in (empty dir) | local |
 | V-44 | X | in (released `DEFAULT_OCX_VERSION`, no `vendor`) | rules_ocx CI with the dev build |
 | V-45 | R9 | in (`--noenable_runfiles` → 78 with the hint) | rules_ocx `verify-deep (windows-latest)` |
-| V-46 | P8 | in (unit: host separators passed to the pure renderer, P4) + golden compare | ocx-deep Windows |
+| V-46 | P8 | in (unit: host separators passed to the pure renderer, P4) + golden compare | ocx-deep `Acceptance (windows)` |
 | V-47 | R7 | mut (move disabled) | rig |
 | V-48 | R3 | in (tampered tool name) | rules_ocx `ci:test` |
 | V-49 | R3 | in (link-free Windows fixture passes) | rules_ocx `ci:test` |
@@ -204,7 +204,7 @@ permanent control case in the same test (the check reports failure on a bad inpu
 | V-55 | R7 | in (unchanged lock) | rig |
 | V-56 | R7 | in (unchanged list) | rig |
 | V-57 | P8 (ocx), R7 | in (`-p` omitted → 78) | local + rig |
-| V-58 | P5 (Windows integration test) | in (control spawns the `.cmd` through the `CreateProcessW` quoter inside the test binary) | ocx Windows unit legs |
+| V-58 | P8 (Windows case of `test_vendor_launcher.py`); P5 unit for the `.bat`/`.cmd` dispatch decision | in (control: the same `.cmd` started by `subprocess` with `list2cmdline` quoting, the CommandLineToArgvW scheme, runs the injected command) | ocx-deep `Acceptance (windows)` |
 | V-59 | P5 unit, P8 | mut (candidate (c) without the `P` under `$RUNFILES_DIR` rule) | local |
 | V-60 | P5 unit, P8 | mut (blocking read) | local |
 | V-61 | P5 unit, P8 | in (a different file at the `PATH` hit → 78) | local + ocx-deep macOS |
@@ -219,7 +219,7 @@ permanent control case in the same test (the check reports failure on a bad inpu
 | V-70 | P8 | in (normal fixture, modes as archived) | local |
 | V-71 | R7 | mut (rule forced to the client home) | rig |
 | V-72 | P1 (decoder), P6 (writer) | in (ordinary key accepted) | ocx `verify-basic` unit |
-| V-73 | P1 unit (fold), P8 (Windows case) | in (unit: case-sensitive comparator as the control input of the pure fold) | ocx-deep Windows |
+| V-73 | P1 unit (fold), P8 (Windows case) | in (unit: case-sensitive comparator as the control input of the pure fold) | ocx-deep `Acceptance (windows)` |
 
 ## Red-proof protocol (goal criterion "every check red once and green once")
 
@@ -279,7 +279,7 @@ not build in a fresh worktree there (rules_ocx `hex.md`). rules_ocx rule copies 
 `agent-config/` by `task setup` (grimoire); edits go to `agent-config/`. That repository's `hex.md` model preference (Opus for
 non-trivial work) is advisory to a federated run; this plan follows the lead's model policy.
 
-## Hub files (no pipeline owns them; regenerated once at the integration gate I1, ocx)
+## Hub files (no code pipeline owns them; regenerated once by pipeline I1, ocx)
 
 `crates/ocx_schema/tests/golden/{cli,cli-schema,reports,errors}.json` and `vendor-manifest.json` after P2 adds it;
 `crates/ocx_sdkgen/tests/golden/rust/**`; `website/src/content/docs/reference/command-line/**` and any generated error-detail page
@@ -302,16 +302,17 @@ test compiling and red (named in the step's evidence).
    `serde_json`); `scripts/crate_map.toml` row `ocx_env_apply = []` and the eight edges; `Cargo.lock`. Red tests: the expected cases of
    `crates/ocx_util/src/{path,list}.rs` `mod tests` re-stated against `ocx_env_apply` (P1 deletes the originals); decoder cases for
    V-62 and V-72. Commit `chore: ocx_env_apply contract stubs`.
-2. **Data types and store/composer stubs** (sonnet). `crates/ocx_package/src/vendor.rs` + `src/vendor/*.rs`: `VendorManifest` and every
+2. **Data types** (sonnet). `crates/ocx_package/src/vendor.rs` + `src/vendor/*.rs`: `VendorManifest` and every
    nested type per design § 4.1, final, `JsonSchema` derives, `DIR_TOKEN`, `MANIFEST_FILE`, `vendor_id()` stub; `src/lib.rs` module
    line; the § 4.1 example as `crates/ocx_package/src/vendor/example.json` with a green round-trip test (types are real) and a red
-   `vendor_id` test. `crates/ocx_store`: `LinkMode { Hardlink, Copy }` in `src/hardlink.rs`, threaded through
+   `vendor_id` test. Commit `chore: vendor manifest data types`.
+3. **Store and composer stubs** (sonnet). `crates/ocx_store`: `LinkMode { Hardlink, Copy }` in `src/hardlink.rs`, threaded through
    `assemble_from_layers_with_layouts` at `assemble.rs:578` with every existing caller passing `Hardlink` (real); `vendor_layout.rs`
    (`VendorLayout`, `StagedTree::{create, publish, abort}` stubs) and its `file_structure.rs` line; `shim.rs`
    `blob_for(&Platform) -> Option<&'static [u8]>` stub. `composer.rs`: `PathLane::Vendor`, `ComposePaths::vendor(token_root)` stub.
    Red tests: `VendorLayout` path rules (design § 4.1 path rules, Windows device names), `StagedTree` publish/abort, the vendor lane's
-   token-rooted paths, `blob_for` per platform. Commit `chore: vendor data types and store contract stubs`.
-3. **Launcher, task and CLI surface** (sonnet). `crates/ocx_package_manager/src/launcher/direct.rs`
+   token-rooted paths, `blob_for` per platform. Commit `chore: vendor store and composer contract stubs`.
+4. **Launcher, task and CLI surface** (sonnet). `crates/ocx_package_manager/src/launcher/direct.rs`
    (`write_direct_launcher(dir, name, blob, sidecar)` stub, DP-6) and its `launcher.rs` line; the direct target kind as an enum variant
    in `launcher/generate.rs` and `tasks/render_toolchain.rs` (arms `unimplemented!()`); `tasks/vendor.rs` (`VendorRequest`,
    `VendorOutcome`, `VendorError` with `#[derive(Classify)]` slugs per design § 5.2, `PackageManager::vendor` stub) and its `tasks.rs`
@@ -320,7 +321,7 @@ test compiling and red (named in the step's evidence).
    `api.rs` (`visitor.root::<VendorReport>()`), `exit.rs` rungs for `VendorError`. Red tests: writer byte-copy test, `vendor` unit
    smoke. Commit `chore: vendor launcher, task and command contract stubs`.
 
-## Contract wave CW-R (rules_ocx, wave 0, after CW step 2)
+## Contract wave CW-R (rules_ocx, wave 0, after CW)
 
 One step (sonnet). New files with final public attributes and docstrings, bodies `fail("unimplemented")`:
 `ocx/private/vendor_manifest.bzl` (`read_manifest`), `ocx/private/set_repo.bzl` (`ocx_set_repo`; pure helpers `build_file_content`,
@@ -328,7 +329,7 @@ One step (sonnet). New files with final public attributes and docstrings, bodies
 `ocx/private/hub.bzl` (`ocx_hub_repo`, `hub_build_content`), `ocx/private/facts.bzl` (`fact_key`, `fact_value`, `fact_hit`); in
 `ocx/private/repo_utils.bzl` only the new `make_isolated_ocx_env(rctx, home)` stub; each with `visibility(["//ocx", "//ocx/tests"])`.
 `ocx/constraints/BUILD.bazel` (real: `constraint_setting` `libc`, values `glibc`, `musl`). Test files
-`ocx/tests/{vendor_manifest,set_repo,facts,hub,platforms_map}_test.bzl` with red cases, registered in `ocx/tests/BUILD.bazel`; fixture
+`ocx/tests/{vendor_manifest,set_repo,facts,hub,platforms_map,download}_test.bzl` with red cases, registered in `ocx/tests/BUILD.bazel`; fixture
 `ocx/tests/testdata/vendor_manifest_example.json`, a byte copy of ocx's `crates/ocx_package/src/vendor/example.json` (X checks parity).
 Gate: buildifier clean; `bazel build //ocx/...` and `bazel test //ocx/tests/...` per § Worker rules, the old suites green, the new red.
 Commit `chore: vendor reader and set rule contract stubs`.
@@ -339,16 +340,17 @@ Commit `chore: vendor reader and set rule contract stubs`.
 |---|---|---|---|---|---|---|---|
 | CW | . | contract wave: C-001 real; stubs for C-002…C-024 surfaces; DP-1 | as § Contract wave CW | 0 | — | | pending |
 | CW-R | rules_ocx | contract wave: stubs for C-RO-02…C-RO-10, C-RO-12, C-RO-13, C-RO-16, C-RO-17 | as § Contract wave CW-R | 0 | CW | | pending |
-| P1 | . | C-014, C-015 (decode); V-62, V-72, V-73 units | `crates/ocx_env_apply/src/**`; `crates/ocx_util/src/{path,list}.rs`; the 15 caller files of design § 12 A1; `crates/ocx_package/src/metadata/env/list.rs` (doc link) | 1 | CW | | pending |
+| P1 | . | C-014, C-015 (decode); V-62, V-72, V-73 units | `crates/ocx_env_apply/src/**`; `crates/ocx_util/src/{path,list}.rs`, `crates/ocx_util/Cargo.toml` and the `ocx_util` row of `scripts/crate_map.toml` (only if `ocx_util` keeps a use of a moved symbol); the 15 caller files of design § 12 A1; every other file using a moved symbol (candidates: `ocx_cli/src/conventions.rs`, `ocx_cli/src/command/self_group/activate.rs`, `ocx_project/src/error.rs`, `ocx_setup/src/profiles.rs`, `ocx_shell/src/ci/{github,gitlab}_flavor.rs`, `ocx_shell/src/shell/{reconcile,tests_git_bash}.rs`); `crates/ocx_package/src/metadata/env/list.rs` (doc link) | 1 | CW | | pending |
 | P2 | . | C-021; V-40 | `crates/ocx_schema/src/{lib,main}.rs`, `crates/ocx_schema/BUILD.bazel`, `crates/ocx_sdkgen/src/**`, `crates/ocx_sdkgen/tests/{compat_gate.rs,compat_corpus/**}`, `crates/ocx_sdkgen/BUILD.bazel`, `website/schema.taskfile.yml` | 1 | CW | | pending |
 | P3 | . | C-007 (copy half), C-008, C-009; S-015 unit half | `crates/ocx_store/src/file_structure/{assemble.rs,vendor_layout.rs}`, `crates/ocx_store/src/hardlink.rs` | 1 | CW | review | pending |
 | P4 | . | C-005 (lane), C-006, C-022 (lane); V-46 unit control | `crates/ocx_package_manager/src/composer.rs`, `crates/ocx_package/src/metadata/env/resolver.rs`, `crates/ocx_package_manager/src/tasks/resolve.rs` | 1 | CW | | pending |
-| P5 | . | C-012, C-013, C-014 (apply), C-016…C-020; V-26, V-52, V-58, V-59…V-61, V-66 timer, V-68 | `crates/ocx_shim/src/**`, `crates/ocx_shim/tests/**`, `crates/ocx_shim/BUILD.bazel`, `crates/ocx_store/src/{shim.rs,shims/**}`, `crates/ocx_store/src/file_structure/shim_bin_store.rs`, `.github/workflows/build-windows-shims.yml`, `taskfiles/rust.taskfile.yml` | 2 | P1 | hard | pending |
+| P5 | . | C-012, C-013, C-014 (apply), C-016…C-020; V-26, V-52, V-58 (dispatch unit), V-59…V-61, V-66 timer, V-68 | `crates/ocx_shim/src/**`, `crates/ocx_shim/tests/**`, `crates/ocx_shim/BUILD.bazel`, `crates/ocx_store/src/{shim.rs,shims/**}`, `crates/ocx_store/src/file_structure/shim_bin_store.rs`, `.github/workflows/build-windows-shims.yml`, `taskfiles/rust.taskfile.yml` | 2 | P1 | hard | pending |
 | P6 | . | C-015 (write); S-004 writer; V-62, V-72 writer | `crates/ocx_package_manager/src/launcher/{direct,generate}.rs`, `crates/ocx_package_manager/src/tasks/render_toolchain.rs`, `crates/ocx_env/src/vars/tests.rs` | 2 | P1 | | pending |
-| P7 | . | C-002…C-004, C-007, C-009…C-011, C-022…C-024 orchestration; S-007, S-013, S-014 | `crates/ocx_package_manager/src/tasks/{vendor.rs,pull.rs,toolchain_names.rs}` | 3 | P3, P4, P5, P6 | hard | pending |
+| P7 | . | C-002…C-004, C-007, C-009…C-011, C-022…C-024 orchestration; S-007, S-013, S-014 | `crates/ocx_package_manager/src/tasks/{vendor.rs,pull.rs,toolchain_names.rs}`, `crates/ocx_package/src/vendor.rs`, `crates/ocx_package/src/vendor/*.rs` (`vendor_id` and any manifest-type fix) | 3 | P3, P4, P5, P6 | hard | pending |
 | P8 | . | acceptance for C-001…C-024 and S-004…S-007, S-013…S-015 | `test/tests/{test_vendor,test_package_vendor,test_vendor_launcher,test_vendor_parity}.py`, `test/src/vendor_fixtures.py`, `test/fixtures/vendor/**`, `test/BUILD.bazel` (`module_data`) | 1 | CW | | pending |
 | P9 | . | goal criterion 1 docs; AI-config upkeep | `website/src/content/docs/reference/vendor-manifest.md`, `website/src/content/docs/guides/vendor.mdx`, `website/astro.config.mjs`, `AGENTS.md`, `.claude/rules/{arch-principles,subsystem-cli-commands,subsystem-package-manager,subsystem-file-structure,subsystem-interface-contract,product-context}.md` | 1 | CW | | pending |
-| P10 | . | ocx proofs: every ocx V-row green locally, mut rows, V-66 | `.claude/artifacts/evidence/vendor_rules_ocx/P10.md`, `test/fixtures/vendor/windows_amd64.manifest.json` (V-46 golden, written on Linux); code fixes only, never a test unless it contradicts a contract | 4 | P1…P9 | | pending |
+| I1 | . | integration gate: hub files regenerated once (§ Hub files), `cargo check --workspace --all-targets --locked`, the touched crates' unit suites, `task website:reference:generate` | the § Hub files list (ocx side) | 4 | P1…P9 | | pending |
+| P10 | . | ocx proofs: every ocx V-row green locally, mut rows, V-66 | `.claude/artifacts/evidence/vendor_rules_ocx/P10.md`, `test/fixtures/vendor/windows_amd64.manifest.json` (V-46 golden, written on Linux); code fixes in any file of a merged ocx pipeline, each named in `P10.md`, never a test unless it contradicts a contract | 5 | I1 | | pending |
 | R1 | rules_ocx | rig, baseline, the two rig questions | `e2e/rbe/**` except `e2e/rbe/{tests,workspace}/**` and `e2e/rbe/ocx-under-test.txt`; `taskfiles/rig.taskfile.yml`; `.bazelignore` | 1 | CW-R | | pending |
 | R2 | rules_ocx | C-RO-15; V-51 | `ocx/private/{download,manifest}.bzl`, `ocx/tests/download_test.bzl` (new), `e2e/install_binary/**` (new), `.github/actions/ocx-under-test/action.yml`, `.github/workflows/{verify-basic,verify-deep}.yml` | 1 | CW-R | | pending |
 | R3 | rules_ocx | C-RO-02…C-RO-07, C-RO-12, C-RO-13, C-RO-16, C-RO-17; S-003, S-009…S-011; V-48, V-49, V-69 | `ocx/private/{vendor_manifest,set_repo,set_rules}.bzl`, `ocx/private/repo_utils.bzl` (`make_isolated_ocx_env` only), `ocx/tests/{vendor_manifest,set_repo}_test.bzl`, `ocx/tests/testdata/**` except the CW-R example | 1 | CW-R | hard | pending |
@@ -356,9 +358,9 @@ Commit `chore: vendor reader and set rule contract stubs`.
 | R5 | rules_ocx | C-RO-14; V-18 | `scripts/check_ocx_interface.py`, `scripts/tests/test_check_ocx_interface.py`, `taskfiles/guard.taskfile.yml` | 1 | CW-R | | pending |
 | R6 | rules_ocx | cutover: old fetch paths deleted, Bazel 9 only, wiring (DP-7, DP-8, DP-9) | `ocx/private/{project,package}.bzl` (deleted), `ocx/private/repo_utils.bzl` (dead functions), `ocx/tests/{launcher,package,policy}_test.bzl`, `ocx/tests/BUILD.bazel`, `MODULE.bazel`, `MODULE.bazel.lock`, `.bcr/presubmit.yml`, `taskfile.yml`, `bazel/*.bazelrc` (Bazel 8 lines only), root `BUILD.bazel` (if a test label moves) | 2 | R1, R2, R3, R4, R5 | | pending |
 | R7 | rules_ocx | rig tests for every rig V-row; S-001…S-003, S-008…S-010, S-012, S-014 | `e2e/rbe/tests/**`, `e2e/rbe/workspace/**` | 2 | R1 | | pending |
-| R8 | rules_ocx | rig green on both backends locally; rules mut rows; V-31, V-65 numbers; the CI lane | `.github/workflows/verify-rbe.yml`, `e2e/rbe/RESULTS.md` (new column) | 4 | R2, R6, R7, P7 | | pending |
+| R8 | rules_ocx | rig green on both backends locally; rules mut rows; V-31, V-65 numbers; the CI lane | `.github/workflows/verify-rbe.yml`, `e2e/rbe/RESULTS.md` (new column); code fixes in any file of a merged rules_ocx pipeline, each named in the evidence | 4 | R2, R6, R7, P7 | | pending |
 | R9 | rules_ocx | examples, `e2e/bzlmod`, docs, invariants 1 and 3 (C-RO-11 text); V-11, V-27c, V-45 | `examples/**`, `e2e/bzlmod/**`, `README.md`, `docs/**`, `AGENTS.md`, `agent-config/**`, `.claude/rules/**` (generated copies) | 4 | R6, P7 | | pending |
-| X | . + rules_ocx | integration: V-17, V-44, fixture parity, proof ledger, CI evidence | `.claude/artifacts/evidence/vendor_rules_ocx/X.md`; rules_ocx `e2e/rbe/ocx-under-test.txt` | 5 | P10, R8, R9 | | pending |
+| X | . + rules_ocx | integration: V-17, V-44, fixture parity, proof ledger, CI evidence | `.claude/artifacts/evidence/vendor_rules_ocx/X.md`; rules_ocx `e2e/rbe/ocx-under-test.txt` | 6 | P10, R8, R9 | | pending |
 
 ```mermaid
 graph TD
@@ -375,9 +377,12 @@ graph TD
     P7
   end
   subgraph W4[wave 4]
-    P10; R8; R9
+    I1; R8; R9
   end
   subgraph W5[wave 5]
+    P10
+  end
+  subgraph W6[wave 6]
     X
   end
   CW --> P1 & P2 & P3 & P4 & P8 & P9
@@ -386,30 +391,35 @@ graph TD
   P3 & P4 & P5 & P6 --> P7
   R1 & R2 & R3 & R4 & R5 --> R6
   R1 --> R7
-  P1 & P2 & P3 & P4 & P5 & P6 & P7 & P8 & P9 --> P10
+  P1 & P2 & P3 & P4 & P5 & P6 & P7 & P8 & P9 --> I1
+  I1 --> P10
   R2 & R6 & R7 & P7 --> R8
   R6 & P7 --> R9
   P10 & R8 & R9 --> X
 ```
 
-**Critical path:** CW → P1 → P5 → P7 → R8 → X (P5 has five steps; P7 four). **Shippable after wave: 4** — the ocx half (both vendor
+**Critical path:** CW → P1 → P5 → P7 → I1 → P10 → X (R8 runs beside I1 and P10) (P5 has six steps; P7 five). **Shippable after wave: 5** — the ocx half (both vendor
 commands, the manifest spec and gate, the launcher on six targets, docs) once P10 has merged; the rules_ocx half only after X, because
 its CI needs the dev build. **Parallelism:** wave 1 holds every pipeline file-disjointness allows; P8 and R7 write their tests against the
 stubs in parallel with the code (red first) instead of waiting for it. P6 is not merged into P5 because they share no file and P6 is off
-the critical path. `.`-side and `rules_ocx`-side pipelines are disjoint by `(Repo, path)`.
+the critical path. `.`-side and `rules_ocx`-side pipelines are disjoint by `(Repo, path)`. Two deliberate sequential overlaps: P10's V-46 golden lies under
+ P8's `test/fixtures/vendor/**` (P8 → P10), and R1 and R8 both write `e2e/rbe/RESULTS.md` (R1 → R7 → R8).
 
 ## Steps
 
 Model per step: `standard` = sonnet; `hard` pipelines start at sonnet `effort: high`; escalation to opus only by counter (the same step
-failed twice). **Cheap for sonnet:** CW, CW-R, P1, P2, P4, P6, P8, P9, P10, R1, R2, R5, R6, R7, R8, R9, X. **Hard (sonnet high, opus on
-the second failure):** P5, P7, R3, R4. **Opus by policy:** P5 step 5 only (security audit of the launcher, `hex.md` override
+failed twice). **Cheap for sonnet:** CW, CW-R, P1, P2, P4, P6, P8, P9, I1, P10, R1, R2, R5, R6, R7, R8, R9, X. **Hard (sonnet high, opus on
+the second failure):** P5, P7, R3, R4. **Opus by policy:** P5 step 4 only (security audit of the launcher, `hex.md` override
 `reviewer:security: deep-reasoning`; AGENTS.md: security review of credential paths). Each step: Stub (already in the contract wave) →
 Specify (red) → Implement (green), narrowest test per § Worker rules, its own commit.
 
 ### P1 — `ocx_env_apply` (refactor + decoder)
 1. Implement `move_to_front`, `remove_segment`, `append_unique`, the comparator and `apply_one` in `ocx_env_apply` by moving the bodies
-   from `ocx_util` unchanged (CW's re-stated tests go green). Commit `refactor: env-apply string functions move to a leaf crate`.
-2. Rewire the 15 caller files to `ocx_env_apply`, delete the originals and their `mod tests` from `ocx_util`, fix the dangling doc link
+   from `ocx_util` unchanged (CW's re-stated tests go green). **Moving symbols:** those three, plus every private or public item they
+   reach (`path_element_eq`, `path_element_norm`; `PATH_SEPARATOR` and `strip_one_quote_pair` only if reached). Items they do not reach
+   stay in `ocx_util`. No re-export alias (AGENTS.md § Stability tiers). Commit `refactor: env-apply string functions move to a leaf crate`.
+2. `grep -rn` every moved symbol across `crates/`; rewire the 15 caller files and every other user found (P1 Expected files) to
+   `ocx_env_apply`, delete the originals and their `mod tests` from `ocx_util`, fix the dangling doc link
    in `metadata/env/list.rs:47`. `cargo test` for every touched crate, `workspace_structure`. Same commit type.
 3. `DirectSidecar::validate` per design § 4.2 key and path rules; `KeyFold::Windows` ASCII case fold. Tests V-62/V-72 decoder (in:
    well-formed accepted), V-73 unit (control: a case-sensitive comparator fed to the same fold check yields two path keys). Commit
@@ -421,7 +431,8 @@ Specify (red) → Implement (green), narrowest test per § Worker rules, its own
    expected list and the "exactly 8" message → 9. Unit: the schema's `schema_version` const is 1.
 2. `ocx_sdkgen`: `Kind::VendorManifest` (`lint.rs:21`), `Documents.vendor_manifest` (`lib.rs:85`), the gate's loop over four documents
    (`compat.rs:1169`), absent-baseline document as all-additions (DP-2), lint rules = reports set minus L09, L13, L14; corpus case
-   `vendor_manifest_property_removed` (V-40 red) and the live goldens green. Commit `feat: the vendor manifest is a gated published schema`.
+   `vendor_manifest_property_removed` (V-40 red) and a corpus green case; the live-goldens case goes green at I1, which regenerates
+   the goldens. Commit `feat: the vendor manifest is a gated published schema`.
 
 ### P3 — copy assembly and staged publication (mark `review`: `crates/ocx_store/**`)
 1. `LinkMode::Copy` at `assemble.rs:578`: data and masked mode only (setuid, setgid, sticky, group/other-write cleared), file mtime kept,
@@ -447,19 +458,24 @@ Specify (red) → Implement (green), narrowest test per § Worker rules, its own
    A `#[ignore]` timing test for V-66 (1000 runfiles entries).
 3. Windows `.direct` spawn: `.bat`/`.cmd` (trailing dots/spaces trimmed, case-insensitive) through `std::process::Command` + job object
    right after spawn, refusal → 64; else the existing `CreateProcessW` path. `#[cfg(windows)]` test `tests/batch_spawn.rs` with hostile
-   arguments; its control spawns the same `.cmd` through the `CreateProcessW` quoter inside the test binary (V-58). Built locally with
-   `task rust:check:windows` (xwin), run in CI only.
-4. Six blobs: `rust:shim:build` for `x86_64-`/`aarch64-unknown-linux-musl`, `x86_64-`/`aarch64-apple-darwin`, the two gnullvm targets
-   (cargo zigbuild); `shims/` holds six blobs; `shim.rs` `blob_for` via `include_bytes!` for all six (no cfg gate), per-blob budget,
-   SHA canaries, the two-blob assumptions removed (tests, `build-windows-shims.yml` `sed -n 1p` order); V-26 (`LC_CODE_SIGNATURE` on
-   arm64 darwin, none on x86_64); `shim_bin_store.rs` keyed per target. If the workflow's provenance gate rejects locally built blobs,
-   the step records it and § External acts gets a `build-windows-shims.yml` dispatch; the committed blobs then come from that run.
-   Commit `feat: one native launcher starts a vendored tool on every platform`.
-5. Security audit (opus, `/security-auditor`) of lookup, env removal, Windows spawn and batch targets against ADR § NFRs Security;
-   Block findings fixed in this pipeline before merge.
+   arguments (end to end in P8's V-58 case); a host-run unit covers the dispatch decision (extension trimming, case). Built locally
+   with `task rust:check:windows` (xwin), run in CI only.
+4. Security audit (opus, `/security-auditor`) of lookup, env removal, Windows spawn and batch targets against ADR § NFRs Security;
+   Block findings fixed in this pipeline. It runs before the blob cut, because the shim workflow requires the last `crates/ocx_shim/`
+   commit to precede the last `shims/` commit.
+5. Six-target build: `rust:shim:build` for `x86_64-`/`aarch64-unknown-linux-musl`, `x86_64-`/`aarch64-apple-darwin` and the two
+   gnullvm targets (cargo zigbuild); `build-windows-shims.yml` extended to the six targets (matrix, size gate, the two-blob `sed -n 1p`
+   order removed). Local blobs are development bytes only: they carry no provenance attestation.
+6. Embedding: `shims/` holds six blobs; `shim.rs` `blob_for` via `include_bytes!` for all six (no cfg gate), per-blob budget, SHA
+   canaries, the two-blob test assumptions removed; V-26 (`LC_CODE_SIGNATURE` on arm64 darwin, none on x86_64); `shim_bin_store.rs`
+   keyed per target. Commit `feat: one native launcher starts a vendored tool on every platform`. The committed blobs are replaced by
+   the CI-built, attested blobs of External act 3; any later `crates/ocx_shim/**` or `crates/ocx_env_apply/**` change (P10, X) re-cuts
+   them through the same act.
 
 ### P6 — launcher writers
-1. `launcher/direct.rs` `write_direct_launcher`: byte copy of the given blob (never a hardlink), sidecar JSON via `DirectSidecar`, writer
+1. `launcher/direct.rs` `write_direct_launcher`: built on the existing `write_shim_exe_then_sidecar` (`generate.rs:225`) order; byte copy
+   of the given blob (never a hardlink), sidecar JSON via `DirectSidecar`, whose `env` items arrive pre-composed as a parameter (P7
+   supplies them from the vendor lane, so P6 needs no P4 edge), writer
    refusals 65 (`vendor_path_unrepresentable`, `vendor_value_unrepresentable`) calling `validate`. Units: bytes equal, V-62/V-72 writer.
 2. Direct target kind in `generate.rs` (entry points, the package's private environment) and `render_toolchain.rs` (selection launchers
    under `selections/<id>/shells/default/bin`, the selection environment). `crates/ocx_env/src/vars/tests.rs`: no patterned name under
@@ -469,27 +485,33 @@ Specify (red) → Implement (green), narrowest test per § Worker rules, its own
 1. `pull.rs`: `VendorTarget` destination for `setup_owned` (skips `refs/`, `metadata.json`, `resolve.json`, `install.json`, `digest`,
    OCI `manifest.json`), `LinkMode::Copy`; tree listing (files with executable bit, links with relative contained targets → else 65,
    `link_free_dirs`). Units over a fixture package.
-2. Manifest-only path: selection (project: `select_tool_set` + `resolve_selected_tools` at `-p`; package: identifiers), closure (C-022),
-   `available_platforms` from the lock or image indexes before leaf selection (C-023), environments via the vendor lane (C-005),
-   names via `toolchain_surface` + `exposed_names(Skip)` (`names_declared`), tools, `vendor_id`; trust checks (C-024); no layer.
-3. Full path: `ensure_empty_or_absent` first (C-002), staging (C-009), pull per package, launchers via P6 with `blob_for(platform)`
+2. Manifest-only path, selection half: selection (project: `select_tool_set` + `resolve_selected_tools` at `-p`; package:
+   identifiers), closure (C-022), `available_platforms` from the lock or image indexes before leaf selection (C-023), trust checks
+   (C-024); no layer.
+3. Manifest-only path, document half: environments via the vendor lane (C-005), names via `toolchain_surface` + `exposed_names(Skip)`
+   (`names_declared`), tools, `vendor_id` (implemented in `ocx_package::vendor`), manifest serialisation.
+4. Full path: `ensure_empty_or_absent` first (C-002), staging (C-009), pull per package, launchers via P6 with `blob_for(platform)`
    (omitted when `None`, C-019/V-08), `--omit-links` (C-011), value refusals (C-010), publish, `VendorOutcome`.
-4. Error mapping review against design § 5.2; `S-013` `lock_stale` passthrough. Commit
+5. Error mapping review against design § 5.2; `S-013` `lock_stale` passthrough. Commit
    `feat: ocx vendor writes a relocatable directory and its manifest`.
 
 ### P8 — acceptance tests (written against the stubs, red first)
-1. `test/src/vendor_fixtures.py`: fixture packages via `make_package` / `make_package_with_entrypoints` (multi-platform, cmake + ccache
-   dependency, relative links incl. a directory link, env template, entry points incl. `.cmd`, `BUILD.bazel` + case variant, an empty
-   dir, `wasip1/wasm` file package, windows-only package, a package declaring no names, a setuid file); `test/BUILD.bazel` `module_data`.
-2. `test_vendor.py` (`pytestmark = pytest.mark.command("vendor")`, one `@pytest.mark.smoke` case): V-19, V-35, V-38, V-39, V-41 (closure),
-   V-42, V-43, V-53, V-54, V-57, V-63, V-67, V-69, V-70, S-013; registry requests from `test/src/registry_guard.py`.
-3. `test_package_vendor.py` (`command("package vendor")`, one smoke case): the package-tier counterparts; V-08 ocx half.
-4. `test_vendor_parity.py`: V-20, V-21 (with/without `--omit-links`, empty dir on disk), V-22 (caller env holds a package dir on `PATH`,
+1. `test/src/vendor_fixtures.py`, first half: fixture packages via `make_package` / `make_package_with_entrypoints` (multi-platform,
+   cmake + ccache dependency, relative links incl. a directory link, env template, entry points incl. `.cmd`); `test/BUILD.bazel`
+   `module_data`.
+2. Second half: `BUILD.bazel` + case variant, an empty dir, `wasip1/wasm` file package, windows-only package, a package declaring no
+   names, a setuid file, the forwarding-proxy request recorder.
+3. `test_vendor.py` (`pytestmark = pytest.mark.command("vendor")`, one `@pytest.mark.smoke` case): V-19, V-35, V-38, V-39, V-41 (closure),
+   V-09 (ocx bytes: two vendor runs under different umask, TZ, cwd and `OCX_HOME` give equal manifest and sidecar bytes), V-25
+   (ocx half: no `${` in any value), V-42, V-43, V-53, V-54, V-57, V-63, V-67, V-69, V-70, S-013; registry requests are read from `test/src/forward_proxy.py`'s
+   `server.requests` (the forwarding proxy, through `HTTP_PROXY`), never from `registry_guard.py`, which answers 503.
+4. `test_package_vendor.py` (`command("package vendor")`, one smoke case): the package-tier counterparts; V-08 ocx half.
+5. `test_vendor_parity.py`: V-20, V-20b (a matching `[patches]` rule leaves the manifest byte-identical), V-21 (with/without `--omit-links`, empty dir on disk), V-22 (caller env holds a package dir on `PATH`,
    a list element, a `Credential` and a `SecretInput` variable; `__OCX_ENV_STATE`, `OCX_BINARY_PIN` excluded), V-40 (real manifest
    validates with `jsonschema`), V-46 (Windows case vs `test/fixtures/vendor/windows_amd64.manifest.json`, which P10 writes on Linux;
    P8 adds only its `module_data` row).
-5. `test_vendor_launcher.py`: V-14, V-24, V-28 (docker distroless; the docker check observes its own absence before skipping), V-30,
-   V-36, V-27/V-27b (macOS-only, `skipif(sys.platform != "darwin")`), V-58/V-73 Windows cases. Each module shown red against CW.
+6. `test_vendor_launcher.py`: V-14, V-24, V-59, V-60, V-61 (end-to-end halves), V-28 (docker distroless; the docker check observes its own absence before skipping), V-30,
+   V-36, V-27/V-27b (macOS-only, `skipif(sys.platform != "darwin")`), V-58 (with its `list2cmdline` control) and V-73 Windows cases. Each module shown red against CW.
 
 ### P9 — docs and AI config (`docs` skill; `docs-quality.md`, `docs-style.md`, `subsystem-website.md`)
 1. `reference/vendor-manifest.md` (every field, the token, path rules, link to the schema URL; `doc_type: reference`) and
@@ -504,9 +526,10 @@ Specify (red) → Implement (green), narrowest test per § Worker rules, its own
    run; `task satellite:verify` locally if it runs without Bazel's shared cache, else named for CI (deep-repo job). Evidence `P10.md`.
 
 ### R1 — rig (seeded from ocx `.agents/research/research_bazel-remote-repo-cache-rig-spike.md`)
-1. `e2e/rbe/compose.yaml` per design § 10 (project `rules-ocx-rig`, `RIG_PROJECT` override, ports `RIG_PORT`/`RIG_PORT_NL`, images by
-   digest), nginx config with the JSON access log, zot with `fixtures/gen_htpasswd.py` (per run, never committed), Buildbarn and
-   NativeLink (profile `nativelink`), `client` service; `fixtures/seed.py` (pushes the § 10 fixtures with a given `ocx`);
+1. `e2e/rbe/compose.yaml` per design § 10, Buildbarn half (project `rules-ocx-rig`, `RIG_PROJECT` override, port `RIG_PORT`, images by
+   digest): nginx with the JSON access log, zot with `fixtures/gen_htpasswd.py` (per run, never committed), Buildbarn services and both
+   runners. Proof: `rig:up` builds a trivial target remotely.
+1b. NativeLink half (profile `nativelink`, port `RIG_PORT_NL`), the `client` service; `fixtures/seed.py` (pushes the § 10 fixtures with a given `ocx`);
    `e2e/rbe/pyproject.toml` + `uv.lock`; `rig.bazelrc`; `taskfiles/rig.taskfile.yml` (`rig:up`, `rig:seed`, `rig:test`, `rig:baseline`,
    `rig:down`). Proof: `rig:up` + `rig:seed` + `rig:down` locally.
 2. **Rig question 1** — does NativeLink admit an arbitrary instance-name suffix as a per-test cache silo? Two runs with suffixes `a`,
@@ -555,8 +578,11 @@ Specify (red) → Implement (green), narrowest test per § Worker rules, its own
 
 ### R6 — cutover
 1. Delete `ocx/private/{project,package}.bzl`; in `repo_utils.bzl` delete `make_ocx_env`'s home fallback and every dead function the
-   explorer listed (`render_launcher`, `render_env_bzl`, `render_launchers_build`, `write_launchers`, `render_lazy_launcher`,
-   `discover_bins`, `scan_bins`, `resolve_bins`, …) after grepping each for callers; port or delete `ocx/tests/{launcher,package,policy}_test.bzl`
+   explorer listed, each grepped for callers first: `valid_bin_name`, `check_bin_names`, `closure_packages`, `list_executables`,
+   `declared_bins`, `path_dirs`, `resolve_bins`, `discover_bins`, `scan_bins`, `rlocation_path`, `stage_lazy_config`,
+   `_RUNFILES_PREAMBLE`, `_RLOCATION_GUARD`, `env_entries`, `package_report`, `render_launcher`, `render_env_bzl`,
+   `render_launchers_build`, `write_launchers`, `append_unique`, `fold_lists`, `UNKNOWN_MODIFIER_MSG`, `render_lazy_launcher`, and
+   `make_ocx_env`'s home fallback (lines 676-684 at `9648f93`); port or delete `ocx/tests/{launcher,package,policy}_test.bzl`
    and their `BUILD.bazel` rows; keep `run_ocx`, `SYSEXIT_HINTS`, env classes, `CONFIG_ATTRS`, `POLICY_ATTRS`, `decode_json`, `ocx_bin`.
 2. `MODULE.bazel` (`bazel_compatibility = [">=9.0.0"]`, dogfood tag gains `platforms`), `MODULE.bazel.lock`, `.bcr/presubmit.yml` (9.x),
    `taskfile.yml` (drop 8.7.0 and `DOCS_EXCLUDE`, drop `pins:check`, include `rig`, `guard`, the install-binary test; guard in `ci:lint`).
@@ -564,14 +590,15 @@ Specify (red) → Implement (green), narrowest test per § Worker rules, its own
 
 ### R7 — rig tests (written against the stubs, red first)
 1. `e2e/rbe/workspace/` (`ocx.toml`/`ocx.lock` over the fixtures, `MODULE.bazel` with the new attributes, BUILD targets for the cases).
-2. `e2e/rbe/tests/test_*.py` grouped: remote execution (V-01, V-02, V-06, V-07, V-12, V-13, V-28, V-29, V-30, V-34, V-41, V-47), caches
-   and facts (V-03, V-09, V-16, V-33, V-55, V-56, V-64), offline (V-04, V-05, V-32), registry (V-10, V-15, V-25, V-57, V-71), measures
-   (V-31, V-65 → a results JSON R8 folds); witnesses per design § 10; silos per R1's answers. Each shown red against CW-R.
+2. `e2e/rbe/tests/` remote execution: V-01, V-02, V-06, V-07, V-08 (rules half: an action reads the `.wasm` file), V-12, V-13, V-28,
+   V-29, V-30, V-34, V-41, V-47.
+3. Caches, facts, offline, registry, measures: V-03, V-09, V-16, V-33, V-55, V-56, V-64; V-04, V-05, V-32; V-10, V-15, V-25, V-57,
+   V-71; V-31, V-65 (→ a results JSON R8 folds). Witnesses per design § 10; silos per R1's answers. Each shown red against CW-R.
 
 ### R8 — rig green and CI lane
 1. Local `rig:up rig:seed rig:test` on both backends with the locally built `ocx` (§ How rules_ocx reaches); fix code in R-pipelines'
    files only through a follow-up step naming the contract.
-2. rules mut rows V-09, V-10, V-12, V-13, V-47, V-71; V-31/V-65 numbers into `RESULTS.md` (new column beside the baseline).
+2. rules mut rows V-09, V-10, V-12, V-13, V-25 (rig half), V-30 (rig half), V-47, V-71; V-31/V-65 numbers into `RESULTS.md` (new column beside the baseline).
 3. `verify-rbe.yml` (`pull_request`, `workflow_dispatch`; jobs `rig-buildbarn`, `rig-nativelink` on `ubuntu-24.04`, 45 min; checkout,
    the composite action, `task rig:up rig:seed rig:test`, log upload, `task rig:down` always; `actionlint`, `zizmor` if wired). Commit
    `ci: remote-execution rig lane on Buildbarn and NativeLink`.
@@ -589,11 +616,12 @@ Specify (red) → Implement (green), narrowest test per § Worker rules, its own
 
 ### X — cross-repository integration
 1. Local end to end: `ocx` from the ocx tip, rules_ocx tip, full rig on both backends; fixture parity (CW-R example equals ocx's bytes).
-2. V-17: this repository's `bazel build //...` with `--override_module=rules_ocx=<rules_ocx tip>` (green) and at `9648f93` (red: the
-   removed attributes), recorded for the ocx PR body.
-3. After the meta-orchestrator's dev build (§ External acts): write `e2e/rbe/ocx-under-test.txt` with the dev identifier and digest,
+2. V-17: in a scratch copy of this repository, `MODULE.bazel`'s `ocx.project` tag (lines 151-155) gains `platforms`; `bazel build //...`
+   with `--override_module=rules_ocx=<rules_ocx tip>` is green, and at `9648f93` it is red on the unknown attribute `platforms`.
+   Recorded for the ocx PR body; the committed move waits for the rules_ocx release (DV-10).
+3. After External acts 4 and 5: write `e2e/rbe/ocx-under-test.txt` with the dev identifier and digest,
    commit `ci: test rules_ocx against the ocx pull request's dev build`.
-4. Fold CI results (ocx-deep macOS/Windows rows, rules_ocx `verify-basic`, `verify-rbe` both jobs, `verify-deep` three OS; V-44) into
+4. After External acts 2, 6 and 7, fold CI results (ocx-deep macOS/Windows rows, rules_ocx `verify-basic`, `verify-rbe` both jobs, `verify-deep` three OS; V-44) into
    `X.md`; every V-row has its line in § Red-proof log.
 
 ## Reuse table (V-23: each step's existing function; no new selection walk, assembly, composer or launcher writer)
@@ -602,29 +630,48 @@ Specify (red) → Implement (green), narrowest test per § Worker rules, its own
 |---|---|---|
 | P7.2 select (project) | `ocx_project::compose::select_tool_set` (`compose.rs:150`), `resolve_selected_tools` (`:283`) at `-p` | none |
 | P7.2 select (package) | the identifier resolution every `ocx package` verb uses (`PackageManager::resolve`) | none |
-| P7.2 closure + environments | `PackageManager::compose_roots` (`composer.rs:1059`) with `ComposePaths::vendor` (a third lane of the existing producer); `resolve_env_with_attribution` (`resolve.rs:684`) with no patch set | the lane (P4) |
-| P7.2 names | `toolchain_surface` (`render_toolchain.rs:158`), `exposed_names(…, NotEnumerablePolicy::Skip)` (`toolchain_names.rs:55`) | none |
+| P7.2/P7.3 closure + environments | `PackageManager::compose_roots` (`composer.rs:1059`) with `ComposePaths::vendor` (a third lane of the existing producer); `resolve_env_with_attribution` (`resolve.rs:684`) with no patch set | the lane (P4) |
+| P7.3 names | `toolchain_surface` (`render_toolchain.rs:158`), `exposed_names(…, NotEnumerablePolicy::Skip)` (`toolchain_names.rs:55`) | none |
 | P7.2 `available_platforms` | the lock's per-tool platform map (`LockedTool`, `ocx_project/src/resolve.rs:1397`) / the image-index read of resolution | the intersection (a set operation) |
-| P7.3 content | `setup_owned` (`pull.rs:424`) with `dest_override` + `VendorTarget`; `assemble_from_layers_with_layouts` with `LinkMode::Copy` | the destination variant, the link mode |
-| P7.3 launchers | `launcher::generate` (`generate.rs:26`) and `render_toolchain` (`render_toolchain.rs:202`) with the direct target kind | the kind (P6) |
-| P7.3 refusal of `DIR` | `ocx_util::fs::ensure_empty_or_absent` (`empty_or_absent.rs:59`) | none |
-| P7.3 publish | `StagedTree` (P3) | staging (R-8) |
+| P7.1 tree listing | `ocx_util::fs::DirWalker` (`dir_walker.rs:93`) | the three lists (files, links, link-free dirs) |
+| P6.1 launcher write | `write_shim_exe_then_sidecar` (`generate.rs:225`) | the `.direct` sidecar body |
+| P7.4 content | `setup_owned` (`pull.rs:424`) with `dest_override` + `VendorTarget`; `assemble_from_layers_with_layouts` with `LinkMode::Copy` | the destination variant, the link mode |
+| P7.4 launchers | `launcher::generate` (`generate.rs:26`) and `render_toolchain` (`render_toolchain.rs:202`) with the direct target kind | the kind (P6) |
+| P7.4 refusal of `DIR` | `ocx_util::fs::ensure_empty_or_absent` (`empty_or_absent.rs:59`) | none |
+| P7.4 publish | `StagedTree` (P3) | staging (R-8) |
 | P5 env apply | `ocx_env_apply::apply_one` (the functions `ocx exec` uses, moved by P1) | none |
 | P7 manifest | report entry shape of `ocx env` (`EnvEntry`, `api/data/env.rs:52`) mirrored by `ocx_package::vendor` items | the manifest types (CW) |
 
 ## External acts (meta-orchestrator; never a pipeline's)
 
-1. Push the ocx feature branch after each merged wave that CI must see (P5's blobs, P10).
+Numbered in the order X needs them.
+
+1. Push the ocx feature branch after each merged wave that CI must see (P5's blobs, I1, P10). The ocx draft pull request is open.
 2. Dispatch ocx `verify-deep.yml` on `hex/bazel-rbe-rules-ocx` after P10 (DP-5; also runs `task satellite:verify` in `deep-repo.yml`).
-3. If P5 step 4 records it: dispatch `build-windows-shims.yml` for CI-built blobs.
+3. Dispatch `build-windows-shims.yml` after P5 (and again after any later `crates/ocx_shim/**` or `crates/ocx_env_apply/**` change);
+   a step commits its attested blobs (P5 step 6).
 4. Dispatch ocx `release.yml` with `mode=dev` on the branch after P10; hand the identifier and digest to X step 3.
-5. In rules_ocx: push `hex/bazel-rbe-rules-ocx`, open its pull request, dispatch `verify-deep.yml` and `verify-rbe.yml` there.
-6. If `task satellite:verify` reds in ocx-mirror (no grant there): goal § Issue resolution.
+5. In rules_ocx: push `hex/bazel-rbe-rules-ocx` after X step 3 and open its pull request.
+6. Dispatch rules_ocx `verify-deep.yml` and `verify-rbe.yml` on that branch (`verify-basic.yml` runs on the pull request).
+7. Mark the ocx pull request ready for review (not a draft) once X step 4 is green; the same for rules_ocx if the goal asks.
+8. If `task satellite:verify` reds in ocx-mirror (no grant there): goal § Issue resolution.
 
 ## Open questions
 
 None open. The ADR's two `[NEEDS CLARIFICATION]` markers are R1 steps 2 and 3, each with a decided fallback. Owner-revisitable, not
 blocking: R-3 (launcher passes `SecretInput` through) and DV-6 (Windows needs `--enable_runfiles`).
+
+## Review record
+
+Round 1 (one round, plan-artifact scope): `reviewer:spec` (sonnet) on the decomposition, verdict Needs Work, 3 Block, 11 Warn,
+3 Suggest. Traceability, the verification map's row set, the waves and the critical path checked clean mechanically. All 17 findings
+applied in the commit after 32fc6cbb: F1 pipeline I1 added for the hub files; F2 `ocx_package::vendor` files to P7; F3
+`download_test.bzl` registered by CW-R; F4 P1's moving symbols stated and every user rewired; F5 P5 audit before the blob cut, attested
+blobs by External act 3; F6 missing test rows added to P8 and R7; F7 P6 takes pre-composed items; F8 rig mut rows V-25, V-30; F9
+`DirWalker` and `write_shim_exe_then_sidecar` in the reuse table; F10 V-17's scratch `platforms` edit; F11 CW.2, P5.4, P7.2, P8.1,
+R1.1, R7.2 split; F12 R6's full deletion list; F13 fix scope of P10/R8 and the ready-for-review act; F14 Windows jobs named, V-58
+moved to an acceptance case with an in-control; F15-F17 notes. No re-validation round: the plan-artifact scope re-validates only after a
+fixed Block, and the three Blocks were ownership gaps closed by table edits, recorded here.
 
 ## Red-proof log
 
