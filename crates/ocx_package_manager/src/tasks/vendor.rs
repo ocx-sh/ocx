@@ -90,7 +90,7 @@ pub struct VendorOutcome {
 #[derive(Debug, thiserror::Error, ocx_exit::Classify)]
 pub enum VendorError {
     /// The output directory exists and is not an empty directory, or is a symlink.
-    #[error("vendor output '{}' exists and is not an empty directory", .path.display())]
+    #[error("vendor output '{}' exists and is not an empty directory; name a new or empty directory", .path.display())]
     #[exit(
         UsageError,
         slug = "vendor_output_not_empty",
