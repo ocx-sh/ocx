@@ -376,6 +376,142 @@ jobs:
           suite: unit
           auth: ${{ secrets.OTEL_OTLP_AUTH }}
 
+  # DP-41 (V-L31, V-L32): the in-place junction retarget and the retire of a directory holding a running
+  # .exe, proved on a real NTFS volume. Its result decides variant A or B' of the launcher publish, so it
+  # runs on pull requests through the template like the other jobs. Two legs: the runner user, and a
+  # standard local user the job creates, because hosted runners run elevated and a junction behaves
+  # differently for a user without the privilege. Nothing is compiled: the tests are two `#[ignore]` cases
+  # of the cross-built `ocx_util` bundle, and a leg reds unless each ran exactly once and passed.
+  junction-proof:
+    name: Junction proof (${{ matrix.user }})
+    needs: cross
+    runs-on: windows-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        user: [runner, standard]
+    env:
+      PROOF_USER: ${{ matrix.user }}
+    steps:
+      - name: Download unit-test bundle
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: unit-tests-x86_64-pc-windows-gnullvm
+          path: bundle
+      # Windows PowerShell: the local-account cmdlets ship with it. `Start-Process -Credential` gives the
+      # child the new user's own environment block, not ours, so every variable the bundle runner sets is
+      # written into a batch file the child executes; that is the one way that works for both legs.
+      - name: Run the junction proof
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (@('runner', 'standard') -notcontains $env:PROOF_USER) { throw "unknown leg '$($env:PROOF_USER)'" }
+          $names = @(
+            'fs::publish::tests::junction_proof_retarget_under_lookup',
+            'fs::publish::tests::junction_proof_retire_running_exe'
+          )
+          $proof = Join-Path $env:RUNNER_TEMP 'junction-proof'
+          $root = Join-Path $proof 'bundle'
+          $work = Join-Path $proof 'work'
+          New-Item -ItemType Directory -Force $root, $work | Out-Null
+          & "$env:SystemRoot\System32\tar.exe" -xzf (Join-Path $env:GITHUB_WORKSPACE 'bundle\unit-tests.tar.gz') -C $root
+          if ($LASTEXITCODE -ne 0) { throw 'bundle extraction failed' }
+          $manifest = Get-Content -Raw (Join-Path $root 'manifest.json') | ConvertFrom-Json
+          $entry = @($manifest.tests | Where-Object { $_.label -like '*crates/ocx_util:ocx_util_test' })
+          if ($entry.Count -ne 1) { throw "expected one ocx_util_test entry in the bundle, found $($entry.Count)" }
+          $entry = $entry[0]
+          $base = Join-Path $root $entry.dir
+          $main = Join-Path $base '_main'
+          $exe = [IO.Path]::GetFullPath((Join-Path $main $entry.exe))
+          if (-not (Test-Path $exe)) { throw "missing test executable $exe" }
+          $envs = [ordered]@{
+            TEST_SRCDIR = $base; RUNFILES_DIR = $base; TEST_WORKSPACE = '_main'; TEST_TARGET = $entry.label
+          }
+          foreach ($p in $entry.env.PSObject.Properties) { $envs[$p.Name] = [string]$p.Value }
+          $envs['TEST_TMPDIR'] = $work; $envs['TMP'] = $work; $envs['TEMP'] = $work
+
+          $script:seq = 0
+          function Invoke-Proof([string]$commandLine, $credential) {
+            $script:seq++
+            $bat = Join-Path $proof "run-$($script:seq).cmd"
+            $out = Join-Path $proof "run-$($script:seq).out"
+            $err = Join-Path $proof "run-$($script:seq).err"
+            $lines = @('@echo off')
+            foreach ($k in $envs.Keys) { $lines += "set `"$k=$($envs[$k])`"" }
+            $lines += "cd /d `"$main`"", $commandLine, 'exit /b %ERRORLEVEL%'
+            Set-Content -Path $bat -Value $lines -Encoding ASCII
+            $sp = @{
+              # cmd.exe named explicitly: the logon API starts an image, and a .cmd path is not one.
+              FilePath = "$env:SystemRoot\System32\cmd.exe"; ArgumentList = "/d /c `"$bat`""
+              WorkingDirectory = $main; Wait = $true; PassThru = $true
+              RedirectStandardOutput = $out; RedirectStandardError = $err
+            }
+            if ($credential) { $sp.Credential = $credential }
+            $p = Start-Process @sp
+            [pscustomobject]@{ Code = $p.ExitCode; Out = [string](Get-Content -Raw $out); Err = [string](Get-Content -Raw $err) }
+          }
+
+          $credential = $null
+          $created = $null
+          try {
+            if ($env:PROOF_USER -eq 'standard') {
+              $created = 'jp' + [guid]::NewGuid().ToString('N').Substring(0, 10)
+              $bytes = New-Object byte[] 24
+              [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+              $password = [Convert]::ToBase64String($bytes) + 'aA1!'
+              Write-Host "::add-mask::$password"
+              $secure = ConvertTo-SecureString $password -AsPlainText -Force
+              New-LocalUser -Name $created -Password $secure -AccountNeverExpires -PasswordNeverExpires | Out-Null
+              Add-Content -Path $env:GITHUB_ENV -Value "JUNCTION_PROOF_USER=$created"
+              # Users, not Administrators: the SID is locale independent.
+              Add-LocalGroupMember -SID 'S-1-5-32-545' -Member $created
+              # The proof directory, not only the bundle: the batch files the child runs live there too.
+              & icacls $proof /grant "${created}:(OI)(CI)RX" | Out-Null
+              if ($LASTEXITCODE -ne 0) { throw 'icacls failed on the proof directory' }
+              & icacls $work /grant "${created}:(OI)(CI)M" | Out-Null
+              if ($LASTEXITCODE -ne 0) { throw 'icacls failed on the work directory' }
+              $credential = New-Object System.Management.Automation.PSCredential(".\$created", $secure)
+            }
+
+            # The control: the runner leg must show an enabled Administrators group and the standard leg
+            # must not, so the check is shown red on one leg and green on the other.
+            $groups = Invoke-Proof 'whoami /groups /fo csv' $credential
+            if ($groups.Code -ne 0) { throw "whoami /groups exited $($groups.Code): $($groups.Err)" }
+            $rows = @(($groups.Out -split "\r?\n") | Where-Object { $_ } | ConvertFrom-Csv)
+            if (-not ($rows | Where-Object { $_.SID -eq 'S-1-1-0' })) { throw 'whoami /groups listed no Everyone row, so it was not read' }
+            $adminEnabled = @($rows | Where-Object { $_.SID -eq 'S-1-5-32-544' -and $_.Attributes -notmatch 'deny only' }).Count -gt 0
+            $expected = $env:PROOF_USER -eq 'runner'
+            if ($adminEnabled -ne $expected) {
+              throw "leg '$($env:PROOF_USER)': Administrators enabled is $adminEnabled, expected $expected"
+            }
+            Write-Host "leg '$($env:PROOF_USER)': Administrators enabled = $adminEnabled (as expected)"
+
+            foreach ($name in $names) {
+              $r = Invoke-Proof "`"$exe`" --ignored --exact $name --test-threads=1" $credential
+              Write-Host $r.Out
+              Write-Host $r.Err
+              # A renamed or missing test runs 0 cases and exits 0, so the summary is read, not the code.
+              $summaries = [regex]::Matches($r.Out, '(?m)^test result: ok\. 1 passed; 0 failed;')
+              if ($r.Code -ne 0 -or $summaries.Count -ne 1) {
+                throw "$name did not run exactly once and pass (exit $($r.Code), $($summaries.Count) matching summaries)"
+              }
+            }
+          }
+          finally {
+            if ($created) { Remove-LocalUser -Name $created -ErrorAction Continue }
+          }
+      - name: Remove the standard user
+        if: ${{ always() && matrix.user == 'standard' }}
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:JUNCTION_PROOF_USER -and (Get-LocalUser -Name $env:JUNCTION_PROOF_USER -ErrorAction SilentlyContinue)) {
+            Remove-LocalUser -Name $env:JUNCTION_PROOF_USER
+          }
+
   # The smoke tier (`-m smoke`, as `smoke-acceptance` runs on Linux) against the cross-built binaries,
   # on a `zot` each pytest session starts itself. Docker is not on these runners, so `no-docker` declares
   # it; the smoke tier needs only the registry. `test/limits/<os>-smoke` holds the selection's own floor
