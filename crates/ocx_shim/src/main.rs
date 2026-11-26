@@ -45,6 +45,13 @@ enum ShimError {
     /// `reason` is the whole stderr line after the `ocx-shim:` prefix, so it names what the lookup tried.
     #[cfg(any(unix, test))]
     DirectRefused { reason: String },
+    /// The vendored tool could not be started. Exit 77 when permission was denied, else 74.
+    #[cfg(any(unix, test))]
+    DirectExecFailed {
+        program: String,
+        permission_denied: bool,
+        reason: String,
+    },
 }
 
 /// `ERROR_ACCESS_DENIED`; the non-Windows build mirrors the Win32 value so the exit-code mapping stays host-testable.
@@ -67,6 +74,14 @@ impl ShimError {
             ShimError::SidecarNotFound { .. } | ShimError::MalformedSidecar { .. } => 78,
             #[cfg(any(unix, test))]
             ShimError::DirectRefused { .. } => 78,
+            #[cfg(any(unix, test))]
+            ShimError::DirectExecFailed { permission_denied, .. } => {
+                if *permission_denied {
+                    77
+                } else {
+                    74
+                }
+            }
             ShimError::ContainmentViolation { .. } => 77,
             ShimError::SelfPathFailure => 74,
             ShimError::OcxNotFound { .. } => 69,
@@ -107,6 +122,10 @@ impl ShimError {
             }
             #[cfg(any(unix, test))]
             ShimError::DirectRefused { reason } => format!("ocx-shim: {reason}"),
+            #[cfg(any(unix, test))]
+            ShimError::DirectExecFailed { program, reason, .. } => {
+                format!("ocx-shim: failed to start {program}: {reason}")
+            }
         }
     }
 }
@@ -570,10 +589,10 @@ fn install_console_ctrl_handler() {
     }
 }
 
-/// Keeps `cargo check --workspace` green on the Linux CI host, which never runs the shim.
-#[cfg(not(windows))]
+/// The Unix launcher runs the vendored (`.direct`) kind alone.
+#[cfg(unix)]
 fn run() -> Result<i32, ShimError> {
-    unimplemented!("ocx-shim has no non-Windows runtime")
+    direct::run()
 }
 
 // ── Specification tests ─────────────────────────────────────────────────────

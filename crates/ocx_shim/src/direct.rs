@@ -7,7 +7,10 @@
 
 use super::ShimError;
 use super::core;
-use ocx_env_apply::direct::DirectSidecar;
+use ocx_env_apply::direct::{DirectSidecar, EnvRecord, VENDOR_DIR_TOKEN};
+use ocx_env_apply::{KeyFold, apply_one};
+use std::collections::BTreeMap;
+use std::ffi::{OsStr, OsString};
 use std::path::Path;
 
 /// A sidecar is at most this large; a larger file is refused unread past the bound.
@@ -87,12 +90,6 @@ fn refuse(reason: String) -> ShimError {
     ShimError::DirectRefused { reason }
 }
 
-/// `O_NONBLOCK` without a `libc` edge: a blocking `open` of a FIFO waits for a writer and would hang the launcher.
-#[cfg(target_os = "linux")]
-const O_NONBLOCK: i32 = 0o4000;
-#[cfg(all(unix, not(target_os = "linux")))]
-const O_NONBLOCK: i32 = 0x4;
-
 /// Reads the file at `path`: opened non-blocking, required to be a regular file, at most [`MAX_SIDECAR_BYTES`].
 pub(super) fn read_regular_bounded(path: &Path) -> Result<Option<Vec<u8>>, ReadError> {
     use std::io::Read;
@@ -102,7 +99,8 @@ pub(super) fn read_regular_bounded(path: &Path) -> Result<Option<Vec<u8>>, ReadE
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(O_NONBLOCK);
+        // A blocking `open` of a FIFO waits for a writer and would hang the launcher.
+        options.custom_flags(libc::O_NONBLOCK);
     }
     let file = match options.open(path) {
         Ok(file) => file,
@@ -364,6 +362,166 @@ pub(super) fn locate(started: &str, context: &LookupContext<'_>, fs: &dyn Lookup
             named.join(", ")
         }
     )))
+}
+
+/// `text` with every vendor-directory token replaced by `root`.
+fn expand(text: &str, root: &str) -> String {
+    text.replace(VENDOR_DIR_TOKEN, root)
+}
+
+/// What the launcher starts: the program, its arguments after the baked ones, and the complete child environment.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct Launch {
+    pub program: String,
+    /// The baked arguments, then the caller's, in the order `ocx exec` gives them.
+    pub args: Vec<OsString>,
+    pub env: Vec<(OsString, OsString)>,
+}
+
+/// The child environment: `inherited`, minus every `unset` key, then each record applied in order.
+///
+/// Keys compare byte-exact, which is the Unix rule; a Windows launcher folds ASCII case and takes its own spawn path.
+fn build_env(inherited: Vec<(OsString, OsString)>, sidecar: &DirectSidecar, root: &str) -> Vec<(OsString, OsString)> {
+    let mut env: BTreeMap<OsString, OsString> = inherited.into_iter().collect();
+    for key in &sidecar.unset {
+        env.remove(OsStr::new(key));
+    }
+    for record in &sidecar.env {
+        let existing = env.get(OsStr::new(&record.key));
+        let value = apply_record(record, existing.map(OsString::as_os_str), root);
+        env.insert(OsString::from(&record.key), value);
+    }
+    env.into_iter().collect()
+}
+
+fn apply_record(record: &EnvRecord, existing: Option<&OsStr>, root: &str) -> OsString {
+    apply_one(
+        existing,
+        record.kind,
+        OsStr::new(&expand(&record.value, root)),
+        record.separator.as_deref(),
+        KeyFold::Exact,
+    )
+}
+
+/// Assembles the launch of a located sidecar over the caller's environment and arguments.
+///
+/// `argv[0]` is the program path itself, which is what `ocx exec` passes for the same tool.
+pub(super) fn plan_launch(
+    located: &Located,
+    inherited: Vec<(OsString, OsString)>,
+    caller_args: Vec<OsString>,
+) -> Launch {
+    let root = located.root.as_str();
+    let mut args: Vec<OsString> = located
+        .sidecar
+        .args
+        .iter()
+        .map(|arg| OsString::from(expand(arg, root)))
+        .collect();
+    args.extend(caller_args);
+    Launch {
+        program: expand(&located.sidecar.program, root),
+        args,
+        env: build_env(inherited, &located.sidecar, root),
+    }
+}
+
+/// The real filesystem, for the Unix launcher.
+#[cfg(unix)]
+struct RealFs;
+
+#[cfg(unix)]
+impl LookupFs for RealFs {
+    fn read_sidecar(&self, path: &str) -> Result<Option<Vec<u8>>, ReadError> {
+        read_regular_bounded(Path::new(path))
+    }
+
+    fn exists(&self, path: &str) -> bool {
+        std::fs::symlink_metadata(path).is_ok()
+    }
+
+    fn list_dir(&self, dir: &str) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .map(|entries| {
+                entries
+                    .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn is_executable_file(&self, path: &str) -> bool {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+    }
+
+    fn is_running_image(&self, path: &str) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        // `current_exe` is `/proc/self/exe` on Linux and `_NSGetExecutablePath` on macOS.
+        let Ok(image) = std::env::current_exe().and_then(std::fs::metadata) else {
+            return false;
+        };
+        std::fs::metadata(path).is_ok_and(|started| started.dev() == image.dev() && started.ino() == image.ino())
+    }
+}
+
+/// Replaces the process with `program`; returns only the failure.
+#[cfg(unix)]
+#[expect(
+    clippy::disallowed_types,
+    clippy::disallowed_methods,
+    reason = "the launcher is not ocx: it has no ocx_package_manager edge, and replacing itself with the tool is its job"
+)]
+fn exec_program(program: &str, args: &[OsString], env: Vec<(OsString, OsString)>) -> std::io::Error {
+    use std::os::unix::process::CommandExt;
+
+    std::process::Command::new(program)
+        .args(args)
+        .env_clear()
+        .envs(env)
+        .exec()
+}
+
+/// The `.direct` launcher on Unix: finds the vendor root, builds the environment and argv, and `exec`s the tool.
+///
+/// Writes nothing to disk and sets no environment of its own, so it runs from a read-only directory.
+#[cfg(unix)]
+pub(super) fn run() -> Result<i32, ShimError> {
+    #[expect(clippy::disallowed_methods, reason = "no ocx_env edge: the shim's size budget")]
+    let variable = |name: &str| std::env::var_os(name).map(|value| value.to_string_lossy().into_owned());
+
+    let mut arguments = std::env::args_os();
+    let argv0 = arguments
+        .next()
+        .and_then(|argument| argument.into_string().ok())
+        .ok_or(ShimError::SelfPathFailure)?;
+    let cwd = std::env::current_dir()
+        .ok()
+        .and_then(|dir| dir.into_os_string().into_string().ok())
+        .ok_or(ShimError::SelfPathFailure)?;
+
+    let started = started_path_unix(&argv0, &cwd, variable("PATH").as_deref(), &RealFs)?;
+    let runfiles_dir = variable("RUNFILES_DIR");
+    let context = LookupContext {
+        cwd: &cwd,
+        runfiles_dir: runfiles_dir.as_deref(),
+        windows: false,
+    };
+    let located = match locate(&started, &context, &RealFs)? {
+        Probed::Direct(located) => located,
+        Probed::Legacy(kind) => return Err(refuse(format!("unexpected .{kind} sidecar on this platform"))),
+    };
+
+    #[expect(clippy::disallowed_methods, reason = "no ocx_env edge: the shim's size budget")]
+    let inherited: Vec<(OsString, OsString)> = std::env::vars_os().collect();
+    let launch = plan_launch(&located, inherited, arguments.collect());
+    let error = exec_program(&launch.program, &launch.args, launch.env);
+    Err(ShimError::DirectExecFailed {
+        program: launch.program,
+        permission_denied: error.kind() == std::io::ErrorKind::PermissionDenied,
+        reason: error.to_string(),
+    })
 }
 
 #[cfg(test)]
@@ -771,6 +929,83 @@ mod tests {
         fs.unreadable.insert("/vendor/bin/cmake.direct".to_string());
         let message = refusal(locate("/vendor/bin/cmake", &unix(None), &fs));
         assert!(message.contains("not a regular file"), "{message}");
+    }
+
+    // ── launch plan: C-014, C-016 ───────────────────────────────────────────
+
+    fn located(json: &str, root: &str) -> Located {
+        Located {
+            sidecar: decode_sidecar(json.as_bytes(), "/s.direct", false).unwrap(),
+            started: format!("{root}/{SELF_PATH}"),
+            root: root.to_string(),
+        }
+    }
+
+    fn sidecar_with(args: &str, unset: &str, env: &str) -> String {
+        format!(
+            r#"{{"schema_version":1,"vendor_id":"{VENDOR_A}","self":"{SELF_PATH}","program":"@VENDOR_DIR@/p/bin/cmake","args":{args},"unset":{unset},"env":{env}}}"#
+        )
+    }
+
+    fn pairs(entries: &[(&str, &str)]) -> Vec<(OsString, OsString)> {
+        entries
+            .iter()
+            .map(|(k, v)| (OsString::from(k), OsString::from(v)))
+            .collect()
+    }
+
+    #[test]
+    fn the_program_and_baked_arguments_take_the_root_before_the_callers_arguments() {
+        let located = located(
+            &sidecar_with(r#"["-C","@VENDOR_DIR@/a/@VENDOR_DIR@"]"#, "[]", "[]"),
+            "/v",
+        );
+        let launch = plan_launch(
+            &located,
+            Vec::new(),
+            vec![OsString::from("--x"), OsString::from("@VENDOR_DIR@")],
+        );
+        assert_eq!(launch.program, "/v/p/bin/cmake");
+        assert_eq!(
+            launch.args,
+            ["-C", "/v/a//v", "--x", "@VENDOR_DIR@"].map(OsString::from),
+            "the callers arguments are never token-expanded"
+        );
+    }
+
+    #[test]
+    fn an_unset_key_is_removed_and_the_records_apply_over_the_rest() {
+        let env = r#"[{"key":"LATE","value":"v","kind":"constant"}]"#;
+        let located = located(&sidecar_with("[]", r#"["SECRET"]"#, env), "/v");
+        let launch = plan_launch(
+            &located,
+            pairs(&[("SECRET", "s"), ("LATE", "old"), ("KEEP", "k")]),
+            Vec::new(),
+        );
+        assert_eq!(launch.env, pairs(&[("KEEP", "k"), ("LATE", "v")]));
+    }
+
+    #[test]
+    fn records_apply_in_order_so_a_later_record_sees_an_earlier_one() {
+        let env = r#"[
+            {"key":"PATH","value":"@VENDOR_DIR@/one","kind":"path"},
+            {"key":"PATH","value":"@VENDOR_DIR@/two","kind":"path"},
+            {"key":"FLAGS","value":"-b","kind":"list","separator":" "},
+            {"key":"FLAGS","value":"-a","kind":"list","separator":" "}]"#;
+        let located = located(&sidecar_with("[]", "[]", env), "/v");
+        let launch = plan_launch(&located, pairs(&[("PATH", "/usr/bin:/v/one")]), Vec::new());
+        assert_eq!(
+            launch.env,
+            pairs(&[("FLAGS", "-b -a"), ("PATH", "/v/two:/v/one:/usr/bin")])
+        );
+    }
+
+    #[test]
+    fn an_env_key_compares_byte_exact_on_unix() {
+        let env = r#"[{"key":"Path","value":"/x","kind":"constant"}]"#;
+        let located = located(&sidecar_with("[]", r#"["PATH"]"#, env), "/v");
+        let launch = plan_launch(&located, pairs(&[("PATH", "/usr/bin")]), Vec::new());
+        assert_eq!(launch.env, pairs(&[("Path", "/x")]));
     }
 
     // ── real reads: V-60 ────────────────────────────────────────────────────
