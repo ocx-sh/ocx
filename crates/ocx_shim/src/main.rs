@@ -40,6 +40,11 @@ enum ShimError {
     OcxNotFound { pinned: Option<String> },
     /// `CreateProcessW` failed otherwise: exit 74, or 77 when `win32` is `ERROR_ACCESS_DENIED`.
     SpawnFailure { win32: u32, program: String },
+    /// The `.direct` launcher refused: sidecar missing, unreadable, malformed, or no vendored root accepted. Exit 78.
+    ///
+    /// `reason` is the whole stderr line after the `ocx-shim:` prefix, so it names what the lookup tried.
+    #[cfg(any(unix, test))]
+    DirectRefused { reason: String },
 }
 
 /// `ERROR_ACCESS_DENIED`; the non-Windows build mirrors the Win32 value so the exit-code mapping stays host-testable.
@@ -60,6 +65,8 @@ impl ShimError {
     fn exit_code(&self) -> i32 {
         match self {
             ShimError::SidecarNotFound { .. } | ShimError::MalformedSidecar { .. } => 78,
+            #[cfg(any(unix, test))]
+            ShimError::DirectRefused { .. } => 78,
             ShimError::ContainmentViolation { .. } => 77,
             ShimError::SelfPathFailure => 74,
             ShimError::OcxNotFound { .. } => 69,
@@ -98,11 +105,16 @@ impl ShimError {
             ShimError::SpawnFailure { win32, program } => {
                 format!("ocx-shim: failed to start {program}: win32 error {win32}")
             }
+            #[cfg(any(unix, test))]
+            ShimError::DirectRefused { reason } => format!("ocx-shim: {reason}"),
         }
     }
 }
 
 mod core;
+// Windows takes the module with the `.direct` spawn; until then only the host-run tests reach it there.
+#[cfg(any(unix, test))]
+mod direct;
 
 /// Entry point; always diverges via [`std::process::exit`].
 fn main() -> ! {
