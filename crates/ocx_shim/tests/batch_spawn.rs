@@ -3,7 +3,7 @@
 
 //! Windows launches end to end. A vendored `.cmd` target: hostile arguments never run an injected command (BatBadBut,
 //! CVE-2024-24576). An argument std can quote reaches the batch file (exit 0); one holding a line break is refused (exit 64).
-//! A program whose path exceeds `MAX_PATH` starts, from a `.direct` and from a classic launcher.
+//! A program whose path exceeds `MAX_PATH` starts, from a `.direct` and from a classic launcher; one that cannot names the limit.
 //!
 //! Runs on Windows CI only; the dispatch decision itself is a host-run unit in `direct.rs`.
 #![cfg(windows)]
@@ -225,4 +225,38 @@ fn a_classic_launcher_starts_a_pinned_ocx_past_max_path() {
         .unwrap();
 
     LongPath::assert_child_ran(&output);
+}
+
+/// A relative pin of `MAX_PATH` or more cannot take the `\\?\` prefix: the one stderr line names the length limit.
+#[test]
+fn a_relative_pin_past_max_path_names_the_length_limit_on_the_one_stderr_line() {
+    let long_path = LongPath::new("relative-pin");
+    let bin = long_path.base.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let launcher = bin.join("tool.exe");
+    std::fs::copy(LAUNCHER_BINARY, &launcher).unwrap();
+    std::fs::write(bin.join("tool.shim"), format!("{}\n", long_path.base.display())).unwrap();
+    let missing = format!("{}\\absent\\ocx.exe", long_path.relative.replace('/', "\\"));
+    assert!(
+        missing.encode_utf16().count() >= 260,
+        "the pin must reach MAX_PATH: {missing}"
+    );
+
+    let output = Command::new(&launcher)
+        .env("OCX_BINARY_PIN", &missing)
+        .env_remove("OCX_HOME")
+        .current_dir(&long_path.base)
+        .output()
+        .unwrap();
+
+    // Windows documents no Win32 code for an over-long relative name (3 maps to 69, 206 to 74), so the line is the
+    // contract here; the exit-code mapping is the unit tests' in `main.rs`.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{stderr}");
+    assert_eq!(stderr.lines().count(), 1, "one ocx-shim line: {stderr}");
+    assert!(stderr.starts_with("ocx-shim: "), "{stderr}");
+    assert!(
+        stderr.contains("; the program path is ") && stderr.contains("cannot take the \\\\?\\ prefix"),
+        "{stderr}"
+    );
 }

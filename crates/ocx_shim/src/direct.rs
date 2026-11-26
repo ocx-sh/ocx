@@ -752,11 +752,15 @@ fn spawn_batch(launch: &Launch) -> Result<i32, ShimError> {
         // Full i32 passthrough: never remap or truncate.
         Ok(status) => {
             let code = status.code().unwrap_or(1);
-            // cmd.exe itself starts, then fails on a script path of MAX_PATH or more, so the cause is named after it.
+            // cmd.exe limits every path to MAX_PATH, so a script path that long never runs and a non-zero exit is
+            // cmd.exe's own refusal, never the script's.
             if code != 0
                 && let Some(hint) = super::length_limit_hint(3, 0, &launch.program)
             {
-                eprintln!("ocx-shim: {hint}");
+                eprintln!(
+                    "ocx-shim: failed to start {} through cmd.exe: exit {code}; {hint}",
+                    super::escape_controls(&launch.program)
+                );
             }
             Ok(code)
         }

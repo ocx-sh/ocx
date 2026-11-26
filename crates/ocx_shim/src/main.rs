@@ -826,6 +826,23 @@ mod tests {
             spawn_failure(3, &drive_path(259, "\\run.cmd")).length_limit_hint(10),
             None
         );
+        // Code 2 is a program-path code only; with a short working directory no code gives a clause.
+        assert!(
+            spawn_failure(2, &batch).length_limit_hint(10).is_some(),
+            "error 2 on a long batch path"
+        );
+        assert_eq!(
+            spawn_failure(2, short_exe).length_limit_hint(300),
+            None,
+            "error 2 is never a working-directory code"
+        );
+        for code in [5, 87] {
+            assert_eq!(
+                spawn_failure(code, &batch).length_limit_hint(10),
+                None,
+                "error {code} with a short working directory"
+            );
+        }
         let not_a_spawn = ShimError::SidecarNotFound { stem_path: batch };
         assert_eq!(not_a_spawn.length_limit_hint(300), None);
     }
