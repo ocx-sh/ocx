@@ -8,7 +8,7 @@
 - **Tier-grammar:** 5
 - **Updated:** 2026-11-26
 - **Active phase:** 0 — contract waves (CW, then CW-R)
-- **Step:** /hex-execute → P7 (step 4) and I1a running; CW P9 P3 P4 P1 P2 P6 P8 P5 merged
+- **Step:** /hex-execute → P7 (step 4) running; CW P9 P3 P4 P1 P2 P6 P8 P5 I1a merged; next I1b then P10
 - **Feature branch:** ocx `hex/bazel-rbe-rules-ocx` (pipelines on `hex/bazel-rbe-rules-ocx--<pipeline>`, worktrees under `.agents/worktrees/`); rules_ocx one branch `hex/bazel-rbe-rules-ocx` (§ rules_ocx branch mechanics)
 - **Last update:** 2026-11-26 (after 73e2701d: chore: accept the vendor ADR under goal-loop authority)
 - **Next:** /hex-execute .claude/artifacts/plan_vendor_rules_ocx.md
@@ -730,3 +730,8 @@ by line by the reviewer.
   names in `test/tests/test_trampoline_exec.py` and `crates/ocx_store/CLAUDE.md`; `.claude/rules/subsystem-ci.md` § Windows Shim
   Build Workflow; `rust-toolchain.toml` lists only the gnullvm targets; `crates/TEST_TARGET_MAP.toml` rows for
   `//crates/ocx_shim:direct_launch`, `batch_spawn` and the new `ocx_shim_bin_test` count.
+- 2026-11-26 — I1a merged `3e841fa8` (`b4b6b368`): report-root count 59, `vendor` on the `publishing` docs page,
+  `CODES_BY_KIND` vendor-manifest, tag-guard reads, test-target map rows, `ACCEPTANCE_MODULE_TARGETS` 222, stale blob names,
+  `docs_ia.md` rows, `_STEM_REWRITES` for `package_vendor`. It also raised the Bazel floor constants in
+  `scripts/bazel_{gate,floor}_proofs.py` for the new crate, derived from BUILD files, not measured: the first CI Bazel run
+  confirms the stage-3/4 floors. `rust-toolchain.toml` unchanged (the workflow adds the four musl/darwin targets itself).
