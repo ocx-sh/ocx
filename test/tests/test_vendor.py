@@ -9,6 +9,7 @@ carries its control: the same check shown failing on a deliberately bad input.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import posixpath
@@ -1120,3 +1121,160 @@ def test_vendor_id_is_a_function_of_platform_and_digests(
     a, b = _manifest(tmp_path / "a"), _manifest(tmp_path / "b")
     assert a["vendor_id"] == b["vendor_id"]
     assert [p["digest"] for p in a["packages"]] == [digest]
+
+
+# ---------------------------------------------------------------------------
+# A declared binary the content lacks (V-L52)
+# ---------------------------------------------------------------------------
+
+
+def _claims_missing_binary(ocx: OcxRunner, repo: str, tmp_path: Path) -> PackageInfo:
+    """`bin/hello` exists; the `binaries` claim also lists `corepack`, which the content lacks."""
+    return make_package(
+        ocx,
+        repo,
+        "1.0.0",
+        tmp_path,
+        bins=host_bins(["hello"]),
+        binaries=["hello", "corepack"],
+    )
+
+
+def test_declared_binary_missing_from_content_is_refused_with_65_naming_the_claim(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    pkg = _claims_missing_binary(ocx, unique_repo, tmp_path / "pkg")
+    out = tmp_path / "out"
+
+    result = _vendor(
+        ocx, _project(ocx, tmp_path / "proj", {"hello": pkg}), out, *HOST, check=False
+    )
+
+    assert result.returncode == EXIT_DATA, result.stderr
+    assert _detail(result) == "vendor_path_unrepresentable"
+    message = json.loads(result.stdout)["error"]["message"]
+    assert unique_repo in message, message
+    assert "1.0.0" in message, message
+    assert "binaries" in message, message
+    assert "corepack" in message, message
+    assert "does not hold" in message, message
+    assert "publisher" in message, message
+    assert not out.exists(), "a refused run leaves no directory"
+
+
+def test_declared_binary_missing_from_content_does_not_stop_a_manifest_only_run(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    pkg = _claims_missing_binary(ocx, unique_repo, tmp_path / "pkg")
+    out = tmp_path / "out"
+
+    _vendor(
+        ocx,
+        _project(ocx, tmp_path / "proj", {"hello": pkg}),
+        out,
+        "--manifest-only",
+        *HOST,
+    )
+
+    assert _manifest(out)["content"] == "absent"
+
+
+# ---------------------------------------------------------------------------
+# `--index`: lookups recorded (V-L55), the directory untouched (V-L60)
+# ---------------------------------------------------------------------------
+
+
+def _index_tree_hash(root: Path) -> dict[str, tuple[int, str | None]]:
+    """Every node under `root`: relative path -> (mode, sha256 of bytes; `None` for a directory)."""
+    nodes: dict[str, tuple[int, str | None]] = {}
+    for path in sorted(root.rglob("*")):
+        info = path.lstat()
+        digest = (
+            None
+            if stat.S_ISDIR(info.st_mode)
+            else hashlib.sha256(path.read_bytes()).hexdigest()
+        )
+        nodes[path.relative_to(root).as_posix()] = (stat.S_IMODE(info.st_mode), digest)
+    return nodes
+
+
+def _filled_index(ocx: OcxRunner, tmp_path: Path, pkg: PackageInfo) -> Path:
+    index = tmp_path / "index"
+    index.mkdir()
+    ocx.plain("--index", str(index), "index", "update", pkg.short)
+    return index
+
+
+def test_index_lookups_list_every_path_read_sorted_unique_and_relative(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    pkg = _publish(ocx, unique_repo, tmp_path, "pkg", bins=["hello"])
+    project = _project(ocx, tmp_path / "proj", {"hello": pkg})
+    index = _filled_index(ocx, tmp_path, pkg)
+    out = tmp_path / "out"
+
+    _ocx(
+        ocx,
+        project,
+        "--index",
+        str(index),
+        "vendor",
+        "-o",
+        str(out),
+        *HOST,
+        env=None,
+    )
+
+    lookups = _manifest(out)["index_lookups"]
+    assert lookups, "a run with --index reads at least the root document"
+    paths = [entry["path"] for entry in lookups]
+    assert paths == sorted(set(paths)), paths
+    for path in paths:
+        assert not path.startswith("/") and "\\" not in path, path
+        assert ".." not in path.split("/"), path
+    assert all(isinstance(entry["found"], bool) for entry in lookups), lookups
+    found = [entry["path"] for entry in lookups if entry["found"]]
+    assert found, lookups
+    for path in found:
+        assert (index / path).is_file(), path
+
+
+def test_index_lookups_are_absent_without_index(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    pkg = _publish(ocx, unique_repo, tmp_path, "pkg", bins=["hello"])
+    out = tmp_path / "out"
+
+    _vendor(ocx, _project(ocx, tmp_path / "proj", {"hello": pkg}), out, *HOST)
+
+    assert "index_lookups" not in _manifest(out)
+
+
+@pytest.mark.parametrize("filled", [True, False], ids=["filled", "lacks_the_package"])
+def test_vendor_with_index_leaves_the_index_directory_byte_identical(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, filled: bool
+) -> None:
+    pkg = _publish(ocx, unique_repo, tmp_path, "pkg", bins=["hello"])
+    project = _project(ocx, tmp_path / "proj", {"hello": pkg})
+    if filled:
+        index = _filled_index(ocx, tmp_path, pkg)
+    else:
+        index = tmp_path / "index"
+        index.mkdir()
+        (index / "sentinel.txt").write_text("keep\n", encoding="utf-8")
+    before = _index_tree_hash(index)
+    assert before, "the index fixture holds files, or the comparison proves nothing"
+
+    _ocx(
+        ocx,
+        project,
+        "--index",
+        str(index),
+        "vendor",
+        "-o",
+        str(tmp_path / "out"),
+        *HOST,
+        env=None,
+    )
+
+    assert _index_tree_hash(index) == before
