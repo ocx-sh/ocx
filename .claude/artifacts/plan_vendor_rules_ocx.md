@@ -8,7 +8,7 @@
 - **Tier-grammar:** 5
 - **Updated:** 2026-11-26
 - **Active phase:** 0 — contract waves (CW, then CW-R)
-- **Step:** /hex-execute → wave 1 (P1 P2 P8 running); CW P9 P3 P4 merged
+- **Step:** /hex-execute → P5 P6 P8 running; CW P9 P3 P4 P1 P2 merged
 - **Feature branch:** ocx `hex/bazel-rbe-rules-ocx` (pipelines on `hex/bazel-rbe-rules-ocx--<pipeline>`, worktrees under `.agents/worktrees/`); rules_ocx one branch `hex/bazel-rbe-rules-ocx` (§ rules_ocx branch mechanics)
 - **Last update:** 2026-11-26 (after 73e2701d: chore: accept the vendor ADR under goal-loop authority)
 - **Next:** /hex-execute .claude/artifacts/plan_vendor_rules_ocx.md
@@ -344,8 +344,8 @@ Commit `chore: vendor reader and set rule contract stubs`.
 |---|---|---|---|---|---|---|---|
 | CW | . | contract wave: C-001 real; stubs for C-002…C-024 surfaces; DP-1 | as § Contract wave CW | 0 | — | | merged |
 | CW-R | rules_ocx | contract wave: stubs for C-RO-02…C-RO-10, C-RO-12, C-RO-13, C-RO-16, C-RO-17 | as § Contract wave CW-R | 0 | CW | | pending |
-| P1 | . | C-014, C-015 (decode); V-62, V-72, V-73 units | `crates/ocx_env_apply/src/**`; `crates/ocx_util/src/{path,list}.rs`, `crates/ocx_util/Cargo.toml` and the `ocx_util` row of `scripts/crate_map.toml` (only if `ocx_util` keeps a use of a moved symbol); the 15 caller files of design § 12 A1; every other file using a moved symbol (candidates: `ocx_cli/src/conventions.rs`, `ocx_cli/src/command/self_group/activate.rs`, `ocx_project/src/error.rs`, `ocx_setup/src/profiles.rs`, `ocx_shell/src/ci/{github,gitlab}_flavor.rs`, `ocx_shell/src/shell/{reconcile,tests_git_bash}.rs`); `crates/ocx_package/src/metadata/env/list.rs` (doc link) | 1 | CW | | pending |
-| P2 | . | C-021; V-40 | `crates/ocx_schema/src/{lib,main}.rs`, `crates/ocx_schema/BUILD.bazel`, `crates/ocx_sdkgen/src/**`, `crates/ocx_sdkgen/tests/{compat_gate.rs,compat_corpus/**}`, `crates/ocx_sdkgen/BUILD.bazel`, `website/schema.taskfile.yml` | 1 | CW | | pending |
+| P1 | . | C-014, C-015 (decode); V-62, V-72, V-73 units | `crates/ocx_env_apply/src/**`; `crates/ocx_util/src/{path,list}.rs`, `crates/ocx_util/Cargo.toml` and the `ocx_util` row of `scripts/crate_map.toml` (only if `ocx_util` keeps a use of a moved symbol); the 15 caller files of design § 12 A1; every other file using a moved symbol (candidates: `ocx_cli/src/conventions.rs`, `ocx_cli/src/command/self_group/activate.rs`, `ocx_project/src/error.rs`, `ocx_setup/src/profiles.rs`, `ocx_shell/src/ci/{github,gitlab}_flavor.rs`, `ocx_shell/src/shell/{reconcile,tests_git_bash}.rs`); `crates/ocx_package/src/metadata/env/list.rs` (doc link) | 1 | CW | | merged |
+| P2 | . | C-021; V-40 | `crates/ocx_schema/src/{lib,main}.rs`, `crates/ocx_schema/BUILD.bazel`, `crates/ocx_sdkgen/src/**`, `crates/ocx_sdkgen/tests/{compat_gate.rs,compat_corpus/**}`, `crates/ocx_sdkgen/BUILD.bazel`, `website/schema.taskfile.yml` | 1 | CW | | merged |
 | P3 | . | C-007 (copy half), C-008, C-009; S-015 unit half | `crates/ocx_store/src/file_structure/{assemble.rs,vendor_layout.rs}`, `crates/ocx_store/src/hardlink.rs` | 1 | CW | review | merged |
 | P4 | . | C-005 (lane), C-006, C-022 (lane); V-46 unit control | `crates/ocx_package_manager/src/composer.rs`, `crates/ocx_package/src/metadata/env/resolver.rs`, `crates/ocx_package_manager/src/tasks/resolve.rs` | 1 | CW | | merged |
 | P5 | . | C-012, C-013, C-014 (apply), C-016…C-020; V-26, V-52, V-58 (dispatch unit), V-59…V-61, V-66 timer, V-68 | `crates/ocx_shim/src/**`, `crates/ocx_shim/tests/**`, `crates/ocx_shim/BUILD.bazel`, `crates/ocx_store/src/{shim.rs,shims/**}`, `crates/ocx_store/src/file_structure/shim_bin_store.rs`, `.github/workflows/build-windows-shims.yml`, `taskfiles/rust.taskfile.yml` | 2 | P1 | hard | pending |
@@ -699,3 +699,10 @@ by line by the reviewer.
   `expect(dead_code)` the merge left unfulfilled. `cargo check --workspace --all-targets --locked` green on the branch after it.
   Open from P4: on a Windows host `PackageDir::content()` joins with `\\` before `content` (P7/P10 to check against C-005).
   For I1: `ocx_schema` `reports.rs` hard-codes 58 roots (now 59) and `docs.rs` needs a group for `package vendor`.
+- 2026-11-26 — P1 merged `3096dec4` (functions moved, 15+ callers rewired, `ocx_util::{path,list}` deleted, sidecar `validate`).
+  P2 merged `36e5cc57` (schema kind, four-document gate, corpus red/green cases). Branch `cargo check --workspace --all-targets
+  --locked` green after P2. Open from P2, for P7 (owns `ocx_package/src/vendor/*.rs`): `Package.tree`, `Environment.separator`,
+  `Selection.launcher_path` need the `ABSENT_WHEN_NONE` schemars extension, else the gate reds U01 `anyOf` once I1 writes the
+  golden. For I1: `test/lint/test_compat_corpus.py` `CODES_BY_KIND` lacks a `vendor-manifest` key. Pre-existing, not this branch:
+  `managed_config::tests::a_deadline_cutting_a_companion_install_leaves_no_half_installed_state` fails on the branch before P1
+  (file untouched by this plan; `ocx.sh` resolves through this host's hosts override).
