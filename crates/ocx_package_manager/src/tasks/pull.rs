@@ -630,9 +630,14 @@ async fn setup_owned_impl(
         placements.push(placement);
     }
     let extract_watch = Stopwatch::start(timed);
-    ocx_store::file_structure::assemble_from_layers_with_layouts(&sources, &placements, &pkg.content())
-        .await
-        .map_err(|error| PackageErrorKind::Internal(error.into()))?;
+    ocx_store::file_structure::assemble_from_layers_with_layouts(
+        &sources,
+        &placements,
+        &pkg.content(),
+        ocx_store::hardlink::LinkMode::Hardlink,
+    )
+    .await
+    .map_err(|error| PackageErrorKind::Internal(error.into()))?;
 
     if let Some(entrypoints) = metadata.entrypoints()
         && !entrypoints.is_empty()

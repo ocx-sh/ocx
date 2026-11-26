@@ -9,6 +9,29 @@ use ocx_util::error::FileError;
 
 type Result<T> = std::result::Result<T, FileError>;
 
+/// How assembly places a regular file: share the layer's inode, or write a private copy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkMode {
+    /// Hardlink to the layer file; `$OCX_HOME` must sit on one volume.
+    Hardlink,
+    /// Private copy of data and masked mode, for trees that leave the store.
+    Copy,
+}
+
+impl LinkMode {
+    /// [`create_in_existing_parent`] for `Hardlink`; a data-and-mode copy for `Copy`.
+    pub(crate) fn place_in_existing_parent(
+        self,
+        source: impl AsRef<std::path::Path>,
+        dest: impl AsRef<std::path::Path>,
+    ) -> Result<()> {
+        match self {
+            Self::Hardlink => create_in_existing_parent(source, dest),
+            Self::Copy => unimplemented!("LinkMode::Copy is implemented by the vendor copy-assembly step"),
+        }
+    }
+}
+
 /// Hardlinks `link` to `source`, creating missing parents.
 ///
 /// # Errors

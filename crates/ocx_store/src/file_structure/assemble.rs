@@ -15,6 +15,8 @@ use tokio::task::JoinSet;
 use ocx_util::error::FileError;
 use ocx_util::fs::path::LayerPlacement;
 
+use crate::hardlink::LinkMode;
+
 type Result<T> = std::result::Result<T, AssembleError>;
 
 /// Failure assembling a layer tree; `SymlinkWalk` stays its own arm so a symlink refusal exits 64, not 74.
@@ -154,6 +156,7 @@ pub async fn assemble_from_layers_with_layouts(
     sources: &[&Path],
     placements: &[LayerPlacement],
     dest_content: &Path,
+    link_mode: LinkMode,
 ) -> Result<AssemblyStats> {
     if placements.len() != sources.len() {
         return Err(file_error(
@@ -209,7 +212,7 @@ pub async fn assemble_from_layers_with_layouts(
         }
     }
 
-    let walk_stats = run_merge_walker(seed_roots, dest_content, entries_seen, max_entries).await?;
+    let walk_stats = run_merge_walker(seed_roots, dest_content, entries_seen, max_entries, link_mode).await?;
     stats.merge(walk_stats);
     Ok(stats)
 }
@@ -313,7 +316,7 @@ async fn assemble_from_layers_with_cap(
         .map(|(i, s)| LayerSource::rooted(i, s.to_path_buf()))
         .collect();
     let entries_seen = Arc::new(AtomicUsize::new(0));
-    run_merge_walker(seed_roots, dest_content, entries_seen, max_entries).await
+    run_merge_walker(seed_roots, dest_content, entries_seen, max_entries, LinkMode::Hardlink).await
 }
 
 /// Semaphore-bounded, directory-parallel merge of `seed_roots` into `dest_content`.
@@ -322,6 +325,7 @@ async fn run_merge_walker(
     dest_content: &Path,
     entries_seen: Arc<AtomicUsize>,
     max_entries: usize,
+    link_mode: LinkMode,
 ) -> Result<AssemblyStats> {
     let semaphore = Arc::new(Semaphore::new(DEFAULT_CONCURRENCY));
     let dest_root = dest_content.to_path_buf();
@@ -340,6 +344,7 @@ async fn run_merge_walker(
         dest_root: dest_root.clone(),
         entries_seen,
         max_entries,
+        link_mode,
         join_set_tx: tx.clone(),
     };
 
@@ -459,6 +464,7 @@ struct WalkContext {
     dest_root: PathBuf,
     entries_seen: Arc<AtomicUsize>,
     max_entries: usize,
+    link_mode: LinkMode,
     join_set_tx: tokio::sync::mpsc::UnboundedSender<SpawnRequest>,
 }
 
@@ -473,6 +479,7 @@ async fn process_directory(req: SpawnRequest, ctx: WalkContext) -> Result<Assemb
         dest_root,
         entries_seen,
         max_entries,
+        link_mode,
         join_set_tx,
     } = ctx;
     let mut stats = AssemblyStats::default();
@@ -575,7 +582,7 @@ async fn process_directory(req: SpawnRequest, ctx: WalkContext) -> Result<Assemb
             match &contributor.kind {
                 EntryKind::File { size } => {
                     // Safe only because every `dest_dir` is created before its request is posted.
-                    crate::hardlink::create_in_existing_parent(&contributor.src_path, &dest_path)?;
+                    link_mode.place_in_existing_parent(&contributor.src_path, &dest_path)?;
                     stats.files_hardlinked += 1;
                     stats.bytes_hardlinked += size;
                 }
@@ -3058,9 +3065,10 @@ mod tests {
         std::fs::create_dir_all(root.join("pkg")).unwrap();
         let dest = root.join("pkg/content");
 
-        let stats = assemble_from_layers_with_layouts(&[src.as_path()], &uniform_strip(1, 1), &dest)
-            .await
-            .unwrap();
+        let stats =
+            assemble_from_layers_with_layouts(&[src.as_path()], &uniform_strip(1, 1), &dest, LinkMode::Hardlink)
+                .await
+                .unwrap();
 
         assert_eq!(stats.files_hardlinked, 2, "both files under topdir must be placed");
         assert!(dest.join("bin/tool").is_file(), "bin/tool must be hoisted to dest root");
@@ -3091,9 +3099,10 @@ mod tests {
 
         std::fs::create_dir_all(root.join("pkg_strip0")).unwrap();
         let dest_strip0 = root.join("pkg_strip0/content");
-        let stats_strip0 = assemble_from_layers_with_layouts(&[src.as_path()], &uniform_strip(1, 0), &dest_strip0)
-            .await
-            .unwrap();
+        let stats_strip0 =
+            assemble_from_layers_with_layouts(&[src.as_path()], &uniform_strip(1, 0), &dest_strip0, LinkMode::Hardlink)
+                .await
+                .unwrap();
 
         assert_eq!(
             stats_strip0, stats_verbatim,
@@ -3119,9 +3128,10 @@ mod tests {
         std::fs::create_dir_all(root.join("pkg")).unwrap();
         let dest = root.join("pkg/content");
 
-        let stats = assemble_from_layers_with_layouts(&[src.as_path()], &uniform_strip(1, 1), &dest)
-            .await
-            .unwrap();
+        let stats =
+            assemble_from_layers_with_layouts(&[src.as_path()], &uniform_strip(1, 1), &dest, LinkMode::Hardlink)
+                .await
+                .unwrap();
 
         assert!(
             dest.join("bin/tool").is_file(),
@@ -3152,9 +3162,10 @@ mod tests {
         std::fs::create_dir_all(root.join("pkg")).unwrap();
         let dest = root.join("pkg/content");
 
-        let stats = assemble_from_layers_with_layouts(&[src.as_path()], &uniform_strip(1, 1), &dest)
-            .await
-            .unwrap();
+        let stats =
+            assemble_from_layers_with_layouts(&[src.as_path()], &uniform_strip(1, 1), &dest, LinkMode::Hardlink)
+                .await
+                .unwrap();
 
         assert!(
             dest.is_dir(),
@@ -3192,9 +3203,10 @@ mod tests {
         std::fs::create_dir_all(root.join("pkg")).unwrap();
         let dest = root.join("pkg/content");
 
-        let stats = assemble_from_layers_with_layouts(&[src.as_path()], &uniform_strip(1, 1), &dest)
-            .await
-            .unwrap();
+        let stats =
+            assemble_from_layers_with_layouts(&[src.as_path()], &uniform_strip(1, 1), &dest, LinkMode::Hardlink)
+                .await
+                .unwrap();
 
         let link = dest.join("lib/libfoo.so");
         assert!(link.is_symlink(), "the symlink must survive strip");
@@ -3225,7 +3237,7 @@ mod tests {
         std::fs::create_dir_all(root.join("pkg")).unwrap();
         let dest = root.join("pkg/content");
 
-        assemble_from_layers_with_layouts(&[src.as_path()], &uniform_strip(1, 1), &dest)
+        assemble_from_layers_with_layouts(&[src.as_path()], &uniform_strip(1, 1), &dest, LinkMode::Hardlink)
             .await
             .unwrap();
 
@@ -3255,9 +3267,10 @@ mod tests {
         std::fs::create_dir_all(root.join("pkg")).unwrap();
         let dest = root.join("pkg/content");
 
-        let stats = assemble_from_layers_with_layouts(&[src.as_path()], &uniform_strip(1, 1), &dest)
-            .await
-            .unwrap();
+        let stats =
+            assemble_from_layers_with_layouts(&[src.as_path()], &uniform_strip(1, 1), &dest, LinkMode::Hardlink)
+                .await
+                .unwrap();
 
         let link = dest.join("lib/libfoo.so");
         assert!(link.is_symlink(), "libfoo.so must be a symlink after strip");
@@ -3291,7 +3304,7 @@ mod tests {
         std::fs::create_dir_all(root.join("pkg")).unwrap();
         let dest = root.join("pkg/content");
 
-        let err = assemble_from_layers_with_layouts(&[src.as_path()], &uniform_strip(1, 1), &dest)
+        let err = assemble_from_layers_with_layouts(&[src.as_path()], &uniform_strip(1, 1), &dest, LinkMode::Hardlink)
             .await
             .expect_err("an intra-layer post-strip collision must fail closed");
 
@@ -3320,9 +3333,14 @@ mod tests {
         std::fs::create_dir_all(root.join("pkg")).unwrap();
         let dest = root.join("pkg/content");
 
-        let err = assemble_from_layers_with_layouts(&[src_a.as_path(), src_b.as_path()], &uniform_strip(2, 1), &dest)
-            .await
-            .expect_err("a cross-layer post-strip collision must fail closed");
+        let err = assemble_from_layers_with_layouts(
+            &[src_a.as_path(), src_b.as_path()],
+            &uniform_strip(2, 1),
+            &dest,
+            LinkMode::Hardlink,
+        )
+        .await
+        .expect_err("a cross-layer post-strip collision must fail closed");
 
         let message = assembly_error_message(&err).to_lowercase();
         assert!(
@@ -3365,9 +3383,14 @@ mod tests {
                 prefix: rel("share/b"),
             },
         ];
-        assemble_from_layers_with_layouts(&[src_a.as_path(), src_b.as_path()], &placements, &dest)
-            .await
-            .unwrap();
+        assemble_from_layers_with_layouts(
+            &[src_a.as_path(), src_b.as_path()],
+            &placements,
+            &dest,
+            LinkMode::Hardlink,
+        )
+        .await
+        .unwrap();
 
         assert!(dest.join("share/a/tool").is_file(), "layer A placed under its prefix");
         assert!(dest.join("share/b/data").is_file(), "layer B placed under its prefix");
@@ -3402,9 +3425,14 @@ mod tests {
                 prefix: rel("share"),
             },
         ];
-        let err = assemble_from_layers_with_layouts(&[src_a.as_path(), src_b.as_path()], &placements, &dest)
-            .await
-            .expect_err("colliding transformed destinations must fail closed");
+        let err = assemble_from_layers_with_layouts(
+            &[src_a.as_path(), src_b.as_path()],
+            &placements,
+            &dest,
+            LinkMode::Hardlink,
+        )
+        .await
+        .expect_err("colliding transformed destinations must fail closed");
         let message = assembly_error_message(&err).to_lowercase();
         assert!(message.contains("overlap"), "must be a LayerOverlap, got: {message}");
     }
@@ -3433,7 +3461,7 @@ mod tests {
             strip: 0,
             prefix: rel("share/lib"),
         }];
-        assemble_from_layers_with_layouts(&[src_a.as_path()], &placements, &dest)
+        assemble_from_layers_with_layouts(&[src_a.as_path()], &placements, &dest, LinkMode::Hardlink)
             .await
             .expect_err("a symlinked prefix ancestor must be refused");
 
@@ -3458,7 +3486,7 @@ mod tests {
         let dest = root.join("pkg/content");
 
         let placements = uniform_strip(1, 0);
-        assemble_from_layers_with_layouts(&[src_a.as_path()], &placements, &dest)
+        assemble_from_layers_with_layouts(&[src_a.as_path()], &placements, &dest, LinkMode::Hardlink)
             .await
             .unwrap();
 
@@ -3484,7 +3512,7 @@ mod tests {
 
         // One source, two placements.
         let placements = uniform_strip(2, 0);
-        let err = assemble_from_layers_with_layouts(&[src.as_path()], &placements, &dest)
+        let err = assemble_from_layers_with_layouts(&[src.as_path()], &placements, &dest, LinkMode::Hardlink)
             .await
             .expect_err("a placement/source arity mismatch must be rejected");
         let message = assembly_error_message(&err).to_lowercase();
@@ -3513,9 +3541,14 @@ mod tests {
         let dest = root.join("pkg/content");
 
         let placements = uniform_strip(2, 0);
-        assemble_from_layers_with_layouts(&[src_a.as_path(), src_b.as_path()], &placements, &dest)
-            .await
-            .unwrap();
+        assemble_from_layers_with_layouts(
+            &[src_a.as_path(), src_b.as_path()],
+            &placements,
+            &dest,
+            LinkMode::Hardlink,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(
             std::fs::read(dest.join("README.md")).unwrap(),
@@ -3526,6 +3559,30 @@ mod tests {
             std::fs::read(dest.join("readme.md")).unwrap(),
             b"lower",
             "the byte-distinct lowercase entry is placed too (no case-fold)"
+        );
+    }
+
+    /// `Copy` writes private bytes: equal content, a different inode than the layer file.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn copy_mode_places_private_copy() {
+        use std::os::unix::fs::MetadataExt;
+
+        let (_dir, root) = setup();
+        let source = make_file(&root, "layer/content/bin/tool", b"tool bytes");
+        let src = root.join("layer/content");
+        std::fs::create_dir_all(root.join("pkg")).unwrap();
+        let dest = root.join("pkg/content");
+
+        assemble_from_layers_with_layouts(&[src.as_path()], &uniform_strip(1, 0), &dest, LinkMode::Copy)
+            .await
+            .unwrap();
+
+        let placed = dest.join("bin/tool");
+        assert_eq!(std::fs::read(&placed).unwrap(), b"tool bytes");
+        assert_ne!(
+            std::fs::metadata(&placed).unwrap().ino(),
+            std::fs::metadata(&source).unwrap().ino()
         );
     }
 }

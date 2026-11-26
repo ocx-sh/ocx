@@ -33,6 +33,11 @@ pub const SHIM_BYTES: &[u8] = &[];
 #[cfg(not(target_os = "windows"))]
 pub const SHIM_SHA256: &str = "";
 
+/// The launcher blob serving `platform`, one per target triple; `None` when none exists (e.g. `wasip1/wasm`).
+pub fn blob_for(_platform: &ocx_oci::Platform) -> Option<&'static [u8]> {
+    unimplemented!("per-platform launcher blobs are embedded by the direct-launcher step")
+}
+
 /// Whether `image` carries a Win32 VERSIONINFO resource, whose `OriginalFilename` would contradict every hardlinked name.
 pub fn contains_version_resource(image: &[u8]) -> bool {
     const STRUCTURE_KEYS: [&str; 2] = ["VS_VERSION_INFO", "StringFileInfo"];
@@ -57,6 +62,7 @@ const _: () = assert!(
 
 #[cfg(test)]
 mod tests {
+    use super::blob_for;
     use super::{SHIM_BYTES, SHIM_SHA256, contains_version_resource, published_blob_is_intact};
     // `SHIM_SIZE_BUDGET` is only asserted on Windows builds (the only targets
     // that embed a non-empty blob); importing it unconditionally would be an
@@ -474,5 +480,32 @@ mod tests {
                  {published_len} must be admitted and the pre-check stay existence-only"
             );
         }
+    }
+
+    /// One blob per target triple, each within budget; a libc feature does not change the triple.
+    #[test]
+    fn blob_for_serves_the_six_launcher_targets() {
+        for platform in [
+            "linux/amd64",
+            "linux/arm64",
+            "darwin/amd64",
+            "darwin/arm64",
+            "windows/amd64",
+            "windows/arm64",
+        ] {
+            let parsed: ocx_oci::Platform = platform.parse().unwrap();
+            let blob = blob_for(&parsed).unwrap_or_else(|| panic!("no launcher blob for {platform}"));
+            assert!(!blob.is_empty(), "{platform}");
+            assert!(blob.len() <= super::SHIM_SIZE_BUDGET, "{platform}");
+        }
+        let glibc: ocx_oci::Platform = "linux/amd64+libc.glibc".parse().unwrap();
+        let bare: ocx_oci::Platform = "linux/amd64".parse().unwrap();
+        assert_eq!(blob_for(&glibc), blob_for(&bare));
+    }
+
+    #[test]
+    fn blob_for_has_no_blob_for_wasm() {
+        let wasm: ocx_oci::Platform = "wasip1/wasm".parse().unwrap();
+        assert_eq!(blob_for(&wasm), None);
     }
 }
