@@ -1274,6 +1274,16 @@ pub(super) async fn list_tree(
                     .await
                     .map_err(|error| VendorError::Package(crate::Error::InternalFile(path.clone(), error)))?;
                 let target = target.to_str().ok_or_else(|| unrepresentable(&target))?.to_owned();
+                // `..` and `.` are the escape check's; every other segment must be a legal Windows name,
+                // so `..\x`, `C:\x` and device names cannot hide in a single Unix-legal segment.
+                if platform_is_windows
+                    && target
+                        .split('/')
+                        .filter(|segment| !matches!(*segment, "" | "." | ".."))
+                        .any(|segment| ocx_env_apply::windows_path::check_segment(segment).is_err())
+                {
+                    return Err(unrepresentable(Path::new(&target)));
+                }
                 directories_with_links.insert(relative_directory.clone());
                 links.push(LinkEntry { path: relative, target });
             } else if file_type.is_file() {
@@ -1550,6 +1560,41 @@ mod tests {
         let error = list_tree(&layout, CONTENT, true).await.expect_err("a Windows target");
 
         assert!(matches!(error, VendorError::PathUnrepresentable { .. }), "{error:?}");
+    }
+
+    /// Link targets a Unix host accepts as one plain segment are refused for a Windows target.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_link_target_breaking_windows_rules_is_refused_only_for_a_windows_target() {
+        for target in ["..\\x", "C:\\x", "sub/CON", "a:b"] {
+            let (_root, layout) = tree_root(&["bin/tool", "bin/sub/x"]);
+            link(&layout, "bin/l", target);
+
+            list_tree(&layout, CONTENT, false)
+                .await
+                .unwrap_or_else(|error| panic!("a Linux target keeps {target:?}: {error:?}"));
+            let error = list_tree(&layout, CONTENT, true)
+                .await
+                .expect_err("a Windows target refuses it");
+            assert!(
+                matches!(error, VendorError::PathUnrepresentable { .. }),
+                "{target:?}: {error:?}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_plain_relative_link_target_is_accepted_on_both_platforms() {
+        for windows in [false, true] {
+            let (_root, layout) = tree_root(&["bin/tool", "share/doc/readme.txt"]);
+            link(&layout, "bin/up", "../share/doc/readme.txt");
+            link(&layout, "bin/same", "tool");
+
+            let tree = list_tree(&layout, CONTENT, windows).await.expect("plain targets list");
+
+            assert_eq!(tree.links.len(), 2, "windows={windows}");
+        }
     }
 
     // ── Selection half: closure, shared platforms, trust ─────────────────────
