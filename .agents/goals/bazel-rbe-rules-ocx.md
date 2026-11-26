@@ -57,6 +57,8 @@ with an unclear cause — runs this protocol:
 Recorded decisions:
 
 - Question: the entry reads "Run the /hex-architect skill on .agents/discussions/bazel-rbe-rules-ocx.md at tier high.", and `/hex-architect` refuses a discussion at `State: handed-off → loop` as path input (its step 1, with the fix "paste the decision as free text"). Research: `.claude/skills/hex-architect/SKILL.md`, the state table of its fast path. Decision: the run invokes the skill at tier `high` on the free text "rules_ocx under remote execution, per .agents/discussions/bazel-rbe-rules-ocx.md". The source and the tier are unchanged.
+- Question: who writes to the git repository of `ocx-sh/rules_ocx` during execution. Research: the pasted prompt's I6 ("other-repo acts are yours alone") and the plan's "rules_ocx branch mechanics" and "External acts". Decision: the meta-orchestrator creates the one branch `hex/bazel-rbe-rules-ocx` and its worktree, and makes every commit and push there. Sub-orchestrators and workers edit files and run tests in that worktree and make no git write in that repository. The plan's detached per-pipeline worktrees are not used: the pipelines of one wave are file-disjoint and share the branch's worktree.
+- Question: whether the run dispatches ocx `verify-deep.yml` and `build-windows-shims.yml`, which the plan lists as external acts 2 and 3. Research: the pasted grants name `release.yml` with `mode=dev` only; `.agents/memory/hex.md` records the owner's "No deep dispatch" preference. Decision: neither is dispatched by this run. `task satellite:verify` runs locally before finalize instead, and the signed shim blobs are reported as an owner step in the DONE block unless an existing pull-request check produces them.
 
 ## Loop shape
 
