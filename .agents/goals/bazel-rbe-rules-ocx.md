@@ -8,8 +8,7 @@ Source: .agents/discussions/bazel-rbe-rules-ocx.md · Written: 2026-11-26 by /he
 - [x] "ocx has a native launcher that starts a tool with no `ocx`" — evidence: https://github.com/ocx-sh/ocx/pull/784 — `crates/ocx_shim` with six committed blobs; the six native legs of `.github/workflows/launcher-blobs.yml` pass on head `95759e78`, and `vendor_launcher::launcher_starts_on_image_without_a_shell` passes.
 - [x] "rules_ocx builds every repository from the manifest alone" — evidence: https://github.com/ocx-sh/rules_ocx/pull/36 at `401c9c4` — `docs/concepts/design.md`; job `test` of https://github.com/ocx-sh/rules_ocx/actions/runs/45828193685 passes.
 - [x] "rules_ocx has a remote-execution rig that runs in its CI" — evidence: https://github.com/ocx-sh/rules_ocx/pull/36 — `e2e/rbe/` and `.github/workflows/verify-rbe.yml`; jobs `rig-buildbarn` and `rig-nativelink` pass in https://github.com/ocx-sh/rules_ocx/actions/runs/45828193723.
-- [ ] "The rules_ocx pull request is green against the build of the ocx pull request" — evidence: the commit, PR comment or
-  artifact that satisfies it.
+- [x] "The rules_ocx pull request is green against the build of the ocx pull request" — evidence: every check of https://github.com/ocx-sh/rules_ocx/pull/36 passes at `401c9c4`, whose `e2e/rbe/ocx-under-test.txt` pins dev build `0.6.8-pr784_20261126125712` of ocx commit `6718aacf`; deep run https://github.com/ocx-sh/rules_ocx/actions/runs/45822059871 passes on Linux, macOS and Windows against the previous dev build.
 - [ ] "Every check under Verification is shown red once and green once" — evidence: the commit, PR comment or
   artifact that satisfies it.
 - [ ] "The owner's rules hold in both repositories" — evidence: the commit, PR comment or
