@@ -1418,6 +1418,10 @@ mod tests {
             path: PathBuf::from("/out"),
         };
         assert_eq!(error.classify(), Some(ExitCode::UsageError));
+        assert_eq!(
+            error.to_string(),
+            "vendor output '/out' exists and is not an empty directory; name a new or empty directory"
+        );
     }
 
     #[test]
