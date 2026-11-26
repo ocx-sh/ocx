@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import ClassVar
 
 import pytest
+import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -398,4 +399,89 @@ def test_non_release_tags_never_count(tmp_path: Path) -> None:
     repo.tag("v2.0.0-rc.1")
     repo.tag("0.3.1")
     repo.commit({"README": "more\n"})
+    assert baseline_problems(repo.path) == []
+
+
+# --- the `contract:rotate` task body itself ------------------------------------
+
+TASKFILE = PROJECT_ROOT / "taskfiles" / "contract.taskfile.yml"
+LEDGER = f"{CONTRACT_DIR}/ledger.toml"
+
+
+def rotation_script() -> str:
+    """The rotation step of `contract:rotate`, its template variables resolved as the taskfile declares them."""
+    document = yaml.safe_load(TASKFILE.read_text(encoding="utf-8"))
+    variables: dict[str, str] = {}
+    for name, value in document["vars"].items():
+        for known, resolved in variables.items():
+            value = value.replace(f"{{{{.{known}}}}}", resolved)
+        variables[name] = value
+    script = document["tasks"]["rotate"]["cmds"][0]
+    for name, value in variables.items():
+        script = script.replace(f"{{{{.{name}}}}}", value)
+    assert "{{" not in script and "refs/tags/$TAG" in script, (
+        "the rotation body was not read whole"
+    )
+    return script
+
+
+def run_rotation(repo: Repo, tag: str) -> subprocess.CompletedProcess[str]:
+    env = {k: v for k, v in Repo.ENV.items() if k not in _GIT_REDIRECTS} | {"TAG": tag}
+    return subprocess.run(
+        ["bash", "-c", rotation_script()],
+        cwd=repo.path,
+        env=env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+
+
+def test_the_rotation_task_body_parses() -> None:
+    parsed = subprocess.run(
+        ["bash", "-n", "-c", rotation_script()],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    assert parsed.returncode == 0, parsed.stderr
+
+
+def test_the_rotation_task_writes_release_and_every_golden_of_the_tag(
+    tmp_path: Path,
+) -> None:
+    repo = Repo(tmp_path)
+    repo.commit(
+        {**GOLDENS, **VENDOR_GOLDEN, LEDGER: "# format\n\n[[break]]\nroot = 1\n"},
+        "release",
+    )
+    repo.tag("v1.0.0", annotated=True)
+    done = run_rotation(repo, "v1.0.0")
+    assert done.returncode == 0, done.stderr
+    baseline = repo.path / BASELINE_DIR
+    assert (baseline / "RELEASE").read_text(encoding="utf-8") == "v1.0.0\n"
+    for name in BASELINE_FILES:
+        assert (baseline / name).read_bytes() == blob_at(
+            repo.path, "v1.0.0", f"{GOLDEN_DIR}/{name}"
+        ), name
+    assert (repo.path / LEDGER).read_text(encoding="utf-8") == "# format\n\n"
+    repo.commit({}, "chore(contract): rotate the baseline to v1.0.0")
+    assert baseline_problems(repo.path) == []
+
+
+def test_rotating_to_a_tag_without_the_vendor_manifest_drops_the_old_copy(
+    tmp_path: Path,
+) -> None:
+    repo = Repo(tmp_path)
+    repo.commit({**GOLDENS, **VENDOR_GOLDEN, LEDGER: "# format\n"}, "release")
+    repo.tag("v1.0.0", annotated=True)
+    assert run_rotation(repo, "v1.0.0").returncode == 0
+    repo.commit({f"{GOLDEN_DIR}/vendor-manifest.json": None}, "drop the golden")
+    repo.tag("v1.1.0", annotated=True)
+    done = run_rotation(repo, "v1.1.0")
+    assert done.returncode == 0, done.stderr
+    assert not (repo.path / BASELINE_DIR / "vendor-manifest.json").exists()
+    repo.commit({}, "chore(contract): rotate the baseline to v1.1.0")
     assert baseline_problems(repo.path) == []
