@@ -8,7 +8,7 @@
 - **Tier-grammar:** 5
 - **Updated:** 2026-11-26
 - **Active phase:** 0 — contract waves (CW, then CW-R)
-- **Step:** /hex-execute → P7 (step 4) running; CW P9 P3 P4 P1 P2 P6 P8 P5 I1a merged; next I1b then P10
+- **Step:** /hex-execute → I1b (hub regeneration); every code pipeline merged; next P10
 - **Feature branch:** ocx `hex/bazel-rbe-rules-ocx` (pipelines on `hex/bazel-rbe-rules-ocx--<pipeline>`, worktrees under `.agents/worktrees/`); rules_ocx one branch `hex/bazel-rbe-rules-ocx` (§ rules_ocx branch mechanics)
 - **Last update:** 2026-11-26 (after 73e2701d: chore: accept the vendor ADR under goal-loop authority)
 - **Next:** /hex-execute .claude/artifacts/plan_vendor_rules_ocx.md
@@ -355,7 +355,7 @@ Commit `chore: vendor reader and set rule contract stubs`.
 | P4 | . | C-005 (lane), C-006, C-022 (lane); V-46 unit control | `crates/ocx_package_manager/src/composer.rs`, `crates/ocx_package/src/metadata/env/resolver.rs`, `crates/ocx_package_manager/src/tasks/resolve.rs` | 1 | CW | | merged |
 | P5 | . | C-012, C-013, C-014 (apply), C-016…C-020; V-26, V-52, V-58 (dispatch unit), V-59…V-61, V-66 timer, V-68 | `crates/ocx_shim/src/**`, `crates/ocx_shim/tests/**`, `crates/ocx_shim/BUILD.bazel`, `crates/ocx_store/src/{shim.rs,shims/**}`, `crates/ocx_store/src/file_structure/shim_bin_store.rs`, `.github/workflows/build-windows-shims.yml`, `taskfiles/rust.taskfile.yml` | 2 | P1 | hard | merged |
 | P6 | . | C-015 (write); S-004 writer; V-62, V-72 writer | `crates/ocx_package_manager/src/launcher/{direct,generate}.rs`, `crates/ocx_package_manager/src/tasks/render_toolchain.rs`, `crates/ocx_env/src/vars/tests.rs` | 2 | P1 | | merged |
-| P7 | . | C-002…C-004, C-007, C-009…C-011, C-022…C-024 orchestration; S-007, S-013, S-014 | `crates/ocx_package_manager/src/tasks/{vendor.rs,pull.rs,toolchain_names.rs}`, `crates/ocx_package/src/vendor.rs`, `crates/ocx_package/src/vendor/*.rs` (`vendor_id` and any manifest-type fix) | 3 | P3, P4, P5, P6 | hard | pending |
+| P7 | . | C-002…C-004, C-007, C-009…C-011, C-022…C-024 orchestration; S-007, S-013, S-014 | `crates/ocx_package_manager/src/tasks/{vendor.rs,pull.rs,toolchain_names.rs}`, `crates/ocx_package/src/vendor.rs`, `crates/ocx_package/src/vendor/*.rs` (`vendor_id` and any manifest-type fix) | 3 | P3, P4, P5, P6 | hard | merged |
 | P8 | . | acceptance for C-001…C-024 and S-004…S-007, S-013…S-015 | `test/tests/{test_vendor,test_package_vendor,test_vendor_launcher,test_vendor_parity}.py`, `test/src/vendor_fixtures.py`, `test/fixtures/vendor/**`, `test/BUILD.bazel` (`module_data`) | 1 | CW | | merged |
 | P9 | . | goal criterion 1 docs; AI-config upkeep | `website/src/content/docs/reference/vendor-manifest.md`, `website/src/content/docs/guides/vendor.mdx`, `website/astro.config.mjs`, `AGENTS.md`, `.claude/rules/{arch-principles,subsystem-cli-commands,subsystem-package-manager,subsystem-file-structure,subsystem-interface-contract,product-context}.md` | 1 | CW | | merged |
 | I1 | . | integration gate: hub files regenerated once (§ Hub files), `cargo check --workspace --all-targets --locked`, the touched crates' unit suites, `task website:reference:generate` | the § Hub files list (ocx side) | 4 | P1…P9 | | pending |
@@ -735,3 +735,11 @@ by line by the reviewer.
   `docs_ia.md` rows, `_STEM_REWRITES` for `package_vendor`. It also raised the Bazel floor constants in
   `scripts/bazel_{gate,floor}_proofs.py` for the new crate, derived from BUILD files, not measured: the first CI Bazel run
   confirms the stage-3/4 floors. `rust-toolchain.toml` unchanged (the workflow adds the four musl/darwin targets itself).
+- 2026-11-26 — P7 merged `bde10a59` (steps f977815c, 491fb4ed, cc9a3bef, a9db8faf, cda0b360, ab64ce27). Selection reuses
+  `select_tool_set` + `filter_by_names` + `check_duplicate_selection` in the CLI glue and `resolve_selected_tools` in the task
+  (DP-20; the request carries the selected tools, since `filter_by_names` lives in `ocx_cli`). Selection names fold case for
+  windows and darwin targets; launchers take the target's windows-ness. Package tier with no leaf for the platform: existing
+  79 `package_not_found` (design § 5.2 silent). P7's run of P8's modules: 41 passed, 16 failed, 7 skipped; the 16 are
+  test/design disagreements handed to P10 (manifest-only equality keeps `content`, trust code 79 vs 81, Bazel-name scan reads
+  the manifest, symlinked home never reaches a value, setuid lost in the fixture, a `..` link that stays inside, wasm fixture
+  claims no binary, package-tier no-leaf code, parity reads `$OCX_HOME/packages`, three launcher-test harness defects).
