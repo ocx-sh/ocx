@@ -290,7 +290,14 @@ const ADR_MAP: &[(&str, &[&str])] = &[
     ),
     (
         "ocx_store",
-        &["ocx_env_apply", "ocx_config", "ocx_oci", "ocx_util", "ocx_exit", "ocx_env"],
+        &[
+            "ocx_env_apply",
+            "ocx_config",
+            "ocx_oci",
+            "ocx_util",
+            "ocx_exit",
+            "ocx_env",
+        ],
     ),
     (
         "ocx_index",
