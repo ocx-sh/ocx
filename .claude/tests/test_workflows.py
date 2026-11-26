@@ -3133,6 +3133,18 @@ def test_every_committed_launcher_blob_runs_on_its_own_os_and_architecture() -> 
     assert 'bash scripts/launcher_blob_check.sh "$BLOB" "$TARGET"' in runs, f"{LAUNCHER_BLOBS.name} never runs the check: {runs}"
 
 
+def test_the_recorded_input_digest_counts_as_a_blob_source() -> None:
+    """A rewritten `shim_inputs.sha256` without a re-cut must red the recency step, as a source edit does."""
+    steps = _repo_job(SHIM_BUILD, "build")["steps"]
+    recency = [str(step["run"]) for step in steps if "re-cut when shim sources change" in str(step.get("name", ""))]
+    assert len(recency) == 1, f"{SHIM_BUILD.name} `build` has {len(recency)} recency steps, expected one"
+    source_line = next((line for line in recency[0].splitlines() if line.strip().startswith("last_src=")), "")
+    assert "crates/ocx_shim/" in source_line, f"the recency step's source line was not found: {source_line!r}"
+    assert "crates/ocx_store/src/shim_inputs.sha256" in source_line, (
+        f"the recency step does not count the recorded input digest as a source: {source_line!r}"
+    )
+
+
 def test_the_launcher_blob_run_fires_with_the_shim_inputs_and_in_the_nightly_tier() -> None:
     """A pull request or push that changes a blob or a build input runs it, and so does every deep run."""
     uses = "./.github/workflows/launcher-blobs.yml"

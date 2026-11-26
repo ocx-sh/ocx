@@ -348,8 +348,9 @@ jobs:
           # the exclusion names one file, not a glob, so a new `.rs` or a
           # `Cargo.toml` bump still reds here.
           # `crates/ocx_env_apply/` is the shim's sidecar decoder: a change there
-          # changes the blob's bytes the same way.
-          last_src="$(git log -1 --format=%H HEAD -- crates/ocx_shim/ crates/ocx_env_apply/ ':(exclude)crates/ocx_shim/BUILD.bazel' ':(exclude)crates/ocx_env_apply/BUILD.bazel')"
+          # changes the blob's bytes the same way. The recorded input digest counts as a
+          # source too: rewriting it without a re-cut would clear the next step's check.
+          last_src="$(git log -1 --format=%H HEAD -- crates/ocx_shim/ crates/ocx_env_apply/ crates/ocx_store/src/shim_inputs.sha256 ':(exclude)crates/ocx_shim/BUILD.bazel' ':(exclude)crates/ocx_env_apply/BUILD.bazel')"
           # This leg's own blob: re-cutting one of the six must not clear the check for the other five.
           last_blob="$(git log -1 --format=%H HEAD -- "$COMMITTED")"
           if [ -z "$last_src" ]; then
