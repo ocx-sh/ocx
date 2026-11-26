@@ -8,7 +8,7 @@
 - **Tier-grammar:** 5
 - **Updated:** 2026-11-26
 - **Active phase:** 0 — contract waves (CW, then CW-R)
-- **Step:** /hex-execute → P5 P7 P8 running; CW P9 P3 P4 P1 P2 P6 merged
+- **Step:** /hex-execute → P5 P7 running; CW P9 P3 P4 P1 P2 P6 P8 merged
 - **Feature branch:** ocx `hex/bazel-rbe-rules-ocx` (pipelines on `hex/bazel-rbe-rules-ocx--<pipeline>`, worktrees under `.agents/worktrees/`); rules_ocx one branch `hex/bazel-rbe-rules-ocx` (§ rules_ocx branch mechanics)
 - **Last update:** 2026-11-26 (after 73e2701d: chore: accept the vendor ADR under goal-loop authority)
 - **Next:** /hex-execute .claude/artifacts/plan_vendor_rules_ocx.md
@@ -352,7 +352,7 @@ Commit `chore: vendor reader and set rule contract stubs`.
 | P5 | . | C-012, C-013, C-014 (apply), C-016…C-020; V-26, V-52, V-58 (dispatch unit), V-59…V-61, V-66 timer, V-68 | `crates/ocx_shim/src/**`, `crates/ocx_shim/tests/**`, `crates/ocx_shim/BUILD.bazel`, `crates/ocx_store/src/{shim.rs,shims/**}`, `crates/ocx_store/src/file_structure/shim_bin_store.rs`, `.github/workflows/build-windows-shims.yml`, `taskfiles/rust.taskfile.yml` | 2 | P1 | hard | pending |
 | P6 | . | C-015 (write); S-004 writer; V-62, V-72 writer | `crates/ocx_package_manager/src/launcher/{direct,generate}.rs`, `crates/ocx_package_manager/src/tasks/render_toolchain.rs`, `crates/ocx_env/src/vars/tests.rs` | 2 | P1 | | merged |
 | P7 | . | C-002…C-004, C-007, C-009…C-011, C-022…C-024 orchestration; S-007, S-013, S-014 | `crates/ocx_package_manager/src/tasks/{vendor.rs,pull.rs,toolchain_names.rs}`, `crates/ocx_package/src/vendor.rs`, `crates/ocx_package/src/vendor/*.rs` (`vendor_id` and any manifest-type fix) | 3 | P3, P4, P5, P6 | hard | pending |
-| P8 | . | acceptance for C-001…C-024 and S-004…S-007, S-013…S-015 | `test/tests/{test_vendor,test_package_vendor,test_vendor_launcher,test_vendor_parity}.py`, `test/src/vendor_fixtures.py`, `test/fixtures/vendor/**`, `test/BUILD.bazel` (`module_data`) | 1 | CW | | pending |
+| P8 | . | acceptance for C-001…C-024 and S-004…S-007, S-013…S-015 | `test/tests/{test_vendor,test_package_vendor,test_vendor_launcher,test_vendor_parity}.py`, `test/src/vendor_fixtures.py`, `test/fixtures/vendor/**`, `test/BUILD.bazel` (`module_data`) | 1 | CW | | merged |
 | P9 | . | goal criterion 1 docs; AI-config upkeep | `website/src/content/docs/reference/vendor-manifest.md`, `website/src/content/docs/guides/vendor.mdx`, `website/astro.config.mjs`, `AGENTS.md`, `.claude/rules/{arch-principles,subsystem-cli-commands,subsystem-package-manager,subsystem-file-structure,subsystem-interface-contract,product-context}.md` | 1 | CW | | merged |
 | I1 | . | integration gate: hub files regenerated once (§ Hub files), `cargo check --workspace --all-targets --locked`, the touched crates' unit suites, `task website:reference:generate` | the § Hub files list (ocx side) | 4 | P1…P9 | | pending |
 | P10 | . | ocx proofs: every ocx V-row green locally, mut rows, V-66 | `.claude/artifacts/evidence/vendor_rules_ocx/P10.md`, `test/fixtures/vendor/windows_amd64.manifest.json` (V-46 golden, written on Linux); code fixes in any file of a merged ocx pipeline, each named in `P10.md`, never a test unless it contradicts a contract | 5 | I1 | | pending |
@@ -712,3 +712,9 @@ by line by the reviewer.
   `tasks::render_toolchain::render_direct_bin(bin, surface, blob, sidecar_for)`; P7 calls those. Open from P6:
   `render_direct_bin` applies no case-insensitive name fold (two names differing by case collide on a case-insensitive
   filesystem) — P7 decides. P5: orchestrator commit `d0f6792b` adds `libc` (Unix) to `ocx_shim` for `O_NONBLOCK` (DP-16 kind).
+- 2026-11-26 — P8 merged (four modules: `test_vendor.py` 27 cases, `test_package_vendor.py` 13, `test_vendor_parity.py` 9,
+  `test_vendor_launcher.py` 15; each run once against the stubs: every case that reaches `vendor` red on
+  `not implemented: PackageManager::vendor`, the no-`-o` usage cases green, macOS/Windows cases skipped with reasons).
+  For P10: V-67 kills nothing (a failed run instead; the kill is P10's mutation); V-63 expects exit 81, V-69 asserts 65 only;
+  V-46 golden must be written in the test's masked shape. For I1: `scripts/bazel_tag_guard.py` `HAND_DECLARED_READS` for
+  `test_vendor_launcher.py` (docker) and the schema-binary read of `test_vendor_parity.py`; `test/SUITE_FLOOR` (+64 cases).
