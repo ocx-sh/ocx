@@ -230,7 +230,7 @@ mod tests {
             buf.contents(),
             format!(
                 "{{\"name\":\"LD_LIBRARY_PATH\",\"value\":\"/pkg2/lib{0}/pkg1/lib\"}}\n",
-                ocx_util::path::PATH_SEPARATOR
+                ocx_env_apply::PATH_SEPARATOR
             )
         );
     }
@@ -251,7 +251,7 @@ mod tests {
             buf.contents(),
             format!(
                 "{{\"name\":\"LD_LIBRARY_PATH\",\"value\":\"/pkg/lib{0}/existing/lib\"}}\n",
-                ocx_util::path::PATH_SEPARATOR
+                ocx_env_apply::PATH_SEPARATOR
             )
         );
     }
@@ -274,7 +274,7 @@ mod tests {
             buf.contents(),
             format!(
                 "{{\"name\":\"PATH\",\"value\":\"/pkg/bin{0}/usr/bin\"}}\n",
-                ocx_util::path::PATH_SEPARATOR
+                ocx_env_apply::PATH_SEPARATOR
             )
         );
     }

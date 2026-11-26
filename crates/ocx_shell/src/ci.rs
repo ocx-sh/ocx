@@ -53,12 +53,12 @@ impl CiFlavor {
 }
 
 /// Folds `values` onto the process value of path variable `key` with the same
-/// [`move_to_front`](ocx_util::path::move_to_front) `ocx exec` uses, so CI precedence matches it.
+/// [`move_to_front`](ocx_env_apply::move_to_front) `ocx exec` uses, so CI precedence matches it.
 /// A declared secret reads as absent, so its value never reaches the export file.
 fn prepend_existing(key: &str, values: &[String]) -> String {
     use std::ffi::{OsStr, OsString};
 
-    use ocx_util::path::move_to_front;
+    use ocx_env_apply::move_to_front;
 
     let existing = ocx_env::dynamic(key).unwrap_or_default();
     let mut result = OsString::from(existing);
@@ -69,10 +69,10 @@ fn prepend_existing(key: &str, values: &[String]) -> String {
 }
 
 /// Folds `values` onto the process value of list variable `key` with the same
-/// [`append_unique`](ocx_util::list::append_unique) `ocx exec` uses, so CI precedence matches it.
+/// [`append_unique`](ocx_env_apply::append_unique) `ocx exec` uses, so CI precedence matches it.
 /// A declared secret reads as absent, so its value never reaches the export file.
 fn append_existing(key: &str, values: &[String], separator: &str) -> String {
-    use ocx_util::list::append_unique;
+    use ocx_env_apply::append_unique;
 
     let mut result = ocx_env::dynamic(key).unwrap_or_default();
     for value in values {
@@ -137,7 +137,7 @@ mod tests {
     // direction; the first three assertions are unchanged by the flip
     // (single-value / identical-duplicate cases are order-independent), the
     // second one changes value and is the direct regression pin.
-    use ocx_util::path::PATH_SEPARATOR as SEP;
+    use ocx_env_apply::PATH_SEPARATOR as SEP;
 
     #[test]
     fn prepend_existing_does_not_re_add_present_value() {

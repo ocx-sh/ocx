@@ -66,7 +66,7 @@ fn with_windows_rule<R>(windows: bool, body: impl FnOnce() -> R) -> R {
 fn element_eq_as(left: &str, right: &str, kind: &ModifierKind, windows: bool) -> bool {
     match kind {
         ModifierKind::List => left == right,
-        ModifierKind::Path => ocx_util::path::path_element_eq(
+        ModifierKind::Path => ocx_env_apply::path_element_eq(
             std::ffi::OsStr::new(unquote(left)),
             std::ffi::OsStr::new(unquote(right)),
             windows,
@@ -90,7 +90,7 @@ fn element_norm(value: &str, kind: &ModifierKind) -> String {
 fn element_norm_as(value: &str, kind: &ModifierKind, windows: bool) -> String {
     match kind {
         ModifierKind::List => value.to_owned(),
-        ModifierKind::Path => ocx_util::path::path_element_norm(unquote(value), windows),
+        ModifierKind::Path => ocx_env_apply::path_element_norm(unquote(value), windows),
         ModifierKind::Constant => {
             let value = unquote(value);
             if windows {

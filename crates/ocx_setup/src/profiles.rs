@@ -234,7 +234,7 @@ pub fn unreached_posix_homes<'a>(home_env: &HomeEnv, windows: &'a WindowsEnv) ->
             !written
                 .iter()
                 .flatten()
-                .any(|dir| ocx_util::path::path_element_eq(home.as_os_str(), dir.as_os_str(), true))
+                .any(|dir| ocx_env_apply::path_element_eq(home.as_os_str(), dir.as_os_str(), true))
         })
         .map(PathBuf::as_path)
         .collect()
@@ -267,7 +267,7 @@ fn posix_family(home: &Path, zsh_dir: &Path) -> Vec<ProfileTarget> {
 fn detect_windows_targets(home_env: &HomeEnv, windows: &WindowsEnv) -> Vec<ProfileTarget> {
     let mut targets = posix_family(&home_env.home, &home_env.zsh_dir());
     if let Some(profile) = &windows.userprofile
-        && !ocx_util::path::path_element_eq(profile.as_os_str(), home_env.home.as_os_str(), true)
+        && !ocx_env_apply::path_element_eq(profile.as_os_str(), home_env.home.as_os_str(), true)
     {
         targets.extend(posix_family(profile, profile));
     }

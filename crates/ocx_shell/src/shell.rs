@@ -209,7 +209,7 @@ impl Shell {
     /// Emit a **self-contained, idempotent, move-to-front** statement prepending `value` to the
     /// path-style variable `key`; it needs no ocx process, guard variable or helper to be re-sourced.
     ///
-    /// **The result equals [`move_to_front`](ocx_util::path::move_to_front) byte for byte in every
+    /// **The result equals [`move_to_front`](ocx_env_apply::move_to_front) byte for byte in every
     /// arm**: the reconciler applies in process on one prompt and through this emit on another, and a
     /// divergence shows as PATH order flapping. **Precondition:** `value` is one directory with no
     /// embedded `PATH_SEPARATOR`; the split-based arms would read it as two segments and never dedup it.
@@ -246,7 +246,7 @@ impl Shell {
         // (`split_paths` unquotes it into one segment), but every arm here splits on the raw separator
         // with no quote awareness, drops the interior field and re-joins `"C:\a;b"`. The precondition
         // keeps this away from `value` itself.
-        let separator = ocx_util::path::PATH_SEPARATOR;
+        let separator = ocx_env_apply::PATH_SEPARATOR;
         // A throwaway `__ocx_p` carries the value through one escape context and is unset in the same
         // statement, so the match references the quoted variable, not a re-interpolated literal,
         // closing the glob / second-escape gap.
@@ -361,7 +361,7 @@ impl Shell {
 
     /// Emit a **self-contained, idempotent, unique-append** statement appending `value` to the
     /// `separator`-joined list variable `key`, computing the same function as
-    /// [`append_unique`](ocx_util::list::append_unique) so an exported line and the in-process child env
+    /// [`append_unique`](ocx_env_apply::append_unique) so an exported line and the in-process child env
     /// (`ocx exec`) agree byte for byte.
     ///
     /// **Matching is case-sensitive in every shell** and the separator is untrusted text, escaped like the
@@ -497,7 +497,7 @@ impl Shell {
         // quotes inside it are part of the option.
         let path_kind = separator.is_none();
         let raw = match separator {
-            None => ocx_util::path::strip_one_quote_pair(value),
+            None => ocx_env_apply::strip_one_quote_pair(value),
             Some(_) => value,
         };
         if raw.is_empty() {
@@ -514,7 +514,7 @@ impl Shell {
         let raw_separator = if drive_prefix.is_some() {
             ":"
         } else {
-            separator.unwrap_or(ocx_util::path::PATH_SEPARATOR)
+            separator.unwrap_or(ocx_env_apply::PATH_SEPARATOR)
         };
         // Escaping is per arm, never one shared escaper: the fish/nushell double-quote escaper leaves
         // `'` untouched, so an element like `/tmp/a';id;'b` from a project `[env]` value would run at
@@ -759,7 +759,7 @@ fn batch_cannot_express(value: &str) -> bool {
 /// One admission rule for both emit sites: the reconciler's planner ([`reconcile`]) keeps
 /// `L ⊆ emittable(D)` with it, and `conventions::emit_lines` refuses the same set for the export commands.
 /// Each refusal is because the *revert* is impossible, not the apply: an invalid env-var name (a ledger
-/// entry would name a key no arm can remove); a path-kind value embedding [`ocx_util::path::PATH_SEPARATOR`]
+/// entry would name a key no arm can remove); a path-kind value embedding [`ocx_env_apply::PATH_SEPARATOR`]
 /// (split-based arms read two segments, so every re-source prepends another copy); an empty element (an
 /// empty `PATH` segment is the current directory); an element with LF or CR (the removal fold cannot
 /// address a re-wrapped span, and Batch's `SET` splits on it). A per-shell refusal stays the emitter's own.
@@ -774,7 +774,7 @@ pub fn is_emittable(entry: &ocx_package::metadata::env::entry::Entry) -> Result<
     if !ocx_env::is_valid_env_key(&entry.key) {
         return Err("not a valid environment-variable name");
     }
-    if matches!(entry.kind, ModifierKind::Path) && entry.value.contains(ocx_util::path::PATH_SEPARATOR) {
+    if matches!(entry.kind, ModifierKind::Path) && entry.value.contains(ocx_env_apply::PATH_SEPARATOR) {
         return Err("a path value may not embed the platform path separator");
     }
     if element && entry.value.is_empty() {
@@ -811,7 +811,7 @@ impl Shell {
 
 /// The `StringComparison` a PATH element is compared under, chosen at emit time: the emitter
 /// and the shell it emits for run on the same host, so `cfg!(windows)` is the platform test, the
-/// same rule [`ocx_util::path::PATH_SEPARATOR`] follows.
+/// same rule [`ocx_env_apply::PATH_SEPARATOR`] follows.
 fn path_element_comparison() -> &'static str {
     if cfg!(windows) { "OrdinalIgnoreCase" } else { "Ordinal" }
 }
@@ -820,7 +820,7 @@ fn path_element_comparison() -> &'static str {
 /// time by the same `cfg!(windows)` rule as [`path_element_comparison`].
 ///
 /// **Empty off Windows, and that is the contract, not a shortcut.**
-/// [`move_to_front`](ocx_util::path::move_to_front) splits with `std::env::split_paths`, which
+/// [`move_to_front`](ocx_env_apply::move_to_front) splits with `std::env::split_paths`, which
 /// strips one surrounding `"` pair **only on Windows**; on Unix a segment beginning with `\"` is a
 /// directory whose name begins with `\"`. An unconditional strip made the pwsh arm disagree with
 /// `move_to_front` and its five sibling arms: it deleted a quoted foreign segment they all keep,
@@ -835,7 +835,7 @@ fn path_segment_normalisation() -> &'static str {
 
 /// The slash fold alone, for an operand `remove_list_element` already stripped of its quote pair.
 ///
-/// Folds `/` to `\` on Windows only, as [`ocx_util::path::path_element_eq`] does; a second quote strip
+/// Folds `/` to `\` on Windows only, as [`ocx_env_apply::path_element_eq`] does; a second quote strip
 /// would take a second pair off the operand.
 fn path_slash_fold() -> &'static str {
     if cfg!(windows) { " -replace '/','\\'" } else { "" }
@@ -881,7 +881,7 @@ fn elvish_path_compare(windows: bool, raw: &str) -> String {
 /// later; `str downcase` would print a deprecation warning at every prompt from 0.114 on.
 fn nushell_path_compare(windows: bool, raw: &str) -> String {
     if windows {
-        let folded = escape::nushell_plain_string(&ocx_util::path::path_element_norm(raw, true));
+        let folded = escape::nushell_plain_string(&ocx_env_apply::path_element_norm(raw, true));
         format!(
             "(not ((($p | str length) == (\"{folded}\" | str length)) and ($p | str replace --all '/' '\\' | str starts-with --ignore-case \"{folded}\")))"
         )
@@ -1503,7 +1503,7 @@ mod tests {
     // absent) to prove idempotency / move-to-front / injection-safety end to end.
 
     fn sep() -> &'static str {
-        ocx_util::path::PATH_SEPARATOR
+        ocx_env_apply::PATH_SEPARATOR
     }
 
     #[test]
@@ -2437,7 +2437,7 @@ mod tests {
 
     #[cfg(unix)]
     fn folded(existing: &str, value: &str, separator: &str) -> String {
-        ocx_util::list::append_unique(existing, value, separator)
+        ocx_env_apply::append_unique(existing, value, separator)
     }
 
     #[test]
@@ -2742,7 +2742,7 @@ mod tests {
         // Parity with the in-process primitive: prepending nothing is identity
         // over the ambient's own segments.
         assert_eq!(
-            ocx_util::path::move_to_front(std::ffi::OsStr::new("/a:/b"), std::ffi::OsStr::new("")),
+            ocx_env_apply::move_to_front(std::ffi::OsStr::new("/a:/b"), std::ffi::OsStr::new("")),
             std::ffi::OsString::from("/a:/b")
         );
     }
@@ -3023,7 +3023,7 @@ mod tests {
     #[test]
     fn remove_list_element_uses_the_given_separator_not_the_platform_one() {
         // S-034 / A-08: `CFLAGS` is `{type = "list", separator = " "}`. A build
-        // that ignored the parameter and assumed `ocx_util::path::PATH_SEPARATOR` would
+        // that ignored the parameter and assumed `ocx_env_apply::PATH_SEPARATOR` would
         // emit `:` flanks, and the contribution would be permanently
         // unremovable. Asserted per arm, on the emitted bytes.
         let platform = sep();
@@ -3398,14 +3398,14 @@ mod tests {
 
     #[cfg(unix)]
     fn move_to_front(existing: &str, value: &str) -> String {
-        ocx_util::path::move_to_front(std::ffi::OsStr::new(existing), std::ffi::OsStr::new(value))
+        ocx_env_apply::move_to_front(std::ffi::OsStr::new(existing), std::ffi::OsStr::new(value))
             .to_string_lossy()
             .into_owned()
     }
 
     #[cfg(unix)]
     fn remove_segment(existing: &str, value: &str) -> String {
-        ocx_util::path::remove_segment(std::ffi::OsStr::new(existing), std::ffi::OsStr::new(value))
+        ocx_env_apply::remove_segment(std::ffi::OsStr::new(existing), std::ffi::OsStr::new(value))
             .to_string_lossy()
             .into_owned()
     }
@@ -3433,7 +3433,7 @@ mod tests {
             ("a,b", "c", ","),
             ("-Wall", "-Wextra", "; "),
         ] {
-            let applied = ocx_util::list::append_unique(existing, value, separator);
+            let applied = ocx_env_apply::append_unique(existing, value, separator);
             assert_eq!(
                 folded_removal(&applied, value, separator),
                 existing,

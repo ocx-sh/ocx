@@ -68,7 +68,7 @@ fn drop_trailing_separator_twins(existing: &str, directories: &[&str]) -> std::f
     let mut value = std::ffi::OsString::from(existing);
     for directory in directories {
         for twin in trailing_separator_twins(directory) {
-            value = ocx_util::path::remove_segment(&value, std::ffi::OsStr::new(&twin));
+            value = ocx_env_apply::remove_segment(&value, std::ffi::OsStr::new(&twin));
         }
     }
     value
@@ -91,7 +91,7 @@ pub fn merged_value(existing: &str, directories: &[&str]) -> String {
     let mut value = drop_trailing_separator_twins(existing, directories);
     // Reversed, so `directories[0]` ends up in front.
     for directory in directories.iter().rev() {
-        value = ocx_util::path::move_to_front(&value, std::ffi::OsStr::new(directory));
+        value = ocx_env_apply::move_to_front(&value, std::ffi::OsStr::new(directory));
     }
     into_value(value)
 }
@@ -101,7 +101,7 @@ pub fn merged_value(existing: &str, directories: &[&str]) -> String {
 pub fn subtracted_value(existing: &str, directories: &[&str]) -> String {
     let mut value = drop_trailing_separator_twins(existing, directories);
     for directory in directories {
-        value = ocx_util::path::remove_segment(&value, std::ffi::OsStr::new(directory));
+        value = ocx_env_apply::remove_segment(&value, std::ffi::OsStr::new(directory));
     }
     into_value(value)
 }

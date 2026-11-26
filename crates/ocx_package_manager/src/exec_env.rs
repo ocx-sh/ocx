@@ -380,7 +380,7 @@ fn record_of(start: &Env, value: &ComposedValue, owner: &Owner) -> Option<Applie
 }
 
 fn path_holds(existing: &OsStr, element: &str) -> bool {
-    let remaining = ocx_util::path::remove_segment(existing, OsStr::new(element));
+    let remaining = ocx_env_apply::remove_segment(existing, OsStr::new(element));
     let segments = |value: &OsStr| {
         std::env::split_paths(value)
             .filter(|segment| !segment.as_os_str().is_empty())

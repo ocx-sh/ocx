@@ -1191,7 +1191,7 @@ mod session_tests {
         let mut after = current.clone();
         let mut after_path = after.get("PATH").map(std::ffi::OsString::from).expect("PATH is set");
         for (_, element, _) in &planned.removes {
-            after_path = ocx_util::path::remove_segment(&after_path, OsStr::new(element));
+            after_path = ocx_env_apply::remove_segment(&after_path, OsStr::new(element));
         }
         after.set("PATH", after_path);
 
@@ -1557,16 +1557,15 @@ mod wire_tests {
     /// The settle compare is [`element_eq`]'s, applied per segment, not `==` on the raw whole value.
     #[test]
     fn the_settle_compare_is_not_byte_exact() {
-        let folded = std::ffi::OsString::from(["/ocx/a/bin", "/program files/x"].join(ocx_util::path::PATH_SEPARATOR));
-        let live =
-            std::ffi::OsString::from(["/ocx/a/bin", "\"/program files/x\""].join(ocx_util::path::PATH_SEPARATOR));
+        let folded = std::ffi::OsString::from(["/ocx/a/bin", "/program files/x"].join(ocx_env_apply::PATH_SEPARATOR));
+        let live = std::ffi::OsString::from(["/ocx/a/bin", "\"/program files/x\""].join(ocx_env_apply::PATH_SEPARATOR));
         assert_ne!(folded, live, "the two spellings are not byte-equal");
         assert!(
             value_settled(Some(&folded), Some(&live), &ModifierKind::Path),
             "a retained segment that differs only by one quote pair is settled"
         );
 
-        let moved = std::ffi::OsString::from(["/program files/x", "/ocx/a/bin"].join(ocx_util::path::PATH_SEPARATOR));
+        let moved = std::ffi::OsString::from(["/program files/x", "/ocx/a/bin"].join(ocx_env_apply::PATH_SEPARATOR));
         assert!(!value_settled(Some(&moved), Some(&live), &ModifierKind::Path));
         assert!(!value_settled(Some(&folded), Some(&live), &ModifierKind::List));
         assert!(!value_settled(Some(&folded), None, &ModifierKind::Path));

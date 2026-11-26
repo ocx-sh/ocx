@@ -412,7 +412,7 @@ fn subtract_from_session(directories: &[&str]) -> std::io::Result<bool> {
     };
     let mut remainder = current.clone();
     for directory in directories {
-        remainder = ocx_util::path::remove_segment(&remainder, std::ffi::OsStr::new(directory));
+        remainder = ocx_env_apply::remove_segment(&remainder, std::ffi::OsStr::new(directory));
     }
     if remainder == current {
         return Ok(false);
@@ -444,7 +444,7 @@ fn session_carries_any(directories: &[&str]) -> bool {
     };
     directories
         .iter()
-        .any(|directory| ocx_util::path::remove_segment(&current, std::ffi::OsStr::new(directory)) != current)
+        .any(|directory| ocx_env_apply::remove_segment(&current, std::ffi::OsStr::new(directory)) != current)
 }
 
 #[cfg(test)]

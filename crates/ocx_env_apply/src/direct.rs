@@ -7,7 +7,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::ApplyKind;
+use crate::{ApplyKind, KeyFold};
 
 /// The only `schema_version` this release writes and reads.
 pub const SCHEMA_VERSION: u32 = 1;
@@ -76,14 +76,80 @@ impl fmt::Display for SidecarError {
 impl DirectSidecar {
     /// Checks every rule of the sidecar contract; `platform_is_windows` selects key folding and device-name rules.
     pub fn validate(&self, platform_is_windows: bool) -> Result<(), SidecarError> {
-        let _ = platform_is_windows;
-        unimplemented!("DirectSidecar::validate")
+        if self.schema_version != SCHEMA_VERSION {
+            return Err(SidecarError::SchemaVersion(self.schema_version));
+        }
+        let fold = if platform_is_windows {
+            KeyFold::AsciiCaseInsensitive
+        } else {
+            KeyFold::Exact
+        };
+        for key in self.unset.iter().chain(self.env.iter().map(|r| &r.key)) {
+            if key.is_empty() || key.contains(['=', '\0']) {
+                return Err(SidecarError::InvalidKey(key.clone()));
+            }
+        }
+        for record in &self.env {
+            let key = &record.key;
+            let reserved = key_eq("OCX_BINARY_PIN", key, fold)
+                || key.starts_with("__OCX_")
+                || self.unset.iter().any(|u| key_eq(u, key, fold));
+            if reserved {
+                return Err(SidecarError::ReservedKey(key.clone()));
+            }
+        }
+        if !relative_path_ok(&self.self_path, platform_is_windows) {
+            return Err(SidecarError::PathNotInRoot(self.self_path.clone()));
+        }
+        let program_ok = self
+            .program
+            .strip_prefix(VENDOR_DIR_TOKEN)
+            .and_then(|rest| rest.strip_prefix('/'))
+            .is_some_and(|rest| relative_path_ok(rest, platform_is_windows));
+        if !program_ok {
+            return Err(SidecarError::PathNotInRoot(self.program.clone()));
+        }
+        Ok(())
     }
+}
+
+/// Whether two environment keys name the same variable under `fold`.
+fn key_eq(left: &str, right: &str, fold: KeyFold) -> bool {
+    match fold {
+        KeyFold::Exact => left == right,
+        KeyFold::AsciiCaseInsensitive => left.eq_ignore_ascii_case(right),
+    }
+}
+
+/// The manifest path rules: relative, `/`-separated, no empty/`.`/`..` segment, no token; on Windows also
+/// no `:` or `\`, no device name and no segment ending in `.` or a space.
+fn relative_path_ok(path: &str, windows: bool) -> bool {
+    if path.contains(VENDOR_DIR_TOKEN) || path.contains('\0') {
+        return false;
+    }
+    path.split('/').all(|segment| {
+        if matches!(segment, "" | "." | "..") {
+            return false;
+        }
+        !windows || !(segment.contains([':', '\\']) || segment.ends_with(['.', ' ']) || is_device_name(segment))
+    })
+}
+
+/// A Windows device name with any extension: `CON`, `NUL.txt`, `com1.tar.gz`.
+fn is_device_name(segment: &str) -> bool {
+    let stem = segment.split('.').next().unwrap_or(segment);
+    ["CON", "PRN", "AUX", "NUL"]
+        .iter()
+        .any(|d| stem.eq_ignore_ascii_case(d))
+        || (stem.len() == 4
+            && (stem[..3].eq_ignore_ascii_case("COM") || stem[..3].eq_ignore_ascii_case("LPT"))
+            && matches!(stem.as_bytes()[3], b'1'..=b'9'))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{DirectSidecar, SidecarError};
+    use super::{DirectSidecar, SidecarError, is_device_name, key_eq};
+    use crate::KeyFold;
 
     fn sidecar(program: &str, env_key: &str, unset: &[&str]) -> DirectSidecar {
         let record = serde_json::json!({
@@ -189,5 +255,25 @@ mod tests {
                 "{key:?}"
             );
         }
+    }
+
+    /// V-73: the Windows fold sees `PATH` and `Path` as one key; the exact control sees two.
+    #[test]
+    fn v73_windows_fold_unifies_path_keys() {
+        assert!(!key_eq("PATH", "Path", KeyFold::Exact));
+        assert!(key_eq("PATH", "Path", KeyFold::AsciiCaseInsensitive));
+    }
+
+    #[test]
+    fn windows_path_rules() {
+        for p in [
+            "@VENDOR_DIR@/a\\b",
+            "@VENDOR_DIR@/C:/x",
+            "@VENDOR_DIR@/a./b",
+            "@VENDOR_DIR@/lpt9.txt",
+        ] {
+            assert!(sidecar(p, "PATH", &[]).validate(true).is_err(), "{p}");
+        }
+        assert!(is_device_name("com1.tar.gz") && !is_device_name("COM0") && !is_device_name("console"));
     }
 }

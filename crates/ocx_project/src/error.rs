@@ -924,7 +924,7 @@ mod tests {
             ProjectErrorKind::EnvPathSeparatorInValue {
                 scope: "env".to_string(),
                 key: "PATH".to_string(),
-                value: format!("a{}b", ocx_util::path::PATH_SEPARATOR),
+                value: format!("a{}b", ocx_env_apply::PATH_SEPARATOR),
             },
         ));
         let rendered = err.to_string();

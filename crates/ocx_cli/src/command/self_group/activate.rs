@@ -2246,7 +2246,7 @@ mod reconcile_tests {
             constant("2FOO", "x"),
             Entry {
                 key: "TOOLS".to_owned(),
-                value: format!("/a{}/b", ocx_util::path::PATH_SEPARATOR),
+                value: format!("/a{}/b", ocx_env_apply::PATH_SEPARATOR),
                 kind: ModifierKind::Path,
                 separator: None,
             },

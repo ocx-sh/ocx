@@ -80,7 +80,7 @@ impl Env {
         let key = EnvKey::new(key);
         let value = value.into();
         let new_value = match self.vars.get(&key) {
-            Some(existing) => ocx_util::path::move_to_front(existing, &value),
+            Some(existing) => ocx_env_apply::move_to_front(existing, &value),
             None => value,
         };
         self.vars.insert(key, new_value);
@@ -95,7 +95,7 @@ impl Env {
         }
         let key = EnvKey::new(key);
         let existing = self.vars.get(&key).map(|v| v.to_string_lossy().into_owned());
-        let folded = ocx_util::list::append_unique(existing.as_deref().unwrap_or_default(), value, separator);
+        let folded = ocx_env_apply::append_unique(existing.as_deref().unwrap_or_default(), value, separator);
         self.vars.insert(key, OsString::from(folded));
     }
 
@@ -113,7 +113,7 @@ impl Env {
     ///
     /// Does not set `PATH`: called alone it records a directory the child cannot see.
     pub fn note_package_path(&mut self, dir: &OsStr) {
-        self.package_path = ocx_util::path::move_to_front(&self.package_path, dir);
+        self.package_path = ocx_env_apply::move_to_front(&self.package_path, dir);
     }
 
     /// Resolve a command name through this env's `PATH` and, on Windows, its own `PATHEXT`.
@@ -212,7 +212,7 @@ impl Env {
         }
 
         let pruned = excluded.iter().fold(path, |value, dir| {
-            ocx_util::path::remove_segment(&value, dir.as_os_str())
+            ocx_env_apply::remove_segment(&value, dir.as_os_str())
         });
 
         if pruned.is_empty() {
@@ -541,7 +541,7 @@ mod tests {
     // reads neither validator, but the grammar they define is still this
     // module's contract to state.
     use ocx_env::{is_reserved_ocx_key, is_valid_env_key};
-    use ocx_util::path::PATH_SEPARATOR;
+    use ocx_env_apply::PATH_SEPARATOR;
 
     /// `OCX_NO_MODIFY_PATH` is read through `flag` (the same `BooleanString`
     /// path as `--remote`/`--offline`), so both `=1` and `=true` set it true and
