@@ -1883,7 +1883,8 @@ mod tests {
             .expect("digest lane")
             .into_iter()
             .filter(|entry| entry.value != shim.bin().to_string_lossy())
-            .map(|entry| (entry.key, entry.value.replace(&home, DIR_TOKEN)))
+            // The digest lane spells host paths (`\` on Windows); the manifest stores `/` on every host.
+            .map(|entry| (entry.key, entry.value.replace(&home, DIR_TOKEN).replace('\\', "/")))
             .collect();
 
         let actual = items(&manifest, "selection:default");

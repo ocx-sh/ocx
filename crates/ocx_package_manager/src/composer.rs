@@ -987,8 +987,9 @@ impl VendorLane {
             .map(|component| component.as_os_str().to_string_lossy().into_owned())
             .collect();
         tail.reverse();
+        // The trailing `/` is the separator `content()` and `entrypoints` join on; without it a Windows host joins `\`.
         PackageDir::with_root(PathBuf::from(format!(
-            "{}/{}",
+            "{}/{}/",
             self.token_root.to_string_lossy(),
             tail.join("/")
         )))
@@ -8184,6 +8185,20 @@ mod vendor_lane_tests {
         assert_eq!(
             installed.root(),
             std::path::Path::new("@VENDOR_DIR@").join(SHARD).as_path()
+        );
+    }
+
+    /// The manifest stores `/` paths, so the content directory is `/`-joined on every host, Windows included.
+    #[test]
+    fn vendor_lane_content_dir_is_slash_joined() {
+        let paths = ComposePaths::vendor("@VENDOR_DIR@");
+        let package = PackageDir::with_root(std::path::PathBuf::from("/nonexistent/home").join(SHARD));
+
+        let installed = paths.install_path_for(&package, PathLane::Vendor);
+
+        assert_eq!(
+            installed.content().to_string_lossy(),
+            format!("@VENDOR_DIR@/{SHARD}/content")
         );
     }
 
