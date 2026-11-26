@@ -645,7 +645,7 @@ async fn reconcile_bin(
 
 /// Writes one direct launcher per name of `names` into `bin` (`selections/<id>/shells/default/bin` of a
 /// vendored directory), for `ocx vendor`; touches no home lock, stamp, `.gitignore` or `active` link.
-/// `names` are the selection's [`exposed_names`] (case-folded by the caller where the target folds case), so the
+/// `names` are the selection's `exposed_names` (case-folded by the caller where the target folds case), so the
 /// launchers match the manifest's tools; `windows` is the target's. `sidecar_for` yields the selection's sidecar
 /// of a name. No names creates nothing.
 ///
