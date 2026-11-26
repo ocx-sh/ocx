@@ -121,14 +121,12 @@ pub(super) const SIDECAR_PROBE_ORDER: [(&str, SidecarParser); 3] = [
 ];
 
 /// The vendored launcher's sidecar extension; a vendor set writes nothing else.
-#[cfg(any(unix, test))]
 pub(super) const DIRECT_EXTENSION: &str = "direct";
 
 /// The sidecar extensions a launcher probes, in precedence order.
 ///
 /// Unix probes `.direct` alone, so a `.shim`, `.shimref` or `.exec` there is never read and the launcher exits 78;
 /// Windows probes the three existing kinds first, so a `.direct` never shadows one.
-#[cfg(any(unix, test))]
 pub(super) fn probe_extensions(windows: bool) -> Vec<&'static str> {
     let mut order: Vec<&'static str> = Vec::new();
     if windows {
@@ -453,7 +451,7 @@ pub(super) fn use_std_handles(stdin_valid: bool, stdout_valid: bool, stderr_vali
 /// Appends `arg` quoted per the Win32 `CommandLineToArgvW` rules, as `std::process::Command` does.
 ///
 /// Quotes on any ASCII control byte, not just `\t`, or an embedded newline/CR is mis-split by a command-line consumer.
-fn append_quoted_arg(line: &mut String, arg: &str) {
+pub(super) fn append_quoted_arg(line: &mut String, arg: &str) {
     let needs_quotes = arg.is_empty()
         || arg
             .bytes()

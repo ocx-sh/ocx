@@ -8,7 +8,7 @@
 use super::ShimError;
 use super::core;
 use ocx_env_apply::direct::{DirectSidecar, EnvRecord, VENDOR_DIR_TOKEN};
-use ocx_env_apply::{KeyFold, apply_one};
+use ocx_env_apply::{ApplyKind, KeyFold, apply_one};
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
@@ -52,8 +52,10 @@ pub(super) trait LookupFs {
     /// The entry names of directory `dir`; empty when it is missing or unreadable.
     fn list_dir(&self, dir: &str) -> Vec<String>;
     /// Whether `path` is a regular executable file.
+    #[cfg(unix)]
     fn is_executable_file(&self, path: &str) -> bool;
     /// Whether `path` has the device and inode of the running image.
+    #[cfg(unix)]
     fn is_running_image(&self, path: &str) -> bool;
 }
 
@@ -80,8 +82,6 @@ pub(super) enum Probed {
 #[derive(Debug)]
 pub(super) struct Located {
     pub sidecar: DirectSidecar,
-    /// The started path, absolute and unresolved.
-    pub started: String,
     /// The vendor root: absolute, lexically joined, no symlink resolved.
     pub root: String,
 }
@@ -263,6 +263,7 @@ fn accepts(root: &str, self_path: &str, raw: &[u8], windows: bool, fs: &dyn Look
 /// The started path on Unix: `argv[0]` joined onto the working directory, or the first `PATH` hit for a bare name.
 ///
 /// The result must be the running image: a `PATH` search can land on a file the process never started from.
+#[cfg(unix)]
 pub(super) fn started_path_unix(
     argv0: &str,
     cwd: &str,
@@ -341,11 +342,7 @@ pub(super) fn locate(started: &str, context: &LookupContext<'_>, fs: &dyn Lookup
                         "vendor root {root} contains the path-list separator '{list_separator}'"
                     )));
                 }
-                return Ok(Probed::Direct(Located {
-                    sidecar,
-                    started: started.to_string(),
-                    root,
-                }));
+                return Ok(Probed::Direct(Located { sidecar, root }));
             }
             rejected.push(candidate);
         }
@@ -380,58 +377,96 @@ pub(super) struct Launch {
 
 /// The child environment: `inherited`, minus every `unset` key, then each record applied in order.
 ///
-/// Keys compare byte-exact, which is the Unix rule; a Windows launcher folds ASCII case and takes its own spawn path.
-fn build_env(inherited: Vec<(OsString, OsString)>, sidecar: &DirectSidecar, root: &str) -> Vec<(OsString, OsString)> {
-    let mut env: BTreeMap<OsString, OsString> = inherited.into_iter().collect();
+/// On Windows keys fold ASCII case, so `Path` and `PATH` are one variable and the inherited spelling survives.
+fn build_env(
+    inherited: Vec<(OsString, OsString)>,
+    sidecar: &DirectSidecar,
+    root: &str,
+    windows: bool,
+) -> Vec<(OsString, OsString)> {
+    let fold = if windows {
+        KeyFold::AsciiCaseInsensitive
+    } else {
+        KeyFold::Exact
+    };
+    let folded = |key: &OsStr| match fold {
+        KeyFold::Exact => key.to_owned(),
+        KeyFold::AsciiCaseInsensitive => key.to_ascii_uppercase(),
+    };
+    // Folded key to the spelling it was first seen under and its value.
+    let mut env: BTreeMap<OsString, (OsString, OsString)> = BTreeMap::new();
+    for (key, value) in inherited {
+        env.insert(folded(&key), (key, value));
+    }
     for key in &sidecar.unset {
-        env.remove(OsStr::new(key));
+        env.remove(&folded(OsStr::new(key)));
     }
     for record in &sidecar.env {
-        let existing = env.get(OsStr::new(&record.key));
-        let value = apply_record(record, existing.map(OsString::as_os_str), root);
-        env.insert(OsString::from(&record.key), value);
+        let slot = folded(OsStr::new(&record.key));
+        let existing = env.get(&slot);
+        let value = apply_record(
+            record,
+            existing.map(|(_, value)| value.as_os_str()),
+            root,
+            fold,
+            windows,
+        );
+        let spelling = existing.map_or_else(|| OsString::from(&record.key), |(spelling, _)| spelling.clone());
+        env.insert(slot, (spelling, value));
     }
-    env.into_iter().collect()
+    env.into_values().collect()
 }
 
-fn apply_record(record: &EnvRecord, existing: Option<&OsStr>, root: &str) -> OsString {
+fn apply_record(record: &EnvRecord, existing: Option<&OsStr>, root: &str, fold: KeyFold, windows: bool) -> OsString {
+    let mut value = expand(&record.value, root);
+    if windows && record.kind == ApplyKind::Path {
+        value = value.replace('/', "\\");
+    }
     apply_one(
         existing,
         record.kind,
-        OsStr::new(&expand(&record.value, root)),
+        OsStr::new(&value),
         record.separator.as_deref(),
-        KeyFold::Exact,
+        fold,
     )
 }
 
 /// Assembles the launch of a located sidecar over the caller's environment and arguments.
 ///
-/// `argv[0]` is the program path itself, which is what `ocx exec` passes for the same tool.
+/// `argv[0]` is the program path itself, which is what `ocx exec` passes for the same tool. On Windows `/` becomes
+/// `\` in the root, the program and `path` values, as the native install path `ocx exec` composes spells them.
 pub(super) fn plan_launch(
     located: &Located,
     inherited: Vec<(OsString, OsString)>,
     caller_args: Vec<OsString>,
+    windows: bool,
 ) -> Launch {
-    let root = located.root.as_str();
+    let root = if windows {
+        located.root.replace('/', "\\")
+    } else {
+        located.root.clone()
+    };
     let mut args: Vec<OsString> = located
         .sidecar
         .args
         .iter()
-        .map(|arg| OsString::from(expand(arg, root)))
+        .map(|arg| OsString::from(expand(arg, &root)))
         .collect();
     args.extend(caller_args);
+    let mut program = expand(&located.sidecar.program, &root);
+    if windows {
+        program = program.replace('/', "\\");
+    }
     Launch {
-        program: expand(&located.sidecar.program, root),
+        program,
         args,
-        env: build_env(inherited, &located.sidecar, root),
+        env: build_env(inherited, &located.sidecar, &root, windows),
     }
 }
 
-/// The real filesystem, for the Unix launcher.
-#[cfg(unix)]
+/// The real filesystem.
 struct RealFs;
 
-#[cfg(unix)]
 impl LookupFs for RealFs {
     fn read_sidecar(&self, path: &str) -> Result<Option<Vec<u8>>, ReadError> {
         read_regular_bounded(Path::new(path))
@@ -451,11 +486,13 @@ impl LookupFs for RealFs {
             .unwrap_or_default()
     }
 
+    #[cfg(unix)]
     fn is_executable_file(&self, path: &str) -> bool {
         use std::os::unix::fs::PermissionsExt;
         std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
     }
 
+    #[cfg(unix)]
     fn is_running_image(&self, path: &str) -> bool {
         use std::os::unix::fs::MetadataExt;
         // `current_exe` is `/proc/self/exe` on Linux and `_NSGetExecutablePath` on macOS.
@@ -464,6 +501,19 @@ impl LookupFs for RealFs {
         };
         std::fs::metadata(path).is_ok_and(|started| started.dev() == image.dev() && started.ino() == image.ino())
     }
+}
+
+/// Whether `program` is a batch file, which `CreateProcessW` would hand to `cmd.exe`.
+///
+/// Windows ignores trailing dots and spaces in a file name, so `tool.cmd. ` still runs as `tool.cmd`.
+fn is_batch_target(program: &str) -> bool {
+    let name = program.trim_end_matches(['.', ' ']);
+    [".bat", ".cmd"].iter().any(|extension| {
+        name.len()
+            .checked_sub(extension.len())
+            .and_then(|cut| name.get(cut..))
+            .is_some_and(|tail| tail.eq_ignore_ascii_case(extension))
+    })
 }
 
 /// Replaces the process with `program`; returns only the failure.
@@ -515,13 +565,144 @@ pub(super) fn run() -> Result<i32, ShimError> {
 
     #[expect(clippy::disallowed_methods, reason = "no ocx_env edge: the shim's size budget")]
     let inherited: Vec<(OsString, OsString)> = std::env::vars_os().collect();
-    let launch = plan_launch(&located, inherited, arguments.collect());
+    let launch = plan_launch(&located, inherited, arguments.collect(), false);
     let error = exec_program(&launch.program, &launch.args, launch.env);
     Err(ShimError::DirectExecFailed {
         program: launch.program,
         permission_denied: error.kind() == std::io::ErrorKind::PermissionDenied,
         reason: error.to_string(),
     })
+}
+
+/// The `.direct` launcher on Windows: finds the vendor root, then starts the tool.
+///
+/// A batch target goes through `std::process::Command`, whose batch-file escaping refuses what it cannot quote
+/// safely (BatBadBut, CVE-2024-24576), and anything else through the existing `CreateProcessW` path.
+#[cfg(windows)]
+pub(super) fn run_windows(started: &str) -> Result<i32, ShimError> {
+    #[expect(clippy::disallowed_methods, reason = "no ocx_env edge: the shim's size budget")]
+    let runfiles_dir = std::env::var_os("RUNFILES_DIR").map(|value| value.to_string_lossy().into_owned());
+    let cwd = std::env::current_dir()
+        .ok()
+        .and_then(|dir| dir.into_os_string().into_string().ok())
+        .ok_or(ShimError::SelfPathFailure)?;
+    let context = LookupContext {
+        cwd: &cwd,
+        runfiles_dir: runfiles_dir.as_deref(),
+        windows: true,
+    };
+    let located = match locate(started, &context, &RealFs)? {
+        Probed::Direct(located) => located,
+        Probed::Legacy(kind) => return Err(refuse(format!("unexpected .{kind} sidecar beside the direct launcher"))),
+    };
+
+    #[expect(clippy::disallowed_methods, reason = "no ocx_env edge: the shim's size budget")]
+    let inherited: Vec<(OsString, OsString)> = std::env::vars_os().collect();
+    let launch = plan_launch(&located, inherited, std::env::args_os().skip(1).collect(), true);
+    if is_batch_target(&launch.program) {
+        return spawn_batch(&launch);
+    }
+
+    // shortcut: an argument that is not valid Unicode is refused here, because the quoter works on `str`;
+    // `ocx exec` passes it through, so upgrade with a wide-character quoter when a tool needs one.
+    let mut command_line = String::new();
+    core::append_quoted_arg(&mut command_line, &launch.program);
+    for argument in &launch.args {
+        let text = argument.to_str().ok_or_else(|| ShimError::DirectArgumentRefused {
+            reason: format!("an argument for {} is not valid Unicode", launch.program),
+        })?;
+        command_line.push(' ');
+        core::append_quoted_arg(&mut command_line, text);
+    }
+    let block = environment_block(&launch.env);
+    super::spawn_child(Some(&launch.program), &command_line, Some(&block)).map_err(|win32| ShimError::SpawnFailure {
+        win32,
+        program: launch.program.clone(),
+    })
+}
+
+/// The `CREATE_UNICODE_ENVIRONMENT` block of `env`: `KEY=VALUE\0` entries, then one more `\0`.
+#[cfg(windows)]
+fn environment_block(env: &[(OsString, OsString)]) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+
+    let mut block: Vec<u16> = Vec::new();
+    for (key, value) in env {
+        block.extend(key.encode_wide());
+        block.push(u16::from(b'='));
+        block.extend(value.encode_wide());
+        block.push(0);
+    }
+    // An empty block is two terminators, or the child reads past it.
+    if block.is_empty() {
+        block.push(0);
+    }
+    block.push(0);
+    block
+}
+
+/// Starts a batch target with `std::process::Command` and holds it in a kill-on-close job until it exits.
+#[cfg(windows)]
+#[expect(
+    clippy::disallowed_types,
+    reason = "the launcher is not ocx: it has no ocx_package_manager edge, and std's batch-file escaping is the point"
+)]
+fn spawn_batch(launch: &Launch) -> Result<i32, ShimError> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError};
+    use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
+
+    super::install_console_ctrl_handler();
+    let job = super::create_kill_on_close_job();
+
+    let mut child = match std::process::Command::new(&launch.program)
+        .args(&launch.args)
+        .env_clear()
+        .envs(launch.env.iter().map(|(key, value)| (key, value)))
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(error) => {
+            if !job.is_null() {
+                // SAFETY: `job` is a valid handle, not used again.
+                unsafe { CloseHandle(job) };
+            }
+            // std refuses a batch argument it cannot quote safely with `InvalidInput`.
+            return Err(if error.kind() == std::io::ErrorKind::InvalidInput {
+                ShimError::DirectArgumentRefused {
+                    reason: format!(
+                        "an argument for {} cannot be passed to a batch file safely",
+                        launch.program
+                    ),
+                }
+            } else {
+                ShimError::SpawnFailure {
+                    win32: error.raw_os_error().map_or(0, |code| code as u32),
+                    program: launch.program.clone(),
+                }
+            });
+        }
+    };
+    // The window between spawn and assignment is std's: it exposes no job-list attribute to start the child inside.
+    // SAFETY: both handles are valid; `child` owns its process handle for the whole call.
+    if !job.is_null() && unsafe { AssignProcessToJobObject(job, child.as_raw_handle()) } == 0 {
+        // SAFETY: no pointers; reads thread-local last-error.
+        let last = unsafe { GetLastError() };
+        eprintln!("ocx-shim: job object assignment failed: {last}");
+    }
+    let status = child.wait();
+    if !job.is_null() {
+        // SAFETY: `job` is a valid handle, not used again.
+        unsafe { CloseHandle(job) };
+    }
+    match status {
+        // Full i32 passthrough: never remap or truncate.
+        Ok(status) => Ok(status.code().unwrap_or(1)),
+        Err(error) => Err(ShimError::SpawnFailure {
+            win32: error.raw_os_error().map_or(0, |code| code as u32),
+            program: launch.program.clone(),
+        }),
+    }
 }
 
 #[cfg(test)]
@@ -545,7 +726,9 @@ mod tests {
         files: HashMap<String, Vec<u8>>,
         unreadable: HashSet<String>,
         dirs: HashMap<String, Vec<String>>,
+        #[cfg(unix)]
         executables: HashSet<String>,
+        #[cfg(unix)]
         image: Option<String>,
     }
 
@@ -574,9 +757,11 @@ mod tests {
         fn list_dir(&self, dir: &str) -> Vec<String> {
             self.dirs.get(dir).cloned().unwrap_or_default()
         }
+        #[cfg(unix)]
         fn is_executable_file(&self, path: &str) -> bool {
             self.executables.contains(path)
         }
+        #[cfg(unix)]
         fn is_running_image(&self, path: &str) -> bool {
             self.image.as_deref() == Some(path)
         }
@@ -834,6 +1019,7 @@ mod tests {
     // ── started path (Unix) and V-61 ────────────────────────────────────────
 
     #[test]
+    #[cfg(unix)]
     fn a_relative_argv0_with_a_slash_is_joined_onto_the_working_directory() {
         let fs = FakeFs {
             image: Some("/work/bin/cmake".to_string()),
@@ -846,6 +1032,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_bare_argv0_takes_the_first_path_entry_holding_an_executable() {
         let fs = FakeFs {
             executables: HashSet::from(["/second/cmake".to_string(), "/third/cmake".to_string()]),
@@ -860,6 +1047,7 @@ mod tests {
 
     /// V-61: the `PATH` hit is a different file than the running image.
     #[test]
+    #[cfg(unix)]
     fn v61_a_path_hit_that_is_not_the_running_image_is_refused() {
         let fs = FakeFs {
             executables: HashSet::from(["/shadow/cmake".to_string()]),
@@ -871,6 +1059,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_bare_argv0_with_no_path_hit_is_an_own_path_failure() {
         let err = started_path_unix("cmake", "/work", Some("/nowhere"), &FakeFs::default()).unwrap_err();
         assert_eq!(err.exit_code(), 74);
@@ -936,7 +1125,6 @@ mod tests {
     fn located(json: &str, root: &str) -> Located {
         Located {
             sidecar: decode_sidecar(json.as_bytes(), "/s.direct", false).unwrap(),
-            started: format!("{root}/{SELF_PATH}"),
             root: root.to_string(),
         }
     }
@@ -964,6 +1152,7 @@ mod tests {
             &located,
             Vec::new(),
             vec![OsString::from("--x"), OsString::from("@VENDOR_DIR@")],
+            false,
         );
         assert_eq!(launch.program, "/v/p/bin/cmake");
         assert_eq!(
@@ -981,6 +1170,7 @@ mod tests {
             &located,
             pairs(&[("SECRET", "s"), ("LATE", "old"), ("KEEP", "k")]),
             Vec::new(),
+            false,
         );
         assert_eq!(launch.env, pairs(&[("KEEP", "k"), ("LATE", "v")]));
     }
@@ -993,7 +1183,7 @@ mod tests {
             {"key":"FLAGS","value":"-b","kind":"list","separator":" "},
             {"key":"FLAGS","value":"-a","kind":"list","separator":" "}]"#;
         let located = located(&sidecar_with("[]", "[]", env), "/v");
-        let launch = plan_launch(&located, pairs(&[("PATH", "/usr/bin:/v/one")]), Vec::new());
+        let launch = plan_launch(&located, pairs(&[("PATH", "/usr/bin:/v/one")]), Vec::new(), false);
         assert_eq!(
             launch.env,
             pairs(&[("FLAGS", "-b -a"), ("PATH", "/v/two:/v/one:/usr/bin")])
@@ -1004,8 +1194,95 @@ mod tests {
     fn an_env_key_compares_byte_exact_on_unix() {
         let env = r#"[{"key":"Path","value":"/x","kind":"constant"}]"#;
         let located = located(&sidecar_with("[]", r#"["PATH"]"#, env), "/v");
-        let launch = plan_launch(&located, pairs(&[("PATH", "/usr/bin")]), Vec::new());
+        let launch = plan_launch(&located, pairs(&[("PATH", "/usr/bin")]), Vec::new(), false);
         assert_eq!(launch.env, pairs(&[("Path", "/x")]));
+    }
+
+    // ── Windows: key fold (V-73), separators, batch dispatch (C-017) ────────
+
+    #[test]
+    fn v73_windows_unset_and_path_records_match_keys_case_insensitively() {
+        let env = r#"[{"key":"PATH","value":"@VENDOR_DIR@/bin","kind":"path"}]"#;
+        let located = located(&sidecar_with("[]", r#"["secret"]"#, env), "/v");
+        let launch = plan_launch(
+            &located,
+            pairs(&[("SECRET", "s"), ("Path", "\\V\\BIN")]),
+            Vec::new(),
+            true,
+        );
+        assert_eq!(
+            launch.env,
+            pairs(&[("Path", "\\v\\bin")]),
+            "one `Path` under its inherited spelling, its element equal to the record's under the fold, `SECRET` unset"
+        );
+    }
+
+    #[test]
+    fn v73_control_unix_keeps_a_differently_cased_key_apart() {
+        let env = r#"[{"key":"PATH","value":"/v/bin","kind":"path"}]"#;
+        let located = located(&sidecar_with("[]", "[]", env), "/v");
+        let launch = plan_launch(&located, pairs(&[("Path", "/usr/bin")]), Vec::new(), false);
+        assert_eq!(launch.env, pairs(&[("PATH", "/v/bin"), ("Path", "/usr/bin")]));
+    }
+
+    #[test]
+    fn windows_turns_slashes_into_backslashes_in_the_root_program_and_path_values() {
+        let env = r#"[{"key":"P","value":"@VENDOR_DIR@/a/b","kind":"path"},{"key":"C","value":"x/@VENDOR_DIR@/y","kind":"constant"}]"#;
+        let located = located(&sidecar_with(r#"["@VENDOR_DIR@/z/q"]"#, "[]", env), "C:/v/w");
+        let launch = plan_launch(&located, Vec::new(), Vec::new(), true);
+        assert_eq!(launch.program, "C:\\v\\w\\p\\bin\\cmake");
+        assert_eq!(
+            launch.args,
+            [OsString::from("C:\\v\\w/z/q")],
+            "only the root is converted in an argument"
+        );
+        assert_eq!(
+            launch.env,
+            pairs(&[("C", "x/C:\\v\\w/y"), ("P", "C:\\v\\w\\a\\b")]),
+            "a constant keeps its own slashes; the root inside it is native"
+        );
+    }
+
+    #[test]
+    fn a_target_is_a_batch_file_by_its_extension_after_trimming_trailing_dots_and_spaces() {
+        for batch in [
+            "C:\\v\\x.bat",
+            "C:\\v\\x.BAT",
+            "C:\\v\\x.Cmd",
+            "C:\\v\\x.CMD. ",
+            "C:\\v\\x.bat...",
+            "C:\\v\\x.cmd  ",
+            "C:\\v\\x.bat. . ",
+        ] {
+            assert!(is_batch_target(batch), "{batch:?} must take the batch path");
+        }
+        for other in [
+            "C:\\v\\x.batx",
+            "C:\\v\\x.cmd.exe",
+            "C:\\v\\x.exe",
+            "C:\\v\\x.com",
+            "C:\\v\\xbat",
+            "C:\\v\\x.ba",
+            "C:\\v\\x.bat.txt",
+            "",
+            ".",
+        ] {
+            assert!(!is_batch_target(other), "{other:?} must take the CreateProcessW path");
+        }
+    }
+
+    #[test]
+    fn a_refused_batch_argument_exits_64_naming_the_program() {
+        let err = ShimError::DirectArgumentRefused {
+            reason: "an argument for C:\\v\\x.bat cannot be passed to a batch file safely".to_string(),
+        };
+        assert_eq!(err.exit_code(), 64);
+        assert!(
+            err.stderr_message().starts_with("ocx-shim: "),
+            "{}",
+            err.stderr_message()
+        );
+        assert!(err.stderr_message().contains("x.bat"));
     }
 
     // ── real reads: V-60 ────────────────────────────────────────────────────
