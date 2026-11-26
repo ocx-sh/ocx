@@ -608,6 +608,17 @@ tasks:
       RUSTFLAGS="-D warnings --remap-path-prefix={{.RUST_SRC_DIR}}=/rustc/{{.RUSTC_COMMIT_HASH}}"
       cargo zigbuild -p ocx_shim --profile shim --locked --target {{.TARGET}}
 
+  shim:inputs:check:
+    desc: Fail when a launcher build input changed since the committed blobs were cut
+    summary: |
+      Compares the digest scripts/shim_inputs.py takes over the non-source
+      inputs of the launcher blobs (toolchain, `shim` profile, dependency
+      entries and lock closure, the shim:build command, the Zig and
+      cargo-zigbuild pins) with crates/ocx_store/src/shim_inputs.sha256.
+      Source changes under crates/ocx_shim and crates/ocx_env_apply are
+      judged by build-windows-shims.yml's recency step instead.
+    cmd: python3 -I scripts/shim_inputs.py --check
+
   shim:blob:check:
     desc: Run one committed launcher blob natively from a hand-laid vendored directory
     summary: |

@@ -6,7 +6,9 @@
 //! Every `ocx` embeds every blob so it can vendor for any platform. Refresh on every `crates/ocx_shim` or
 //! `crates/ocx_env_apply` change: take the `ocx-shim-fresh-<target>` artifacts from that change's
 //! `build-windows-shims.yml` run (or `task rust:shim:build TARGET=<triple>`), copy them to `shims/`, update
-//! the matching sha256 in the test module's `RECORDED_SHA256`.
+//! the matching sha256 in the test module's `RECORDED_SHA256`, and write `python3 scripts/shim_inputs.py
+//! --print` to `shim_inputs.sha256`. A change to any other build input (toolchain, `shim` profile, the
+//! launcher's dependencies, the Zig or cargo-zigbuild pin) needs the same refresh; that digest is how CI sees one.
 
 // Blobs built with rustc 1.95.0, cargo-zigbuild 0.22.3, Zig 0.16.0 (PyPI `ziglang==0.16.0`, sha256
 // 2317bbb91798556d9d0f38aabdac23db83f0979b25f767259ae474546724087c): nothing else pins Zig.

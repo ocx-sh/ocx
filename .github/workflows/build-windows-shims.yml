@@ -29,6 +29,8 @@ on:
       - '.github/workflows/build-windows-shims.yml'
       - '.github/workflows/launcher-blobs.yml'
       - 'scripts/launcher_blob_check.sh'
+      - 'scripts/shim_inputs.py'
+      - 'crates/ocx_store/src/shim_inputs.sha256'
       - 'test/tests/test_windows_shim.py'
       - 'test/tests/test_trampoline_exec.py'
       - 'test/conftest.py'
@@ -46,6 +48,8 @@ on:
       - '.github/workflows/build-windows-shims.yml'
       - '.github/workflows/launcher-blobs.yml'
       - 'scripts/launcher_blob_check.sh'
+      - 'scripts/shim_inputs.py'
+      - 'crates/ocx_store/src/shim_inputs.sha256'
       - 'test/tests/test_windows_shim.py'
       - 'test/tests/test_trampoline_exec.py'
       - 'test/conftest.py'
@@ -367,6 +371,12 @@ jobs:
           echo "Re-cut them from THIS run's ocx-shim-fresh-<target> artifacts and update"
           echo "every blob's SHA-256 in crates/ocx_store/src/shim.rs (ritual: its module doc)."
           exit 1
+
+      # The non-source half of the same question: a toolchain, profile, dependency or Zig bump changes
+      # the blobs as surely as a source edit, and the step above sees only the two source trees. Also
+      # last, after the refresh artifact is uploaded.
+      - name: Committed blobs must be re-cut when a build input changes
+        run: task rust:shim:inputs:check
 
   # Windows acceptance: the genuinely Win32-dependent shim behaviours
   # (PATHEXT resolution, CreateProcessW argv passthrough, the BatBadBut
