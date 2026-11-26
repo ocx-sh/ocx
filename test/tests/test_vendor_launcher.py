@@ -641,6 +641,11 @@ def test_byte_flipped_launcher_is_killed(
 def test_stripped_launcher_copy_differs_from_the_signed_blob(
     vendored_tool: tuple[Path, dict[str, Any]], tmp_path: Path
 ) -> None:
+    if platform.machine().lower() not in ("arm64", "aarch64"):
+        pytest.skip(
+            "the x86_64-apple-darwin launcher blob is unsigned by design; "
+            "only the aarch64-apple-darwin blob carries LC_CODE_SIGNATURE"
+        )
     out, manifest = vendored_tool
     launcher = _launcher(out, manifest, "tool")
     stripped = tmp_path / "stripped"

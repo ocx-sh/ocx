@@ -161,8 +161,8 @@ The result of `ocx vendor -o out -p linux/amd64+libc.glibc jq`, with made-up dig
 ```
 
 <!-- commands -->
-[cmd-vendor]: ./command-line/commands.md#vendor-root
-[cmd-package-vendor]: ./command-line/package-consuming.md#package-vendor
+[cmd-vendor]: ./command-line/commands.md#vendor
+[cmd-package-vendor]: ./command-line/package-publishing.md#package-vendor
 [cmd-env]: ./command-line/commands.md#env-root
 
 <!-- external -->
