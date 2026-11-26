@@ -145,6 +145,18 @@ pub(super) fn decode_sidecar(raw: &[u8], path: &str, windows: bool) -> Result<Di
     sidecar
         .validate(windows)
         .map_err(|err| refuse(format!("malformed sidecar {path}: {err}")))?;
+    // A NUL ends a Windows environment-block entry early, so the rest of the value would become a variable of its own.
+    let mut texts = sidecar.args.iter().chain(
+        sidecar
+            .env
+            .iter()
+            .flat_map(|record| std::iter::once(&record.value).chain(record.separator.as_ref())),
+    );
+    if texts.any(|text| text.contains('\0')) {
+        return Err(refuse(format!(
+            "malformed sidecar {path}: an argument or environment value contains NUL"
+        )));
+    }
     Ok(sidecar)
 }
 
@@ -516,6 +528,16 @@ fn is_batch_target(program: &str) -> bool {
     })
 }
 
+/// The refusal for a batch target whose path holds `%`: `cmd.exe` expands `%NAME%` inside the quoted script path,
+/// which std's batch escaping does not cover, so another script could run.
+fn batch_program_refusal(program: &str) -> Option<ShimError> {
+    program.contains('%').then(|| {
+        refuse(format!(
+            "batch target {program} contains '%', which cmd.exe would expand in its path"
+        ))
+    })
+}
+
 /// Replaces the process with `program`; returns only the failure.
 #[cfg(unix)]
 #[expect(
@@ -600,6 +622,9 @@ pub(super) fn run_windows(started: &str) -> Result<i32, ShimError> {
     let inherited: Vec<(OsString, OsString)> = std::env::vars_os().collect();
     let launch = plan_launch(&located, inherited, std::env::args_os().skip(1).collect(), true);
     if is_batch_target(&launch.program) {
+        if let Some(refusal) = batch_program_refusal(&launch.program) {
+            return Err(refusal);
+        }
         return spawn_batch(&launch);
     }
 
@@ -1110,6 +1135,36 @@ mod tests {
         let mut raw = sidecar_json(VENDOR_A, SELF_PATH);
         raw.resize(MAX_SIDECAR_BYTES as usize + 1, b' ');
         assert_eq!(decode_sidecar(&raw, "/s.direct", false).unwrap_err().exit_code(), 78);
+    }
+
+    /// A NUL in a value ends its `KEY=VALUE` entry in a Windows environment block, so the rest would be a new entry.
+    #[test]
+    fn a_nul_in_an_env_value_or_baked_argument_exits_78() {
+        let value = r#"[{"key":"K","value":"x\u0000OCX_SIGNING_KEY=s","kind":"constant"}]"#;
+        let raw = sidecar_with("[]", r#"["OCX_SIGNING_KEY"]"#, value);
+        assert_eq!(
+            decode_sidecar(raw.as_bytes(), "/s.direct", true)
+                .unwrap_err()
+                .exit_code(),
+            78
+        );
+        let raw = sidecar_with(r#"["a\u0000b"]"#, "[]", "[]");
+        assert_eq!(
+            decode_sidecar(raw.as_bytes(), "/s.direct", false)
+                .unwrap_err()
+                .exit_code(),
+            78
+        );
+    }
+
+    #[test]
+    fn a_batch_target_whose_path_holds_a_percent_sign_is_refused() {
+        assert!(batch_program_refusal("C:\\v\\x.cmd").is_none());
+        for program in ["C:\\a%b\\x.cmd", "C:\\v\\%PATH%.bat"] {
+            let err = batch_program_refusal(program).expect("refused");
+            assert_eq!(err.exit_code(), 78, "{program}");
+            assert!(err.stderr_message().contains(program), "{}", err.stderr_message());
+        }
     }
 
     #[test]
