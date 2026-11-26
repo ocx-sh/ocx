@@ -15,7 +15,6 @@ import os
 import platform
 import shlex
 import shutil
-import signal
 import stat
 import struct
 import subprocess
@@ -477,7 +476,9 @@ def test_tool_starts_second_package_tool_through_path(
     assert "second-ran:" in found.stdout
 
     # Control: a set that does not select the second package cannot find the bare name.
-    alone_out, alone_manifest = _vendor_project(ocx, tmp_path / "proj_alone", {"first": first})
+    alone_out, alone_manifest = _vendor_project(
+        ocx, tmp_path / "proj_alone", {"first": first}
+    )
     missing = _run(
         [str(_launcher(alone_out, alone_manifest, "first"))],
         cwd=tmp_path,
@@ -614,27 +615,58 @@ def test_launcher_survives_copy_hardlink_rename_and_tar_round_trip(
         assert result.returncode == 0, f"{tree.name}: {result.stderr}"
 
 
+def _codesign_verify(path: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["codesign", "--verify", str(path)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+
+
 @darwin_only
-def test_byte_flipped_launcher_is_killed(
+def test_launcher_signature_verifies_intact_and_fails_once_changed_or_removed(
     vendored_tool: tuple[Path, dict[str, Any]], tmp_path: Path
 ) -> None:
+    """The darwin/arm64 launcher's ad-hoc signature is what holds, not a kernel kill.
+
+    A changed byte fails `codesign --verify` without stopping the process on a
+    hosted runner, so the start of a changed copy is not asserted.
+    """
     if platform.machine() != "arm64":
-        pytest.skip("only Apple Silicon kills an invalidly signed binary")
+        pytest.skip("only the aarch64-apple-darwin launcher blob carries a signature")
     out, manifest = vendored_tool
     relative = _launcher(out, manifest, "tool").relative_to(out)
-    flipped = tmp_path / "flipped"
-    shutil.copytree(out, flipped, symlinks=True)
-    target = flipped / relative
-    data = bytearray(target.read_bytes())
-    data[len(data) // 4] ^= 0xFF
-    target.write_bytes(data)
+    intact = out / relative
 
-    result = _run([str(target)], cwd=tmp_path, env={"PATH": CLEAN_PATH})
-    assert result.returncode == -signal.SIGKILL
-
-    # Control: the untouched launcher runs.
-    clean = _run([str(out / relative)], cwd=tmp_path, env={"PATH": CLEAN_PATH})
+    verified = _codesign_verify(intact)
+    assert verified.returncode == 0, verified.stderr
+    clean = _run([str(intact)], cwd=tmp_path, env={"PATH": CLEAN_PATH})
     assert clean.returncode == 0, clean.stderr
+
+    changed_tree = tmp_path / "changed"
+    shutil.copytree(out, changed_tree, symlinks=True)
+    changed = changed_tree / relative
+    data = bytearray(changed.read_bytes())
+    data[len(data) // 4] ^= 0xFF
+    changed.write_bytes(data)
+    rejected = _codesign_verify(changed)
+    assert rejected.returncode != 0, "a one-byte change must fail codesign --verify"
+
+    stripped_tree = tmp_path / "stripped"
+    shutil.copytree(out, stripped_tree, symlinks=True)
+    stripped = stripped_tree / relative
+    subprocess.run(
+        ["codesign", "--remove-signature", str(stripped)],
+        check=True,
+        capture_output=True,
+    )
+    started = _run([str(stripped)], cwd=tmp_path, env={"PATH": CLEAN_PATH})
+    assert started.returncode != clean.returncode, (
+        f"an unsigned launcher must not start the tool; it exited {started.returncode}: "
+        f"{started.stderr}"
+    )
 
 
 @darwin_only
