@@ -448,24 +448,24 @@ pub async fn setup_owned(
 
 /// A package's directory inside a vendor tree, the one destination that is not the store.
 #[derive(Debug, Clone)]
-pub struct VendorTarget {
+pub(crate) struct VendorTarget {
     package_dir: std::path::PathBuf,
 }
 
 impl VendorTarget {
     /// `pinned`'s package directory under `layout`.
-    pub fn new(layout: &file_structure::VendorLayout, pinned: &ocx_oci::PinnedPackageRef) -> Self {
+    pub(crate) fn new(layout: &file_structure::VendorLayout, pinned: &ocx_oci::PinnedPackageRef) -> Self {
         let relative = file_structure::VendorLayout::relative_package_dir(pinned.registry(), &pinned.digest());
         Self {
             package_dir: layout.resolve(&relative),
         }
     }
 
-    pub fn package_dir(&self) -> &std::path::Path {
+    pub(crate) fn package_dir(&self) -> &std::path::Path {
         &self.package_dir
     }
 
-    pub fn content_dir(&self) -> std::path::PathBuf {
+    pub(crate) fn content_dir(&self) -> std::path::PathBuf {
         self.package_dir.join("content")
     }
 }
@@ -483,7 +483,7 @@ impl VendorTarget {
 /// # Errors
 ///
 /// As [`setup_owned`].
-pub async fn setup_vendored(
+pub(crate) async fn setup_vendored(
     mgr: &PackageManager,
     pinned: &ocx_oci::PinnedPackageRef,
     resolved: super::resolve::ResolvedChain,
