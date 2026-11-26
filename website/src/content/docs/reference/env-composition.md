@@ -133,7 +133,7 @@ Within one prompt the entries land in this order, front to back:
 
 See [Order on PATH][explanation-path-order].
 
-The trampoline body, its Windows sidecar and the name-collision rule are in [A trampoline composes at call time][explanation-trampolines] and [Name collisions][explanation-collisions].
+The trampoline record, its launcher and the name-collision rule are in [A trampoline composes at call time][explanation-trampolines] and [Name collisions][explanation-collisions].
 
 ## Visibility Surfaces {#visibility-surfaces}
 

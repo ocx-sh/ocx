@@ -108,23 +108,19 @@ The surprising part of `bin` mode is that a trampoline in `<home>/toolchain/acti
 [mise][mise-shims] ships both shapes and names them the same way round. `mise activate` recomposes the environment on every prompt, and `mise activate --shims` puts one shim directory on `PATH` instead. By contrast, [rustup][rustup-proxies] only ever ships the second, where `~/.cargo/bin/cargo` is a proxy that forwards to whichever toolchain is active. `env` and `bin` are those two positions, chosen per toolchain rather than once per install.
 :::
 
-The whole body is short, and what it bakes is the entire story:
+A trampoline is the native launcher plus a record `<name>.launch` of kind `toolchain`, the same pair on Linux, macOS and Windows. The record is short, and what it stores is the entire story:
 
-```sh title="launcher"
-#!/bin/sh
-# ocx-toolchain-trampoline
-unset OCX_GLOBAL OCX_PROJECT
-__ocx_binary='/home/dana/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx'
-exec "${OCX_BINARY_PIN:-$__ocx_binary}" --project '/home/dana/work/api' exec -- "${0##*/}" "$@"
+```json title="node.launch"
+{"kind":"toolchain","schema_version":1,"tier":"project","project_root":"/home/dana/work/api","ocx":"/home/dana/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx"}
 ```
 
-The `unset` line scrubs a stale selector that an older OCX earlier in the chain would still read; the current OCX ignores `OCX_GLOBAL`. Two values are baked and nothing else: the toolchain selector (`--project <root>`, or a bare `--global` for the global toolchain) and the absolute path to `ocx`. No tool path, no digest, no environment. The exec it runs layers over the environment the caller already has, like any explicit [`ocx exec`][cmd-run]. On Windows the same selector rides a one-line `<name>.exec` sidecar beside a native `<name>.exe`, carrying either the absolute project root or the literal `global`.
+The launcher removes `OCX_GLOBAL` and `OCX_PROJECT` from the child environment. It then runs `ocx --project <project_root> exec -- <name>`, or `ocx --global exec -- <name>` for the global toolchain. Two values are stored and nothing else: the toolchain tier with its project root, and the absolute path to `ocx`. No tool path, no digest, no environment. The exec it runs layers over the environment the caller already has, like any explicit [`ocx exec`][cmd-run].
 
-Two consequences follow directly. A config edit takes effect with no re-render: change `[env]`, add a binding, flip [`pinned`][config-pinned], and the next invocation composes against the new file. The trampoline body is byte-identical either way. And there is no baked value that can drift. The lock decides at call time which package a name resolves to, not what the renderer saw.
+Two consequences follow directly. A config edit takes effect with no re-render: change `[env]`, add a binding, flip [`pinned`][config-pinned], and the next invocation composes against the new file. The trampoline record is byte-identical either way. And there is no stored value that can drift. The lock decides at call time which package a name resolves to, not what the renderer saw.
 
-The absolute `ocx` path is baked rather than left as a bare `ocx` for a specific reason. In `bin` mode the interactive shell has `toolchain/active/bin` prepended, and a project may pin its own `ocx`. A bare-name fallback would make `/bin/sh` re-resolve the trampoline as itself.
+The absolute `ocx` path is stored rather than left as a bare `ocx` for a specific reason. In `bin` mode the interactive shell has `toolchain/active/bin` prepended, and a project may pin its own `ocx`. A bare-name lookup would re-resolve the trampoline as itself.
 
-That is an infinite loop before any OCX process starts, and no in-process guard can see it. The [asdf project hit exactly this][asdf-shim-loop]: a shim of `asdf` itself on `PATH`, re-resolving to the shim, hundreds of frames deep and hanging every command. [`OCX_BINARY_PIN`][env-ocx-binary-pin] still overrides the baked path.
+That is an infinite loop. The [asdf project hit exactly this][asdf-shim-loop]: a shim of `asdf` itself on `PATH`, re-resolving to the shim, hundreds of frames deep and hanging every command. The launcher therefore never searches its own directory and skips other launchers on its `PATH` walk. It exits 78 after 32 hops. [`OCX_BINARY_PIN`][env-ocx-binary-pin] still overrides the stored path.
 
 ## Name collisions \{#collisions\}
 

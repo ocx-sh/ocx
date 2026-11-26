@@ -20,7 +20,7 @@ Package-root paths are content-addressed and change on every upgrade, so never e
 | Current symlink | `--current` | `~/.ocx/symlinks/…/current` | **no** | "Always selected" path in shell profiles or IDE settings |
 | Your own link | `--link <PATH>` | `<PATH>` | **no** | A path your build or repository chooses, such as `./.tools/node` |
 
-All three symlink modes target the [package root][in-depth-storage-packages] directly. Consumers traverse one level in: `…/content/` for files, `…/entrypoints/` for launchers, or `…/metadata.json` to read the metadata. The `current` symlink exists only after you run `ocx package install --select nodejs/node:22` once, and `--current` fails until then.
+All three symlink modes target the [package root][in-depth-storage-packages] directly. Consumers traverse one level in: `…/content/` for files, `…/launchers/<generation>/` for launchers, or `…/metadata.json` to read the metadata. The `current` symlink exists only after you run `ocx package install --select nodejs/node:22` once, and `--current` fails until then.
 
 ```jsonc
 // .vscode/settings.json: path survives every upgrade
@@ -62,19 +62,19 @@ For automation, [`ocx package which`][cmd-which] prints the resolved package roo
 
 ## How the Windows launcher works \{#stable-paths-windows\}
 
-On Windows, `ocx package install` and `ocx package select` generate two files per entry point in the package's `entrypoints/` directory:
+On every platform OCX writes two files per entry point into the package's `launchers/<generation>/` directory. On Windows they are:
 
 | File | Role |
 |------|------|
 | `<name>.exe` | Native launcher, the sole Windows entry point for all callers |
-| `<name>.shim` | One-line sidecar carrying the absolute package root |
+| `<name>.launch` | JSON record of kind `package`, carrying the absolute package root |
 
 There is no `.cmd` launcher. `.EXE` is always present in the default Windows [`PATHEXT`][windows-pathext]. Bare-name resolution in `cmd.exe`, [PowerShell][powershell-docs] and [Git Bash][git-bash] therefore finds `<name>.exe` with no `PATHEXT` configuration.
 
-The `.exe` launcher reads `<name>.shim` at invocation time. It then calls `CreateProcessW` directly to spawn `ocx launcher exec`, and it does not route through `cmd.exe`. Caller arguments never pass through a second `cmd.exe` parse, which closes the [BatBadBut / CVE-2024-24576][batbadbut-advisory] class of argument-injection vulnerability.
+The `.exe` launcher reads `<name>.launch` at invocation time. It then calls `CreateProcessW` directly to spawn `ocx launcher exec`, and it does not route through `cmd.exe`. Caller arguments never pass through a second `cmd.exe` parse, which closes the [BatBadBut / CVE-2024-24576][batbadbut-advisory] class of argument-injection vulnerability.
 
 :::note[How the launcher reaches `ocx`]
-The launcher resolves `ocx` using `OCX_BINARY_PIN` if the variable is **defined** in the environment, even if empty. It falls back to `PATH`-resolved `ocx` only when the variable is completely unset. See [`OCX_BINARY_PIN`][env-ocx-binary-pin] for details.
+The launcher resolves `ocx` using `OCX_BINARY_PIN` when the variable is non-empty. An empty value counts as unset. Otherwise the launcher walks `PATH` for an `ocx`, skipping its own directory and other launchers. See [`OCX_BINARY_PIN`][env-ocx-binary-pin] for details.
 :::
 
 The launcher is unsigned, which does not affect CI, Bazel or dev containers. SmartScreen can warn on an interactive download.
