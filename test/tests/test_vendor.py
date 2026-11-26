@@ -791,7 +791,7 @@ def test_stale_lock_exits_data_error_until_relocked(
 def _tree_listing(root: Path) -> list[tuple[str, str, int, int]]:
     """Path, type, mode and mtime of every entry, links not followed.
 
-    C-008: directories, links and the files ocx writes carry fixed modes and the normalised mtime;
+    Directories, links and the files ocx writes carry fixed modes and the normalised mtime;
     package content keeps the archive's mtime and masked mode, equal across hosts.
     """
     rows = []
