@@ -91,11 +91,11 @@ impl ShimBinStore {
         self.root.join(format!("{}.exe", digest.hex()))
     }
 
-    /// Publishes the embedded blob of the host's target triple; see [`ensure_blob`](Self::ensure_blob).
+    /// Publishes the embedded blob of the host's target triple; see `ensure_blob`.
     ///
     /// # Errors
     ///
-    /// The host has no launcher blob, or [`ensure_blob`](Self::ensure_blob) fails.
+    /// The host has no launcher blob, or `ensure_blob` fails.
     pub async fn ensure(&self) -> Result<PathBuf> {
         let blob = crate::shim::host_blob().ok_or_else(|| {
             ocx_util::error::FileError::new(&self.root, std::io::Error::other("no launcher blob for this host"))
