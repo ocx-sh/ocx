@@ -114,6 +114,8 @@ Launchers are `.exe` files with a `.direct` file beside them. A declared binary 
 
 Every other program starts through `CreateProcessW` with the exit code passed through. Path rules for a `windows/*` platform are stricter than on Unix, listed in the [manifest reference][ref-manifest-paths].
 
+A launcher starts a program whose path is longer than 260 characters. A working directory that long still fails in Windows itself, and a batch entry point runs through `cmd.exe`, which has the same limit. Keep the directory the tree sits in short, and under [Bazel][bazel] use a short output root.
+
 ## Errors \{#vendor-errors\}
 
 | Exit | Slug | Meaning |
