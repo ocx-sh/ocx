@@ -1616,6 +1616,25 @@ mod tests {
         assert_eq!(alone.available_platforms, ["darwin/arm64", "linux/amd64"]);
     }
 
+    /// Design § 5.2 is silent on the package tier: a package with no leaf for `-p` keeps the resolution error (79).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_package_without_a_leaf_for_the_platform_keeps_the_resolution_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (source, leaf) = register_leaf(FakeManifestSource::default(), serde_json::json!([]));
+        let manager = manager_over(dir.path(), register_index(source, "1.0", &leaf, &[("linux", "amd64")]));
+        let windows: Platform = "windows/amd64".parse().expect("platform");
+
+        let error = select(&manager, &packages_request(vec![package("tool", "1.0")], windows))
+            .await
+            .expect_err("no windows leaf");
+        assert_eq!(error.classify(), Some(ExitCode::NotFound), "{error:?}");
+
+        // Control: the platform the index offers resolves.
+        select(&manager, &packages_request(vec![package("tool", "1.0")], linux_amd64()))
+            .await
+            .expect("linux leaf");
+    }
+
     #[test]
     fn shared_platforms_intersect_and_an_any_offer_narrows_nothing() {
         let set = |keys: &[&str]| keys.iter().map(|key| (*key).to_owned()).collect::<BTreeSet<_>>();
@@ -2089,6 +2108,28 @@ mod tests {
         assert!(matches!(error, VendorError::OutputNotEmpty { .. }), "{error:?}");
         assert!(output.join("keep").is_file(), "DIR is left as it was");
     }
+    /// C-002: a symlink at `DIR` is refused even when it points at an empty directory; an absent `DIR` is free.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_symlink_at_the_output_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let empty = dir.path().join("empty");
+        std::fs::create_dir(&empty).expect("dir");
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&empty, &link).expect("symlink");
+
+        let error = ensure_output_is_free(&link).await.expect_err("a symlink is refused");
+        assert!(matches!(error, VendorError::OutputNotEmpty { .. }), "{error:?}");
+        assert_eq!(error.classify(), Some(ExitCode::UsageError));
+
+        ensure_output_is_free(&empty)
+            .await
+            .expect("control: an empty directory is free");
+        ensure_output_is_free(&dir.path().join("absent"))
+            .await
+            .expect("control: an absent path is free");
+    }
+
     // ── Content half: launchers and sidecars over a staged tree ──────────────
 
     use ocx_env_apply::direct::DirectSidecar as WrittenSidecar;
