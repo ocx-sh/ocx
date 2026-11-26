@@ -34,7 +34,7 @@ from src.vendor_fixtures import (
     windows_only_package,
 )
 
-pytestmark = pytest.mark.command("package vendor")
+pytestmark = pytest.mark.command("package_vendor")
 
 EXIT_USAGE = 64
 EXIT_DATA = 65
