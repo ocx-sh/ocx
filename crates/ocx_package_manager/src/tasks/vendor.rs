@@ -1014,7 +1014,7 @@ async fn write_entrypoint_launchers(
                 args,
                 &environment.items,
             );
-            crate::launcher::direct::write_direct_launcher(&dir, &entry.name, blob, &sidecar).await?;
+            crate::launcher::direct::write_direct_launcher_for(&dir, &entry.name, blob, &sidecar, windows).await?;
         }
     }
     Ok(())
@@ -1045,7 +1045,7 @@ async fn write_selection_launchers(
             Vec::new(),
             &environment.items,
         );
-        crate::launcher::direct::write_direct_launcher(&dir, &tool.name, blob, &sidecar).await?;
+        crate::launcher::direct::write_direct_launcher_for(&dir, &tool.name, blob, &sidecar, windows).await?;
     }
     Ok(())
 }
