@@ -5,6 +5,8 @@ use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
+use ocx_env_apply::{ApplyKind, KeyFold, apply_one};
+
 /// Environment variable key, uppercased on Windows (case-insensitive there); an `OsString`
 /// so a non-UTF-8 Unix name survives.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -75,15 +77,27 @@ impl Env {
         self.vars.insert(EnvKey::new(key), value.into());
     }
 
+    /// Folds `value` into the variable `key` through the one apply rule, `ocx_env_apply::apply_one`.
+    fn apply(&mut self, key: impl Into<OsString>, kind: ApplyKind, value: &OsStr, separator: Option<&str>) {
+        let key = EnvKey::new(key);
+        let fold = if cfg!(windows) {
+            KeyFold::AsciiCaseInsensitive
+        } else {
+            KeyFold::Exact
+        };
+        let folded = apply_one(
+            self.vars.get(&key).map(OsString::as_os_str),
+            kind,
+            value,
+            separator,
+            fold,
+        );
+        self.vars.insert(key, folded);
+    }
+
     /// Prepends `value` to the path-style variable `key`, moving an existing occurrence to the front.
     pub fn add_path(&mut self, key: impl Into<OsString>, value: impl Into<OsString>) {
-        let key = EnvKey::new(key);
-        let value = value.into();
-        let new_value = match self.vars.get(&key) {
-            Some(existing) => ocx_env_apply::move_to_front(existing, &value),
-            None => value,
-        };
-        self.vars.insert(key, new_value);
+        self.apply(key, ApplyKind::Path, &value.into(), None);
     }
 
     /// Appends `value` to the list-style variable `key`, moving an existing occurrence to the back.
@@ -93,10 +107,7 @@ impl Env {
         if value.is_empty() {
             return;
         }
-        let key = EnvKey::new(key);
-        let existing = self.vars.get(&key).map(|v| v.to_string_lossy().into_owned());
-        let folded = ocx_env_apply::append_unique(existing.as_deref().unwrap_or_default(), value, separator);
-        self.vars.insert(key, OsString::from(folded));
+        self.apply(key, ApplyKind::List, OsStr::new(value), Some(separator));
     }
 
     /// Borrowing iterator over `(key, value)` pairs, in unspecified order.

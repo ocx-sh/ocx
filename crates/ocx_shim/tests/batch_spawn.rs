@@ -2,7 +2,7 @@
 // Copyright 2026 The OCX Authors
 
 //! A vendored `.cmd` target on Windows, end to end: hostile arguments never run an injected command (BatBadBut,
-//! CVE-2024-24576). The launcher either hands the argument to the batch file or refuses it with exit 64.
+//! CVE-2024-24576). An argument std can quote reaches the batch file (exit 0); one holding a line break is refused (exit 64).
 //!
 //! Runs on Windows CI only; the dispatch decision itself is a host-run unit in `direct.rs`.
 #![cfg(windows)]
@@ -90,33 +90,43 @@ fn a_plain_argument_reaches_the_batch_file_verbatim() {
     }
 }
 
+/// std quotes every metacharacter for a batch file, so these reach the script inert and the launcher exits 0.
 #[test]
-fn a_hostile_argument_never_runs_an_injected_command() {
+fn a_hostile_argument_std_can_quote_runs_no_injected_command() {
     let injection = format!("echo INJECTED>{MARKER}");
-    let hostile = [
+    let quotable = [
         format!("x&{injection}"),
         format!("x\"&{injection}&\""),
         format!("x|{injection}"),
         format!("x^&{injection}"),
-        format!("x\n{injection}"),
-        format!("x\r\n{injection}"),
         "%PATH%".to_string(),
         "%CD%&%CD%".to_string(),
         "\"".to_string(),
     ];
-    for argument in hostile {
-        let vendor = Vendor::new("hostile");
+    for argument in quotable {
+        let vendor = Vendor::new("quotable");
         let output = vendor.run(&argument);
-        let code = output.status.code();
-        assert!(
-            matches!(code, Some(0 | 64)),
-            "{argument:?} exited {code:?}: {}",
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{argument:?}: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        if code == Some(64) {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            assert!(stderr.starts_with("ocx-shim: "), "{argument:?}: {stderr:?}");
-        }
+        assert!(!vendor.injected(), "{argument:?} ran an injected command");
+    }
+}
+
+/// std refuses a line break, which cmd.exe would read as the end of the command: the launcher exits 64 naming the argument.
+#[test]
+fn an_argument_with_a_line_break_is_refused_with_exit_64() {
+    let injection = format!("echo INJECTED>{MARKER}");
+    for argument in [format!("x\n{injection}"), format!("x\r\n{injection}")] {
+        let vendor = Vendor::new("refused");
+        let output = vendor.run(&argument);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(64), "{argument:?}: {stderr}");
+        assert!(stderr.starts_with("ocx-shim: "), "{argument:?}: {stderr:?}");
+        assert!(stderr.contains("argument 1 "), "{argument:?}: {stderr:?}");
         assert!(!vendor.injected(), "{argument:?} ran an injected command");
     }
 }

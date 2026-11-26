@@ -7,6 +7,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use crate::windows_path::check_segment;
 use crate::{ApplyKind, KeyFold};
 
 /// The only `schema_version` this release writes and reads.
@@ -146,26 +147,13 @@ fn relative_path_ok(path: &str, windows: bool) -> bool {
         if matches!(segment, "" | "." | "..") {
             return false;
         }
-        !windows || !(segment.contains([':', '\\']) || segment.ends_with(['.', ' ']) || is_device_name(segment))
+        !windows || check_segment(segment).is_ok()
     })
-}
-
-/// A Windows device name with any extension: `CON`, `NUL.txt`, `com1.tar.gz`.
-fn is_device_name(segment: &str) -> bool {
-    let stem = segment.split('.').next().unwrap_or(segment);
-    // Byte-wise: a multi-byte character makes `stem[..3]` a non-boundary slice.
-    let bytes = stem.as_bytes();
-    ["CON", "PRN", "AUX", "NUL"]
-        .iter()
-        .any(|d| bytes.eq_ignore_ascii_case(d.as_bytes()))
-        || (bytes.len() == 4
-            && (bytes[..3].eq_ignore_ascii_case(b"COM") || bytes[..3].eq_ignore_ascii_case(b"LPT"))
-            && matches!(bytes[3], b'1'..=b'9'))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{DirectSidecar, SidecarError, is_device_name, key_eq};
+    use super::{DirectSidecar, SidecarError, key_eq};
     use crate::KeyFold;
 
     fn sidecar(program: &str, env_key: &str, unset: &[&str]) -> DirectSidecar {
@@ -292,14 +280,13 @@ mod tests {
             "COM\u{e9}\u{e9}",
             "\u{e9}",
         ] {
-            assert!(!is_device_name(segment), "{segment}");
             assert!(
                 sidecar(&format!("@VENDOR_DIR@/{segment}"), "PATH", &[])
                     .validate(true)
                     .is_ok()
             );
         }
-        assert!(is_device_name("con.\u{e9}"));
+        assert!(sidecar("@VENDOR_DIR@/con.\u{e9}", "PATH", &[]).validate(true).is_err());
     }
 
     /// The `__OCX_` prefix folds ASCII case on Windows and stays exact on Unix.
@@ -341,9 +328,11 @@ mod tests {
             "@VENDOR_DIR@/C:/x",
             "@VENDOR_DIR@/a./b",
             "@VENDOR_DIR@/lpt9.txt",
+            "@VENDOR_DIR@/COM0",
+            "@VENDOR_DIR@/lpt0.txt",
         ] {
             assert!(sidecar(p, "PATH", &[]).validate(true).is_err(), "{p}");
         }
-        assert!(is_device_name("com1.tar.gz") && !is_device_name("COM0") && !is_device_name("console"));
+        assert!(sidecar("@VENDOR_DIR@/console", "PATH", &[]).validate(true).is_ok());
     }
 }

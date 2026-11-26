@@ -582,7 +582,16 @@ async fn process_directory(req: SpawnRequest, ctx: WalkContext) -> Result<Assemb
             match &contributor.kind {
                 EntryKind::File { size } => {
                     // Safe only because every `dest_dir` is created before its request is posted.
-                    link_mode.place_in_existing_parent(&contributor.src_path, &dest_path)?;
+                    match link_mode {
+                        LinkMode::Hardlink => link_mode.place_in_existing_parent(&contributor.src_path, &dest_path)?,
+                        // A copy moves the file's bytes, so it must not hold an async worker.
+                        LinkMode::Copy => {
+                            let (source, dest) = (contributor.src_path.clone(), dest_path.clone());
+                            tokio::task::spawn_blocking(move || link_mode.place_in_existing_parent(source, dest))
+                                .await
+                                .map_err(|e| file_error(&dest_path, std::io::Error::other(e)))??;
+                        }
+                    }
                     stats.files_hardlinked += 1;
                     stats.bytes_hardlinked += size;
                 }

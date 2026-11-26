@@ -697,7 +697,7 @@ impl PackageManager {
         let no_patches = scope.opt_out();
         // Every env caller composes here, so none can disagree on link-following or group-heal order.
         let paths = match (&scope, scope.toolchain_links()) {
-            (EnvScope::Vendor { token_root }, _) => composer::ComposePaths::vendor(token_root).targeting(platform),
+            (EnvScope::Vendor { token_root }, _) => composer::ComposePaths::vendor(token_root),
             (_, Some(links)) => composer::ComposePaths::resolve(links, self.file_structure(), platform).await?,
             (_, None) => composer::ComposePaths::digest_only(),
         };

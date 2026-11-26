@@ -508,23 +508,19 @@ pub(crate) async fn setup_vendored(
     );
     let (layer_digests, dependencies) = (layers?.digests, dependencies?);
 
-    let layer_contents: Vec<std::path::PathBuf> = layer_digests
-        .iter()
-        .map(|digest| mgr.file_structure().layers.content(pinned.registry(), digest))
-        .collect();
-    let sources: Vec<&std::path::Path> = layer_contents.iter().map(AsRef::as_ref).collect();
-    let placements = layer_placements(&manifest, &metadata)?;
     tokio::fs::create_dir_all(target.package_dir())
         .await
         .map_err(|e| PackageErrorKind::Internal(crate::Error::InternalFile(target.package_dir().to_path_buf(), e)))?;
-    ocx_store::file_structure::assemble_from_layers_with_layouts(
-        &sources,
-        &placements,
+    assemble_layers(
+        mgr.file_structure(),
+        pinned,
+        &layer_digests,
+        &manifest,
+        &metadata,
         &target.content_dir(),
         ocx_store::hardlink::LinkMode::Copy,
     )
-    .await
-    .map_err(|error| PackageErrorKind::Internal(error.into()))?;
+    .await?;
 
     let resolved_package = resolved_package_of(&metadata, &dependencies);
     let dir = file_structure::PackageDir::with_root(target.package_dir().to_path_buf());
@@ -685,23 +681,17 @@ async fn setup_owned_impl(
         .map_err(|e| PackageErrorKind::Internal(crate::Error::InternalFile(layers_dir.clone(), e)))?;
     link_layers_in_temp(&pkg, pinned.registry(), &layer_digests, fs)?;
 
-    let layer_contents: Vec<std::path::PathBuf> = layer_digests
-        .iter()
-        .map(|d| fs.layers.content(pinned.registry(), d))
-        .collect();
-    let sources: Vec<&std::path::Path> = layer_contents.iter().map(AsRef::as_ref).collect();
-    // Layers are stored unstripped, so placement applies here; `placements` aligns 1:1 with
-    // `sources` only because `extract_layers` returns manifest order.
-    let placements = layer_placements(&manifest, &metadata)?;
     let extract_watch = Stopwatch::start(timed);
-    ocx_store::file_structure::assemble_from_layers_with_layouts(
-        &sources,
-        &placements,
+    assemble_layers(
+        fs,
+        pinned,
+        &layer_digests,
+        &manifest,
+        &metadata,
         &pkg.content(),
         ocx_store::hardlink::LinkMode::Hardlink,
     )
-    .await
-    .map_err(|error| PackageErrorKind::Internal(error.into()))?;
+    .await?;
 
     if let Some(entrypoints) = metadata.entrypoints()
         && !entrypoints.is_empty()
@@ -800,6 +790,29 @@ fn check_package_artifact_type(manifest: &ocx_oci::ImageManifest) -> Result<(), 
             },
         ));
     }
+    Ok(())
+}
+
+/// Assembles the extracted layers into `content_dir`; `placements` aligns 1:1 with the layer
+/// contents only because `extract_layers` returns manifest order.
+async fn assemble_layers(
+    fs: &file_structure::FileStructure,
+    pinned: &ocx_oci::PinnedPackageRef,
+    layer_digests: &[ocx_oci::Digest],
+    manifest: &ocx_oci::ImageManifest,
+    metadata: &metadata::Metadata,
+    content_dir: &std::path::Path,
+    link_mode: ocx_store::hardlink::LinkMode,
+) -> Result<(), PackageErrorKind> {
+    let layer_contents: Vec<std::path::PathBuf> = layer_digests
+        .iter()
+        .map(|digest| fs.layers.content(pinned.registry(), digest))
+        .collect();
+    let sources: Vec<&std::path::Path> = layer_contents.iter().map(AsRef::as_ref).collect();
+    let placements = layer_placements(manifest, metadata)?;
+    ocx_store::file_structure::assemble_from_layers_with_layouts(&sources, &placements, content_dir, link_mode)
+        .await
+        .map_err(|error| PackageErrorKind::Internal(error.into()))?;
     Ok(())
 }
 

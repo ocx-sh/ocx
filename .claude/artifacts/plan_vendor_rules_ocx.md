@@ -8,7 +8,7 @@
 - **Tier-grammar:** 5
 - **Updated:** 2026-11-26
 - **Active phase:** 5 — ocx side landed (CW, P1-P10, I1); rules_ocx side and X with the other sub-orchestrator
-- **Step:** /hex-review high (ocx side only, `origin/main...6da31abe`) → Request Changes; convergence gap row RV1 appended; rules_ocx side not yet reviewed
+- **Step:** /hex-execute → review-fix RV1 (ocx side; 23 findings of /hex-review high on `origin/main...6da31abe`); contract wave `2e9605f3`, pipelines rvfix-pa…pf running
 - **Feature branch:** ocx `hex/bazel-rbe-rules-ocx` (pipelines on `hex/bazel-rbe-rules-ocx--<pipeline>`, worktrees under `.agents/worktrees/`); rules_ocx one branch `hex/bazel-rbe-rules-ocx` (§ rules_ocx branch mechanics)
 - **Last update:** 2026-11-26 (after 6da31abe: chore: the shim store's public docs name its private publish helper without linking it)
 - **Next:** /hex-execute .claude/artifacts/plan_vendor_rules_ocx.md
@@ -71,6 +71,7 @@ Each is decided under the goal loop's authority; a divergence from the design or
 | DP-22 | `VendorReport.platform` is the platform object every other report carries, not design § 4.3's string. | the contract lint (L11) reds a string platform in a report root; the house contract wins over the design's shorthand. The on-disk `manifest.json` keeps its platform string (§ 4.1) |
 | DP-23 | Files ocx writes into `DIR` (launchers 0755, sidecars and `manifest.json` 0644) carry fixed modes and the normalised mtime, not the host umask and clock. | found by P10's V-09 proof; C-008 "normalised modes and mtimes; host-independent bytes" |
 | DP-24 | Trust refusals of `ocx vendor` keep the codes `ocx package install` gives for the same policy (an unsigned package under a covering policy: 79), not design § 5.2's 81. | C-024 says the manifest path runs the same trust checks; one trust path, one code. Owner may revisit the § 5.2 row |
+| DP-25 | Review-fix RV1's one Windows path-segment rule lives in `ocx_env_apply::windows_path` (the lowest crate the launcher, `ocx_package` and `ocx_store` all reach; `ocx_store` gains that edge) and refuses COM0, LPT0 and the superscript COM/LPT forms, the strictest of the three former copies. The Windows command lookup's extension list is the pure `ocx_config::env::pathext_extensions`, which `ocx vendor` applies with the default `PATHEXT` for a Windows target. | the owner's "one implementation" rule; Windows itself reserves those names, and the launcher's blobs are re-cut once for this round anyway |
 | DP-12 | Tier stays `high` although Phase 3 classifies scope large (tier-high.md says re-run as `xhigh`). | the caller fixed the tier; every artifact large scope demands exists and is accepted; what `xhigh` adds (research breadth, panel) is never repeated on an accepted ADR. Retro entry written |
 
 ## The R-5 cut against the source's Requirements
@@ -823,3 +824,8 @@ worktree, landed-grep, owner assertion red, reverted green; "CI" = not runnable 
   --all-targets --locked -- -D warnings` green; `cargo fmt --check` green; lint tier 805 passed; `.claude/tests` 607 passed.
   Not run here: Bazel gates, macOS/Windows cases, the full acceptance suite (CI). rules_ocx pipelines CW-R, R1-R9 and X:
   pending in this table — the other sub-orchestrator runs them.
+- 2026-11-26 — /hex-execute review-fix RV1 (ocx side) started from `33a9c0c1`: contract wave `2e9605f3` (shared Windows segment rule in
+  `ocx_env_apply::windows_path`, `pathext_extensions`, `ocx_store` → `ocx_env_apply` edge; DP-25). Pipelines on
+  `hex/bazel-rbe-rules-ocx--rvfix-<p>`: pa (vendor task, launcher writer, vendor layout; findings 3-7, 12-14, 17, 18, 21), pb (env_apply,
+  binary name, config dispatch, shim; 12, 15, 21), pc (store copy, shim comment, pull/composer dedup; 9, 17, 20), pd (CLI options; 16),
+  pe (contract rotation, shim workflow; 8, 10), pf (docs, two acceptance modules, the 32-tool observation; 1, 2, 11, 19, 21, 22, 23).

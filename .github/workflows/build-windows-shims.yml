@@ -324,6 +324,8 @@ jobs:
       # per-link build id). Reachability can. Runs LAST so the fresh-blob
       # artifact this failure tells you to use has already been uploaded.
       - name: Committed blobs must be re-cut when shim sources change
+        env:
+          COMMITTED: ${{ steps.paths.outputs.committed }}
         run: |
           set -euo pipefail
           # Recency, not membership. A range check ("did this branch touch both
@@ -340,7 +342,8 @@ jobs:
           # `crates/ocx_env_apply/` is the shim's sidecar decoder: a change there
           # changes the blob's bytes the same way.
           last_src="$(git log -1 --format=%H HEAD -- crates/ocx_shim/ crates/ocx_env_apply/ ':(exclude)crates/ocx_shim/BUILD.bazel' ':(exclude)crates/ocx_env_apply/BUILD.bazel')"
-          last_blob="$(git log -1 --format=%H HEAD -- crates/ocx_store/src/shims/)"
+          # This leg's own blob: re-cutting one of the six must not clear the check for the other five.
+          last_blob="$(git log -1 --format=%H HEAD -- "$COMMITTED")"
           if [ -z "$last_src" ]; then
             echo "no shim source history; nothing to compare"; exit 0
           fi

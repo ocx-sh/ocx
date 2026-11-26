@@ -36,7 +36,7 @@ ocx package vendor -o /work/tools -p linux/amd64 ocx.sh/jqlang/jq:1.8
 
 </ShellSession>
 
-`-o` must name an absolute path that does not exist or is an empty directory. Anything else exits 64 before any request, and the directory stays unchanged. The tree is built beside the target and renamed into place, so a failed run leaves no partial directory.
+`-o` names a path, relative to the working directory or absolute, that does not exist or is an empty directory. Anything else exits 64 before any request, and the directory stays unchanged. The tree is built beside the target and renamed into place, so a failed run leaves no partial directory.
 
 `-p` takes one platform and defaults to the host. A binding with no build for that platform at the locked version exits 78.
 
@@ -52,7 +52,7 @@ The directory carries three top-level entries, described in the [manifest refere
 
 A launcher is a copy of one fixed binary for the platform. Its `.direct` file names the program to start and the environment to apply, as paths relative to the directory.
 
-Add `--omit-links` to write no symlinks. The manifest still lists them, for consumers that recreate them. Use it where the target cannot hold symlinks, for example a Windows host without the privilege.
+Add `--omit-links` to write no symlinks. The manifest still lists them, for consumers that recreate them. Use it where the target cannot hold symlinks, for example a Windows host without the privilege. Launchers that resolve through a link stay broken until the consumer recreates the links from `tree.links`, by design.
 
 ## Run it \{#vendor-run\}
 
@@ -131,8 +131,8 @@ All other exit codes follow the [exit code reference][ref-exit-codes].
 [bazel]: https://bazel.build/
 
 {/* commands */}
-[cmd-vendor]: ../reference/command-line/commands.md#vendor-root
-[cmd-package-vendor]: ../reference/command-line/package-consuming.md#package-vendor
+[cmd-vendor]: ../reference/command-line/commands.md#vendor
+[cmd-package-vendor]: ../reference/command-line/package-publishing.md#package-vendor
 [cmd-exec]: ../reference/command-line/commands.md#exec
 
 {/* internal */}
