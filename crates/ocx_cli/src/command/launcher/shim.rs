@@ -114,7 +114,7 @@ impl LauncherShim {
         // re-enters forever at 100% CPU. `prepare_lazy` cannot catch that claim: no content exists yet.
         let shim_bin = context.file_structure().shims.shim_dir(&self.identifier).bin();
         if let Some(path) = process_env.get("PATH") {
-            let pruned = ocx_util::path::remove_segment(path, shim_bin.as_os_str());
+            let pruned = ocx_env_apply::remove_segment(path, shim_bin.as_os_str());
             process_env.set("PATH", pruned);
         }
 

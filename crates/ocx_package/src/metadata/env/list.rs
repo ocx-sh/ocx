@@ -44,7 +44,7 @@ pub struct List {
 
 /// A separator ocx can fold with: non-empty, and free of `=`, `\n` and `\r`.
 ///
-/// Empty turns [`append_unique`](ocx_util::list::append_unique) into a substring
+/// Empty turns [`append_unique`](ocx_env_apply::append_unique) into a substring
 /// scan that deletes text from unrelated elements; `ocx exec --env
 /// KEY:list:SEP=VALUE` splits on the first `=`; a line break injects lines into
 /// every line-oriented export.

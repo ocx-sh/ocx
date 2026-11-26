@@ -211,7 +211,7 @@ fn parse_env_value(scope: &str, key: &str, value: &toml::Value) -> Result<EnvVal
 
     // A path entry names one directory: an embedded separator splits into
     // segments the dedup and `remove_segment` never match.
-    if kind == ModifierKind::Path && literal.contains(ocx_util::path::PATH_SEPARATOR) {
+    if kind == ModifierKind::Path && literal.contains(ocx_env_apply::PATH_SEPARATOR) {
         // Refused here: `ocx exec` and the shell emitters never reach the reconciler's drop.
         return Err(ProjectErrorKind::EnvPathSeparatorInValue {
             scope: scope.to_string(),
@@ -524,7 +524,7 @@ mod tests {
     /// gets a scope/key message instead of a warn line the prompt hook discards.
     #[test]
     fn path_value_embedding_the_platform_separator_rejected() {
-        let separator = ocx_util::path::PATH_SEPARATOR;
+        let separator = ocx_env_apply::PATH_SEPARATOR;
         for value in [
             format!("a{separator}b"),
             format!("{separator}bin"),

@@ -99,7 +99,7 @@ fn fold_byte(byte: u8) -> u8 {
 /// Strip one, and only one, surrounding pair of `"` from a `PATH` element.
 ///
 /// Windows quotes space-bearing segments and `split_paths` unquotes them, so both spellings must compare equal.
-fn strip_one_quote_pair(value: &str) -> &str {
+pub fn strip_one_quote_pair(value: &str) -> &str {
     value
         .strip_prefix('"')
         .and_then(|inner| inner.strip_suffix('"'))
@@ -190,6 +190,18 @@ fn move_to_front_with(existing: &OsStr, value: &OsStr, windows: bool) -> OsStrin
 /// Must match the emitted shell snippets (`adr_env_modifier_types.md § Decision`), or the in-process env and the shell env diverge.
 ///
 /// **Precondition:** `value` is not flanked by `separator` and `separator` is non-empty, or `value` is cut out of other elements.
+///
+/// # Examples
+///
+/// ```
+/// use ocx_env_apply::append_unique;
+///
+/// assert_eq!(append_unique("", "-ea", " "), "-ea");
+/// assert_eq!(append_unique("-Xmx1g", "-ea", " "), "-Xmx1g -ea");
+/// // An existing occurrence moves to the back.
+/// assert_eq!(append_unique("-ea -Xmx1g", "-ea", " "), "-Xmx1g -ea");
+/// assert_eq!(append_unique("-ea", "-ea", " "), "-ea");
+/// ```
 pub fn append_unique(existing: &str, value: &str, separator: &str) -> String {
     if value.is_empty() {
         return existing.to_string();

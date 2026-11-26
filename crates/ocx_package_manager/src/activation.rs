@@ -1467,7 +1467,7 @@ fn session_record(
         ValueKind::Path => {
             let recorded = RecordedValue::Literal(value.value.clone());
             let present = start.get(&value.key).is_some_and(|existing| {
-                let remaining = ocx_util::path::remove_segment(existing, std::ffi::OsStr::new(&value.value));
+                let remaining = ocx_env_apply::remove_segment(existing, std::ffi::OsStr::new(&value.value));
                 let segments = |text: &std::ffi::OsStr| {
                     std::env::split_paths(text)
                         .filter(|segment| !segment.as_os_str().is_empty())
@@ -2376,7 +2376,7 @@ mod session_path_tests {
             let existing = after.get(key).map(std::ffi::OsString::from).expect("the key is set");
             after.set(
                 key.as_str(),
-                ocx_util::path::remove_segment(&existing, std::ffi::OsStr::new(element.as_str())),
+                ocx_env_apply::remove_segment(&existing, std::ffi::OsStr::new(element.as_str())),
             );
         }
         let segments: Vec<String> = after
