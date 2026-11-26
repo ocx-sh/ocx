@@ -13,7 +13,10 @@ use ocx_store::file_structure::{FileStructure, ShimBinStore};
 #[cfg(windows)]
 use super::body::shim_sidecar_body;
 use super::body::{unix_launcher_body, utf8_baked_path};
+use super::direct::write_direct_launcher;
 use super::safety::LauncherSafeString;
+use crate::tasks::vendor::VendorError;
+use ocx_env_apply::direct::DirectSidecar;
 
 /// Generates the launchers baking `pkg_root` for every entrypoint into `dest`; empty `entries`
 /// does not create `dest`. `shim_bin` is used on Windows only.
@@ -79,29 +82,28 @@ pub async fn generate(
     Ok(())
 }
 
-/// What a generated launcher starts: `ocx exec` through a baked package root, or the tool directly from a vendored directory.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LauncherKind {
-    Exec,
-    Direct,
-}
-
-/// [`generate`] for the given [`LauncherKind`].
+/// Writes one direct launcher per entry point of a vendored package into `dest` (see [`write_direct_launcher`]);
+/// `sidecar_for` yields the sidecar of a name, its private environment already composed. Empty `entries` creates nothing.
 ///
 /// # Errors
 ///
-/// As [`generate`]; [`LauncherKind::Direct`] is written by [`super::direct::write_direct_launcher`] and not here yet.
-pub async fn generate_kind(
-    kind: LauncherKind,
-    pkg_root: &Path,
+/// As [`write_direct_launcher`], or a failed `dest` creation as [`VendorError::Package`].
+pub async fn generate_direct(
     entries: &Entrypoints,
     dest: &Path,
-    shim_bin: &ShimBinStore,
-) -> Result<(), crate::Error> {
-    match kind {
-        LauncherKind::Exec => generate(pkg_root, entries, dest, shim_bin).await,
-        LauncherKind::Direct => unimplemented!("direct entry-point launchers"),
+    blob: &[u8],
+    sidecar_for: &dyn Fn(&str) -> DirectSidecar,
+) -> Result<(), VendorError> {
+    if entries.is_empty() {
+        return Ok(());
     }
+    tokio::fs::create_dir_all(dest)
+        .await
+        .map_err(|e| crate::error::file_error(dest, e))?;
+    for (name, _entry) in entries.iter() {
+        write_direct_launcher(dest, name.as_str(), blob, &sidecar_for(name.as_str())).await?;
+    }
+    Ok(())
 }
 
 /// The value of `OCX_BINARY_PIN` for children of the running ocx.
@@ -266,6 +268,58 @@ mod tests {
 
     use ocx_package::metadata::entrypoint::{Entrypoint, EntrypointName, Entrypoints};
     use ocx_store::file_structure::ShimBinStore;
+
+    use super::generate_direct;
+    use ocx_env_apply::direct::DirectSidecar;
+
+    /// A direct entry-point render writes `<name>` and `<name>.direct` carrying the entry's own sidecar.
+    #[tokio::test]
+    async fn generate_direct_writes_launcher_and_sidecar_per_entry_point() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dest = tmp.path().join("entrypoints");
+        let entries = Entrypoints::from_names(["alpha", "beta"]);
+        let sidecar_for = |name: &str| -> DirectSidecar {
+            serde_json::from_value(serde_json::json!({
+                "schema_version": 1,
+                "vendor_id": "sha256:0b5f2a4e9c7d3b1a0b5f2a4e9c7d3b1a0b5f2a4e9c7d3b1a0b5f2a4e9c7d3b1a",
+                "self": format!("packages/p/entrypoints/{name}"),
+                "program": format!("@VENDOR_DIR@/packages/p/content/bin/{name}"),
+                "args": [],
+                "unset": [],
+                "env": [],
+            }))
+            .expect("fixture decodes")
+        };
+
+        generate_direct(&entries, &dest, b"blob", &sidecar_for)
+            .await
+            .expect("generate succeeds");
+
+        for name in ["alpha", "beta"] {
+            let launcher = dest.join(if cfg!(windows) {
+                format!("{name}.exe")
+            } else {
+                name.to_owned()
+            });
+            assert_eq!(std::fs::read(launcher).expect("launcher"), b"blob");
+            let sidecar: DirectSidecar =
+                serde_json::from_slice(&std::fs::read(dest.join(format!("{name}.direct"))).expect("sidecar"))
+                    .expect("json");
+            assert_eq!(sidecar.program, format!("@VENDOR_DIR@/packages/p/content/bin/{name}"));
+            assert_eq!(sidecar.self_path, format!("packages/p/entrypoints/{name}"));
+        }
+
+        let empty = tmp.path().join("none");
+        generate_direct(
+            &Entrypoints::from_names::<[&str; 0], &str>([]),
+            &empty,
+            b"blob",
+            &sidecar_for,
+        )
+        .await
+        .expect("empty succeeds");
+        assert!(!empty.exists());
+    }
 
     fn entries_for(names: &[&str]) -> Entrypoints {
         let map: BTreeMap<EntrypointName, Entrypoint> = names
