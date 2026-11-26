@@ -176,8 +176,21 @@ impl LaunchRecord {
     /// # Errors
     ///
     /// The [`RecordError`] of the first rule the bytes break.
-    pub fn decode(_bytes: &[u8], _windows: bool) -> Result<Self, RecordError> {
-        unimplemented!("LaunchRecord::decode")
+    pub fn decode(bytes: &[u8], windows: bool) -> Result<Self, RecordError> {
+        if u64::try_from(bytes.len()).map_or(true, |len| len > MAX_RECORD_BYTES) {
+            return Err(RecordError::TooLarge);
+        }
+        let kind = peek(bytes).map_err(RecordError::Malformed)?;
+        let malformed = |error: serde_json::Error| RecordError::Malformed(error.to_string());
+        // The struct's own `kind` equals the peek or `validate` returns `KindMismatch`.
+        let record = match kind {
+            LaunchKind::Direct => Self::Direct(serde_json::from_slice(bytes).map_err(malformed)?),
+            LaunchKind::Package => Self::Package(serde_json::from_slice(bytes).map_err(malformed)?),
+            LaunchKind::Deferred => Self::Deferred(serde_json::from_slice(bytes).map_err(malformed)?),
+            LaunchKind::Toolchain => Self::Toolchain(serde_json::from_slice(bytes).map_err(malformed)?),
+        };
+        record.validate(windows)?;
+        Ok(record)
     }
 
     /// Compact JSON of the kind's struct (`kind` first, fields in declaration order), then `\n`.
@@ -206,6 +219,42 @@ impl LaunchRecord {
             Self::Package(record) => record.validate(windows),
             Self::Deferred(record) => record.validate(windows),
             Self::Toolchain(record) => record.validate(windows),
+        }?;
+        // A NUL ends a Windows environment entry or command line early, in any string of any kind.
+        match self.strings().find(|(_, text)| text.contains('\0')) {
+            Some((field, _)) => Err(RecordError::NulByte(field.to_owned())),
+            None => Ok(()),
+        }
+    }
+
+    /// Every string the record holds, with the name of its field.
+    fn strings(&self) -> Box<dyn Iterator<Item = (&'static str, &str)> + '_> {
+        match self {
+            Self::Direct(record) => Box::new(
+                [
+                    ("vendor_id", record.vendor_id.as_str()),
+                    ("self", record.self_path.as_str()),
+                    ("program", record.program.as_str()),
+                ]
+                .into_iter()
+                .chain(record.args.iter().map(|arg| ("args", arg.as_str())))
+                .chain(record.unset.iter().map(|key| ("unset", key.as_str())))
+                .chain(record.env.iter().flat_map(|entry| {
+                    [("env key", entry.key.as_str()), ("env value", entry.value.as_str())]
+                        .into_iter()
+                        .chain(entry.separator.as_deref().map(|separator| ("env separator", separator)))
+                })),
+            ),
+            Self::Package(record) => Box::new(std::iter::once(("package_root", record.package_root.as_str()))),
+            Self::Deferred(record) => Box::new(std::iter::once(("identifier", record.identifier.as_str()))),
+            Self::Toolchain(record) => Box::new(
+                record
+                    .project_root
+                    .as_deref()
+                    .map(|root| ("project_root", root))
+                    .into_iter()
+                    .chain(record.ocx.as_deref().map(|ocx| ("ocx", ocx))),
+            ),
         }
     }
 
@@ -224,8 +273,97 @@ impl LaunchRecord {
 /// The `kind` of any JSON object holding a valid one, every other key ignored (a later schema included);
 /// `None` otherwise. The one non-validating reader.
 #[must_use]
-pub fn peek_kind(_bytes: &[u8]) -> Option<LaunchKind> {
-    unimplemented!("peek_kind")
+pub fn peek_kind(bytes: &[u8]) -> Option<LaunchKind> {
+    if u64::try_from(bytes.len()).map_or(true, |len| len > MAX_PEEK_BYTES) {
+        return None;
+    }
+    peek(bytes).ok()
+}
+
+/// The one key `peek` reads; serde ignores every other key and refuses a duplicate `kind`.
+#[derive(Deserialize)]
+struct Peek {
+    kind: LaunchKind,
+}
+
+/// [`peek_kind`] without the size bound, so `decode` can peek a record of up to [`MAX_RECORD_BYTES`].
+fn peek(bytes: &[u8]) -> Result<LaunchKind, String> {
+    // A derived struct also reads a JSON array positionally, so a record must open as an object.
+    if bytes.iter().find(|byte| !byte.is_ascii_whitespace()) != Some(&b'{') {
+        return Err("a record is a JSON object".to_owned());
+    }
+    serde_json::from_slice::<Peek>(bytes)
+        .map(|peeked| peeked.kind)
+        .map_err(|error| error.to_string())
+}
+
+/// The checks every kind shares: its own `kind` and `schema_version`.
+fn check_header(kind: LaunchKind, expected: LaunchKind, schema_version: u32) -> Result<(), RecordError> {
+    if kind != expected {
+        return Err(RecordError::KindMismatch);
+    }
+    if schema_version != SCHEMA_VERSION {
+        return Err(RecordError::SchemaVersion(schema_version));
+    }
+    Ok(())
+}
+
+/// An absolute path field outside `direct`: absolute on any host, no CR or LF, no [`VENDOR_DIR_TOKEN`].
+fn check_absolute_path(field: &str, path: &str) -> Result<(), RecordError> {
+    if !is_absolute_any_host(path) {
+        return Err(RecordError::NotAbsolute(path.to_owned()));
+    }
+    if path.contains(['\r', '\n']) {
+        return Err(RecordError::Malformed(format!("{field} holds CR or LF")));
+    }
+    check_no_token(field, path)
+}
+
+fn check_no_token(field: &str, text: &str) -> Result<(), RecordError> {
+    if text.contains(VENDOR_DIR_TOKEN) {
+        return Err(RecordError::TokenOutsideDirect(field.to_owned()));
+    }
+    Ok(())
+}
+
+/// `C:\`, `C:/`, `\\server\share`, `\\?\` or a leading `/`, judged the same on every host.
+fn is_absolute_any_host(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    path.starts_with("\\\\")
+        || path.starts_with('/')
+        || (bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && matches!(bytes[2], b'\\' | b'/'))
+}
+
+/// Structural admissibility of a pinned identifier, deliberately not an OCI reference parser: printable ASCII, no
+/// leading `-`, and `<algorithm>:<hex>` after the last `@`. `ocx` re-parses the value on the receiving end.
+fn is_pinned_identifier(value: &str) -> bool {
+    if !value.bytes().all(|byte| matches!(byte, 0x21..=0x7E)) || value.starts_with('-') {
+        return false;
+    }
+    // The last `@`, not the first; a digest requirement stops a tag a registry controls.
+    let Some(at) = value.rfind('@').filter(|at| *at > 0) else {
+        return false;
+    };
+    let Some((algorithm, hex)) = value[at + 1..].split_once(':') else {
+        return false;
+    };
+    !algorithm.is_empty()
+        && algorithm.bytes().all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9'))
+        && !hex.is_empty()
+        && hex.bytes().all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// Whether `program` is a batch file, which `CreateProcessW` would hand to `cmd.exe`.
+///
+/// Windows ignores trailing dots and spaces in a file name, so `tool.cmd. ` still runs as `tool.cmd`.
+fn is_batch_target(program: &str) -> bool {
+    let name = program.trim_end_matches(['.', ' ']);
+    [".bat", ".cmd"].iter().any(|extension| {
+        name.len()
+            .checked_sub(extension.len())
+            .and_then(|cut| name.get(cut..))
+            .is_some_and(|tail| tail.eq_ignore_ascii_case(extension))
+    })
 }
 
 /// The record path for a launcher path: its directory, its file name minus one trailing `.exe`
@@ -252,7 +390,8 @@ impl PackageRecord {
     ///
     /// The [`RecordError`] of the first rule broken.
     pub fn validate(&self, _windows: bool) -> Result<(), RecordError> {
-        unimplemented!("PackageRecord::validate")
+        check_header(self.kind, LaunchKind::Package, self.schema_version)?;
+        check_absolute_path("package_root", &self.package_root)
     }
 }
 
@@ -263,7 +402,11 @@ impl DeferredRecord {
     ///
     /// The [`RecordError`] of the first rule broken.
     pub fn validate(&self, _windows: bool) -> Result<(), RecordError> {
-        unimplemented!("DeferredRecord::validate")
+        check_header(self.kind, LaunchKind::Deferred, self.schema_version)?;
+        if !is_pinned_identifier(&self.identifier) {
+            return Err(RecordError::NotPinned(self.identifier.clone()));
+        }
+        check_no_token("identifier", &self.identifier)
     }
 }
 
@@ -275,7 +418,19 @@ impl ToolchainRecord {
     ///
     /// The [`RecordError`] of the first rule broken.
     pub fn validate(&self, _windows: bool) -> Result<(), RecordError> {
-        unimplemented!("ToolchainRecord::validate")
+        check_header(self.kind, LaunchKind::Toolchain, self.schema_version)?;
+        match (self.tier, self.project_root.as_deref()) {
+            (ToolchainTier::Project, Some(root)) => check_absolute_path("project_root", root)?,
+            (ToolchainTier::Project, None) | (ToolchainTier::Global, Some(_)) => return Err(RecordError::TierMismatch),
+            (ToolchainTier::Global, None) => {}
+        }
+        if let Some(ocx) = self.ocx.as_deref() {
+            check_absolute_path("ocx", ocx)?;
+            if is_batch_target(ocx) {
+                return Err(RecordError::Malformed("ocx is a batch file".to_owned()));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -868,6 +1023,38 @@ mod tests {
             r#"{"kind":7}"#,
         ] {
             assert_eq!(peek_kind(text.as_bytes()), None, "{text:?}");
+        }
+    }
+
+    /// A derived struct reads a JSON array positionally; a record must still be an object.
+    #[test]
+    fn contract_decode_and_peek_refuse_a_json_array() {
+        let array = r#"["package",1,"/home/u"]"#;
+        assert_eq!(peek_kind(array.as_bytes()), None);
+        assert!(matches!(
+            LaunchRecord::decode(array.as_bytes(), false),
+            Err(RecordError::Malformed(_))
+        ));
+    }
+
+    /// Absolute means `/`, a drive letter or a UNC prefix on every host; a lone backslash is neither.
+    #[test]
+    fn contract_package_root_absolute_forms_are_host_independent() {
+        for (root, absolute) in [
+            ("/p", true),
+            ("C:\\p", true),
+            ("C:/p", true),
+            ("\\\\server\\share", true),
+            ("\\p", false),
+            ("C:p", false),
+            ("p", false),
+        ] {
+            let record = PackageRecord {
+                kind: LaunchKind::Package,
+                schema_version: 1,
+                package_root: root.into(),
+            };
+            assert_eq!(record.validate(false).is_ok(), absolute, "{root}");
         }
     }
 }
