@@ -44,7 +44,7 @@ Facts this design rests on (verified at `f41c6684` unless marked):
 
 ## Industry Context & Research
 
-**Research artifacts:** `.agents/research/research_launcher-lookup-prior-art.md`, `research_vendor-content-reproducibility-spike.md`, `research_bazel-remote-repo-cache-rig-spike.md`, and the list under the source's `## Research`. `research_bazel-hub-fetch-and-facts-size-spike.md` (spike 5, landed during this run, Bazel 9.2.0). Pending at writing: `research_launcher-runfiles-lookup-spike.md` (spike 6); claims that hinge on it carry "pending spike 6".
+**Research artifacts:** `.agents/research/research_launcher-lookup-prior-art.md`, `research_vendor-content-reproducibility-spike.md`, `research_bazel-remote-repo-cache-rig-spike.md`, and the list under the source's `## Research`. `research_bazel-hub-fetch-and-facts-size-spike.md` (spike 5, landed during this run, Bazel 9.2.0). `research_launcher-runfiles-lookup-spike.md` (spike 6, Bazel 9.2.0, Linux) landed after the first draft and is worked into Choice 7 and OQ-03.
 
 - **Native tool describes, Starlark stays thin:** rules_rust's crate_universe and rules_go let the native tool resolve and fetch; rules_python and rules_js evaluate their package manager in Starlark and chase its format. The owner's rule picks the first family.
 - **Unpack in the repository rule:** rules_nodejs, rules_python, rules_java and toolchains_llvm do (source, read from source); Bazel uploads external-repository files as ordinary action inputs (source, run).

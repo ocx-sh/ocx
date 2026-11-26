@@ -411,7 +411,7 @@ Every check of the source's `## Verification` (lines 726-772) is a row; a row th
 | V-42 | A value that already contains `@VENDOR_DIR@` is refused with 65 (C-010) | ocx | fixture without the literal → exit 0 | fixture with it → 65 `vendor_value_unrepresentable` | ocx CI ubuntu |
 | V-43 | A non-empty target is refused with 64 and left unchanged (C-002) | ocx | an empty dir → 0 | non-empty → 64, tree hash equal | ocx CI ubuntu |
 | V-44 | rules_ocx's pull request is green against the build of the ocx pull request | rules_ocx | the same jobs with the released `DEFAULT_OCX_VERSION` fail (no `vendor` command) | `verify-basic`, `verify-rbe`, `verify-deep` green with `OCX_INSTALL_BINARY` | rules_ocx CI |
-| V-45 | The launcher on Windows finds its root in a runfiles tree with `--enable_runfiles` and exits 78 naming the flag without it | rules_ocx | `--noenable_runfiles` → 78 with the hint | `--enable_runfiles` → passes (pending spike 6) | rules_ocx `verify-deep (windows-latest)` |
+| V-45 | The launcher on Windows finds its root in a runfiles tree with `--enable_runfiles` and exits 78 naming the flag without it | rules_ocx | `--noenable_runfiles` → 78 with the hint | `--enable_runfiles` → passes (Linux equivalent shown by spike 6; Windows only in CI) | rules_ocx `verify-deep (windows-latest)` |
 | V-46 | A manifest for `windows/amd64` written on Linux equals the one written on Windows (C-008) | ocx | host-native separators (test seam) → differ | byte-identical | ocx CI `acceptance (windows-latest)` against a golden produced on ubuntu |
 
 ## 10. Test setup — the rig (rules_ocx `e2e/rbe/`)
