@@ -1021,17 +1021,15 @@ fn ocx_binary_path(bin_path: &Path) -> PathBuf {
 /// The `ocx` the emitted wrapper function calls: the pinned global toolchain's, else the installed binary.
 ///
 /// The wrapper shadows `PATH`, so it must follow the pin or the toolchain loses its precedence; the probe stats the
-/// physical `shell_bin`, never the `active` link, or a later repoint is baked into the function.
+/// physical render directory `active` names (never `active/bin`), or a later repoint is baked into the function.
 fn wrapper_binary_path(file_structure: &FileStructure, install_bin: &Path) -> PathBuf {
-    let pinned = ocx_binary_path(
-        &file_structure
-            .toolchain
-            .shell_bin(ocx_store::file_structure::DEFAULT_SHELL),
-    );
-    if pinned.is_file() {
-        pinned
-    } else {
-        ocx_binary_path(install_bin)
+    let home = file_structure.toolchain.home();
+    let pinned = home
+        .active_target_name()
+        .map(|name| ocx_binary_path(&home.render_dir(&name).join("bin")));
+    match pinned {
+        Some(pinned) if pinned.is_file() => pinned,
+        _ => ocx_binary_path(install_bin),
     }
 }
 
@@ -3518,8 +3516,6 @@ mod bare_ocx_tests {
     /// on the global tier.
     #[test]
     fn c060_the_wrapper_follows_a_global_ocx_pin_and_falls_back_to_the_install() {
-        use ocx_store::file_structure::DEFAULT_SHELL;
-
         let home = tempfile::TempDir::new().expect("tempdir");
         let file_structure = ocx_store::file_structure::FileStructure::with_root(home.path().to_path_buf());
         let install_bin = file_structure.ocx_install_bin_path();
@@ -3530,8 +3526,15 @@ mod bare_ocx_tests {
             "with no rendered `ocx` trampoline the wrapper must name the installed binary"
         );
 
-        let toolchain_bin = file_structure.toolchain.shell_bin(DEFAULT_SHELL);
+        // The unified launcher renders into `shells/default-<hex>` behind `active`, with no `shells/default`.
+        let home = file_structure.toolchain.home();
+        let name = "default-8d41c2e07a95b3f6";
+        let toolchain_bin = home.render_dir(name).join("bin");
         std::fs::create_dir_all(&toolchain_bin).expect("mkdir the physical toolchain bin");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(format!("shells/{name}"), home.active()).expect("link active");
+        #[cfg(windows)]
+        ocx_util::fs::symlink::create(home.render_dir(name), home.active()).expect("link active");
         let trampoline = ocx_binary_path(&toolchain_bin);
         std::fs::write(&trampoline, b"#!/bin/sh\n").expect("write trampoline");
 
