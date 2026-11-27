@@ -15,7 +15,7 @@
 
 use ocx_oci::{Architecture, OperatingSystem, Platform};
 
-/// Upper bound on each embedded blob, checked per blob by a unit test. The unified launcher carries four record kinds, the image-path read and the runfiles manifest lookup (largest: x86_64 Windows, 534016 bytes); the earlier 256 to 512 KiB raise is in `adr_shim_hermetic_zigbuild.md`.
+/// Upper bound on each embedded blob, checked per blob by a unit test. The unified launcher carries four record kinds, the image-path read and the runfiles manifest lookup (largest: x86_64 Windows, 535040 bytes); the earlier 256 to 512 KiB raise is in `adr_shim_hermetic_zigbuild.md`.
 pub const SHIM_SIZE_BUDGET: usize = 640 * 1024;
 
 /// One embedded launcher: its target triple and bytes.
@@ -100,27 +100,27 @@ mod tests {
     const RECORDED_SHA256: [(&str, &str); 6] = [
         (
             "x86_64-unknown-linux-musl",
-            "7b8ccff775b2fa863782bbd4fd9f315552475b4569fcf897069365a9e5bcce47",
+            "5a08d8c2fdc40f4cfbbba74fdb4a3f6115277a5baae37a1aa0e935e752c61a2e",
         ),
         (
             "aarch64-unknown-linux-musl",
-            "94dde06a6a8e98a5171656151e6b3660e2ae3d3b81758b9cd85e6626e9a255d8",
+            "a057d12a40be2f661b6853aafa7838587011a1d0ee586e58b255d8808b7f4e64",
         ),
         (
             "x86_64-apple-darwin",
-            "dbc746aebf838830cafb1d0b74a941ea549f997f56b5e12232548d60af796c28",
+            "409da16fa50fa27169d7d7ea4f66ab2fca8a4b0fcd53dfa0da0c7baeaa49be58",
         ),
         (
             "aarch64-apple-darwin",
-            "7d746097373894986a1925a76d7bf5559b168b6793dd6a5b6f17eac986344741",
+            "910e1ad3af1415514b27f66b7b38096e0dd3515724e2d2ade7b3b61c090e827b",
         ),
         (
             "x86_64-pc-windows-gnullvm",
-            "59fb072835d217c5f3ea148f3a4a154213f773edbe7df40f850701d9b0657857",
+            "fc8dea71836fce76d9002dbf376dd7fe981a9d5e60ab1b17cc345b9242c5da7a",
         ),
         (
             "aarch64-pc-windows-gnullvm",
-            "4ba744896b297f6aeab0413de1a2cd3cc4a036ce57bd36be637b04779773a03e",
+            "110bd9f5cbeb18bc528e152f1df66ffc51feee01fe53a12860ac1da854bdacea",
         ),
     ];
 
