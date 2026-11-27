@@ -132,6 +132,8 @@ SUITE = REPO_ROOT / "test"
 #: (`test_entrypoints.py` Unix-only entry point scripts, `test_entrypoints_crossplat.py` one more
 #: per-platform launcher case, `test_exec_env_compat.py` the `.exec` trampoline on non-Windows,
 #: `test_lazy_loading.py` the `/bin/sh` stub ocx on `win32`); two skips were renamed, none hide a red.
+#: This pin counts static skip markers on every platform; `test/SKIP_CEILING` counts runtime skips on Linux, so the
+#: pin moved by 8 where the ceiling moved by 3.
 PINNED = {"tests": 3800, "skipped": 155, "xfailed": 2, "parametrized": 268}
 
 #: Which way each number may move on its own. DEC-38 pinned all four to

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import platform
 import re
 import shutil
@@ -53,9 +54,15 @@ def host_blob() -> Path:
     return ROOT / "crates" / "ocx_store" / "src" / "shims" / f"ocx-shim-{HOST_TARGET}"
 
 
-def check(blob: Path, script: Path = SCRIPT) -> subprocess.CompletedProcess[str]:
+def check(
+    blob: Path,
+    script: Path = SCRIPT,
+    target: str | None = None,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        [shutil.which("bash") or "bash", str(script), str(blob), str(HOST_TARGET)],
+        [shutil.which("bash") or "bash", str(script), str(blob), target or str(HOST_TARGET)],
+        env=env,
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -145,3 +152,37 @@ def test_a_dropped_case_fails_the_floor(tmp_path: Path) -> None:
     result = check(blob, mutated)
     assert result.returncode == 1, result.stdout + result.stderr
     assert f"{len(HOST_CASES) - 1} of {len(HOST_CASES)} cases ran" in result.stderr, result.stderr
+
+
+def fake_apple_tools(tmp_path: Path, xattr_exit: int) -> dict[str, str]:
+    """`codesign` and `xattr` stand-ins on PATH so the Apple-silicon arm runs on Linux: codesign rejects a
+    file whose byte 4096 is 0xff (the changed-byte copy), xattr exits `xattr_exit`."""
+    bin_dir = tmp_path / "fakebin"
+    bin_dir.mkdir()
+    (bin_dir / "codesign").write_text(
+        '#!/bin/sh\n[ "$(dd if="$3" bs=1 skip=4096 count=1 2>/dev/null | od -An -tx1 | tr -d " \\n")" != ff ]\n',
+        encoding="utf-8",
+    )
+    (bin_dir / "xattr").write_text(f"#!/bin/sh\nexit {xattr_exit}\n", encoding="utf-8")
+    for tool in bin_dir.iterdir():
+        tool.chmod(0o755)
+    path = f"{bin_dir}:{os.environ['PATH']}"
+    return {"PATH": path}
+
+
+def apple_run(tmp_path: Path, xattr_exit: int) -> subprocess.CompletedProcess[str]:
+    blob = stand_in(tmp_path, HOME_STAND_IN.replace("@SEP@", "--") + "#" * 5000)
+    return check(blob, target="aarch64-apple-darwin", env=fake_apple_tools(tmp_path, xattr_exit))
+
+
+def test_the_quarantine_start_is_reported_and_owes_no_case(tmp_path: Path) -> None:
+    """The quarantine start asserts nothing about Gatekeeper, so it must not count as a passed case."""
+    result = apple_run(tmp_path, xattr_exit=0)
+    assert "info quarantine-start: exit " in result.stdout, result.stdout
+    assert "ok   quarantine-start" not in result.stdout, result.stdout
+    assert "ok   signed-copies-start" in result.stdout, result.stdout
+
+
+def test_a_quarantine_attribute_that_cannot_be_set_fails(tmp_path: Path) -> None:
+    result = apple_run(tmp_path, xattr_exit=1)
+    assert "FAIL quarantine-start: xattr cannot set" in result.stdout, result.stdout

@@ -9,7 +9,7 @@
 # the maintainer (ADR §Out of Implementation Scope) and lands in a separate PR
 # that refreshes the committed blob with the signed bytes. Do not add a
 # signing step here without the Phase-2 prerequisites.
-name: Build Windows Shims
+name: Launcher Build
 
 on:
   push:
@@ -22,6 +22,8 @@ on:
       - 'crates/ocx_env_apply/**'
       - 'crates/ocx_store/src/shims/**'
       - 'crates/ocx_store/src/shim.rs'
+      - 'crates/ocx_package_manager/src/launcher.rs'
+      - 'crates/ocx_package_manager/src/launcher/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
@@ -42,6 +44,8 @@ on:
       - 'crates/ocx_env_apply/**'
       - 'crates/ocx_store/src/shims/**'
       - 'crates/ocx_store/src/shim.rs'
+      - 'crates/ocx_package_manager/src/launcher.rs'
+      - 'crates/ocx_package_manager/src/launcher/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
@@ -223,7 +227,7 @@ jobs:
       # byte-identical-rebuild gate is therefore impossible here. Integrity
       # instead rests on three controls:
       #   1. SLSA build provenance attested on the committed blob (below).
-      #   2. The in-tree SHIM_SHA256 corruption canary — verified here
+      #   2. The in-tree RECORDED_SHA256 corruption canary — verified here
       #      against the committed blob so a refresh that updates the blob
       #      but not the constant (or vice versa) fails loudly.
       #   3. This job's path filter: any change to the shim build inputs
@@ -318,10 +322,10 @@ jobs:
           retention-days: 7
           overwrite: true
 
-      # The three provenance controls above (SLSA attestation, the SHIM_SHA256
+      # The three provenance controls above (SLSA attestation, the RECORDED_SHA256
       # canary, this job's path filter) all answer "have the committed bytes
       # been corrupted". NONE answers "were the committed bytes built from the
-      # committed source" -- SHIM_SHA256 matches a stale blob perfectly, so a
+      # committed source" -- RECORDED_SHA256 matches a stale blob perfectly, so a
       # shim source change that forgets the refresh passes every existing gate
       # while the shipped reader and the shipped writer disagree about the wire
       # format between them.
@@ -356,7 +360,7 @@ jobs:
           # This leg's own blob: re-cutting one of the six must not clear the check for the other five.
           last_blob="$(git log -1 --format=%H HEAD -- "$COMMITTED")"
           if [ -z "$last_src" ]; then
-            echo "no shim source history; nothing to compare"; exit 0
+            echo "::error::no commit touches crates/ocx_shim/, crates/ocx_env_apply/ or crates/ocx_store/src/shim_inputs.sha256: the pathspec matches nothing, so nothing was compared"; exit 1
           fi
           if [ -z "$last_blob" ]; then
             echo "::error::shim sources exist but no committed blob was ever recorded"; exit 1
@@ -392,7 +396,7 @@ jobs:
   # (system_design §8). Gated behind the cheap Linux `gate` job per
   # subsystem-ci.md cost rules (Windows runner = ~1.7x Linux).
   acceptance-windows:
-    name: Windows Acceptance (shim)
+    name: Windows Acceptance (launcher)
     needs: gate
     runs-on: windows-latest
     steps:
