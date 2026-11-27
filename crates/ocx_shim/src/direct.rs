@@ -380,11 +380,14 @@ fn accepts(root: &str, self_path: &str, raw: &[u8], windows: bool, fs: &dyn Look
     Ok(candidate_record(root, self_path, windows, fs)?.is_some_and(|bytes| bytes == raw))
 }
 
+/// A runfiles manifest line as its key and its target.
+type ManifestLine<'a> = (Cow<'a, [u8]>, Cow<'a, [u8]>);
+
 /// `line` split into its manifest key and target, both unescaped; `None` when it holds no space.
 ///
 /// A line starting with a space is escaped (Bazel 7.4.0 and later): the key reads `\s`, `\n` and `\b`, the target
 /// `\n` and `\b`, and any other `\x` stays two characters. An unescaped line keeps its backslashes and is borrowed.
-fn split_manifest_line(line: &[u8]) -> Option<(Cow<'_, [u8]>, Cow<'_, [u8]>)> {
+fn split_manifest_line(line: &[u8]) -> Option<ManifestLine<'_>> {
     fn unescape(text: &[u8], key: bool) -> Vec<u8> {
         let mut out = Vec::with_capacity(text.len());
         let mut bytes = text.iter().copied();
