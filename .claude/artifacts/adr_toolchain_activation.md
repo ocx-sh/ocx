@@ -1171,7 +1171,7 @@ clauses below give that one contract, and one design decision makes it cheap:
 > `RenderStamp` field, no wire-format change, no serde risk, one `read_link` and one string compare.
 
 - **C-079 — `active`'s target is derived, and containment falls out of the derivation.** POSIX: a
-  **relative** symlink whose target is exactly `shells/<name>` — two normal components, no leading `/`,
+  **relative** symlink whose target is exactly `shells/default` under a v1 stamp, or exactly `shells/<shell_dir>` of the v2 stamp; no other name is valid, whatever its shape — two normal components, no leading `/`,
   no `..` — so a copied or moved home still points inside itself, by construction. Windows: a
   **junction** to the absolute `<root>\shells\<name>`, written through `crate::symlink`, which is
   already junction-aware (`symlink.rs:63-77`); junctions take no privilege and accept absolute

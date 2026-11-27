@@ -99,7 +99,7 @@ Both commands share these behaviors:
 - Accept `--env KEY[:TYPE[:SEP]]=VALUE` for a per-invocation override, or a bare `--env NAME` to carry one of the caller's own variables through.
 - Forward the child's exit code byte-for-byte.
 
-Only `ocx package exec` accepts `--self`. That flag selects a package's own private surface, which leaves the package's `entrypoints/` off `PATH`. Launchers exist for a consumer to invoke the package, while the package's own runtime calls `bin/` directly. A project toolchain is a consumer of every package it declares, so the private surface would compose a strictly worse toolchain there.
+Only `ocx package exec` accepts `--self`. That flag selects a package's own private surface, which leaves the package's launcher directory off `PATH`. Launchers exist for a consumer to invoke the package, while the package's own runtime calls `bin/` directly. A project toolchain is a consumer of every package it declares, so the private surface would compose a strictly worse toolchain there.
 
 The two commands cover complementary cases: running a package by its binding name (`exec`) and running it by its registry identity (`package exec`). See [Project Toolchain In Depth → Running binaries][in-depth-project-running] for binary resolution and composition order, and [Read the exit code](#exec-exit-codes) for the codes.
 

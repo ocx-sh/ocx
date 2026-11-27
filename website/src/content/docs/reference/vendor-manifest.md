@@ -3,7 +3,7 @@ title: "Vendor manifest"
 ---
 <!-- doc_type: reference -->
 
-The `manifest.json` that [`ocx vendor`][cmd-vendor] and [`ocx package vendor`][cmd-package-vendor] write at the top of the output directory, and the path rules every field in it obeys Schema: [`https://ocx.sh/schemas/vendor-manifest/v1.json`][schema-vendor-manifest]. Usage: [Vendor packages][guide-vendor].
+The `manifest.json` that [`ocx vendor`][cmd-vendor] and [`ocx package vendor`][cmd-package-vendor] write at the top of the output directory, and the path rules every field in it obeys Schema: [`https://ocx.sh/schemas/vendor-manifest/v2.json`][schema-vendor-manifest]. Usage: [Vendor packages][guide-vendor].
 
 ## Conventions {#vendor-manifest-conventions}
 
@@ -21,22 +21,24 @@ Every path field obeys these rules, enforced when the manifest is written.
 - No empty, `.` or `..` segment.
 - For a `windows/*` platform: no `:`, `\`, control character (U+0000 to U+001F) or any of `<>"|?*`.
 - For a `windows/*` platform: no segment that is a device name (`CON`, `PRN`, `AUX`, `NUL`, `COM1` to `COM9`, `LPT1` to `LPT9`, with any extension) and no segment ending in `.` or a space.
+- No segment equal to `_ocx_reserved`, in any ASCII case. OCX never writes that name, so a consumer may use it.
 - A value that breaks a rule, a symlink whose target leaves its package, or a value holding `@VENDOR_DIR@`, NUL or non-UTF-8 text exits 65 (see [Errors](#vendor-manifest-errors)).
 
 ## Top-level fields {#vendor-manifest-fields}
 
 | Field | Type | Description |
 |---|---|---|
-| `schema_version` | integer, always `1` | Changes only for a breaking change to the document. |
-| `content` | `present` or `absent` | `absent` after `--manifest-only`: no package file, launcher or sidecar exists. |
+| `schema_version` | integer, always `2` | Changes only for a breaking change to the document. |
+| `content` | `present` or `absent` | `absent` after `--manifest-only`: no package file, launcher or record exists. |
 | `platform` | string | Canonical platform string of the run, for example `linux/amd64+libc.glibc`. |
 | `available_platforms` | string[], sorted | Platforms on which every selected package has a leaf, computed before leaf selection. |
 | `vendor_id` | string | `sha256:` and the hex SHA-256 of `platform`, a newline, then the sorted package digests joined by newlines. Two directories with equal `vendor_id` hold the same files. |
 | `dir_token` | string, always `@VENDOR_DIR@` | The token described in [Conventions](#vendor-manifest-conventions). |
 | `packages` | object[], sorted by `digest` | Every package of the closure, once. |
 | `environments` | object[] | The selection's environment first, then entry-point environments sorted by `id`. |
-| `selections` | object[] | The selections that were vendored. One in version 1. |
+| `selections` | object[] | The selections that were vendored. One in version 2. |
 | `tools` | object[], sorted by `selection`, then `name` | Every exposed tool name. |
+| `index_lookups` | `{path, found}`[], sorted by `path` | Present only when the run had `--index`. Every path under that directory that resolution read; `found` is `false` for an absent one. |
 
 ## Packages {#vendor-manifest-packages}
 
@@ -44,11 +46,12 @@ Every path field obeys these rules, enforced when the manifest is written.
 |---|---|---|
 | `identifier` | string | Pinned identifier `registry/repository[:tag]@sha256:<hex>`. |
 | `digest` | string | Digest of the platform manifest. |
-| `package_dir` | string | `packages/<registry>/<algorithm>/<2 hex>/<30 hex>`. |
-| `content_dir` | string | `<package_dir>/content`. |
+| `index_digest` | string, optional | Roots only: digest of the image index the root was selected from. Omitted when the identifier named a platform manifest, and on every dependency. |
+| `package_dir` | string | `p/<HEX16>`, the first 16 hex characters of the digest. |
+| `content_dir` | string | `<package_dir>/c`. |
 | `dependencies` | string[], sorted | Digests of the direct dependencies. |
 | `names_declared` | boolean | `false` when the package's metadata declares neither binaries nor entry points, so no tool comes from it. |
-| `entrypoints` | object[], sorted by `name` | The package's own launchers under `<package_dir>/entrypoints/`. |
+| `entrypoints` | object[], sorted by `name` | The package's own launchers under `<package_dir>/e/`. |
 | `tree` | object | Present only when `content` is `present`. |
 
 ### Entry points {#vendor-manifest-entrypoints}
@@ -56,7 +59,8 @@ Every path field obeys these rules, enforced when the manifest is written.
 | Field | Type | Description |
 |---|---|---|
 | `name` | string | Entry-point name. |
-| `launcher_path` | string | Launcher under `<package_dir>/entrypoints/`; ends in `.exe` for a Windows platform. |
+| `launcher_path` | string | Launcher under `<package_dir>/e/`; ends in `.exe` for a Windows platform. |
+| `record_path` | string | The record `<package_dir>/e/<name>.launch` the launcher reads. |
 | `environment` | string | Id of the entry point's private environment. |
 
 ### Tree {#vendor-manifest-tree}
@@ -79,7 +83,7 @@ Empty directories are written on disk and are not listed.
 
 Each item has `key`, `value` and `kind` (`path`, `constant` or `list`), as in the [`ocx env`][cmd-env] report. A `list` item also has `separator`.
 
-A selection environment equals `ocx --format json env --pinned` (project) or `ocx --format json package env` (packages), with each home package path replaced by `@VENDOR_DIR@/packages/…/`. [Patches][patches-how] never reach it.
+A selection environment equals `ocx --format json env --pinned` (project) or `ocx --format json package env` (packages), with each home package path replaced by `@VENDOR_DIR@/p/…/`. [Patches][patches-how] never reach it.
 
 ## Selections {#vendor-manifest-selections}
 
@@ -90,7 +94,7 @@ A selection environment equals `ocx --format json env --pinned` (project) or `oc
 | `bindings` | string[] | Bindings as given, with those resolved from `-g` included. |
 | `roots` | string[] | Digests of the selected packages, in selection order. |
 | `environment` | string | Id of the composed environment. |
-| `launcher_dir` | string | `selections/<id>/shells/default/bin`. |
+| `launcher_dir` | string | `l`. |
 
 ## Tools {#vendor-manifest-tools}
 
@@ -103,6 +107,7 @@ A selection environment equals `ocx --format json env --pinned` (project) or `oc
 | `environment` | string | Id of the selection's environment. |
 | `target_path` | string | The binary file, or the package's entry-point launcher. |
 | `launcher_path` | string | `<launcher_dir>/<name>`, with `.exe` on Windows. Omitted when no launcher exists for `platform`, for example `wasip1/wasm`. |
+| `record_path` | string | `<launcher_dir>/<name>.launch`. Present exactly when `launcher_path` is. A consumer that copies or links the launcher places this file beside it under its basename. |
 
 ## Errors {#vendor-manifest-errors}
 
@@ -110,7 +115,7 @@ A selection environment equals `ocx --format json env --pinned` (project) or `oc
 |---|---|---|
 | The output directory exists and is not an empty directory, or is a symlink | 64 | `vendor_output_not_empty` |
 | A value holds `@VENDOR_DIR@`, NUL, non-UTF-8, or the home's or output directory's absolute path | 65 | `vendor_value_unrepresentable` |
-| A program, launcher or link target breaks the path rules | 65 | `vendor_path_unrepresentable` |
+| A program, launcher or link target breaks the path rules, two package digests share a `<HEX16>`, a tool name ends in `.launch`, or a package declares a binary its content does not hold | 65 | `vendor_path_unrepresentable` |
 | A selected binding has no leaf for the platform at the locked version | 78 | existing resolution slug |
 
 Exit codes shared with every command are in [Exit codes][exit-codes].
@@ -121,7 +126,7 @@ The result of `ocx vendor -o out -p linux/amd64+libc.glibc jq`, with made-up dig
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "content": "present",
   "platform": "linux/amd64+libc.glibc",
   "available_platforms": ["darwin/arm64", "linux/amd64+libc.glibc", "windows/amd64"],
@@ -131,15 +136,16 @@ The result of `ocx vendor -o out -p linux/amd64+libc.glibc jq`, with made-up dig
     {
       "identifier": "ocx.sh/jqlang/jq:1.8.1@sha256:1f2e3d4c5b6a79881f2e3d4c5b6a79881f2e3d4c5b6a79881f2e3d4c5b6a7988",
       "digest": "sha256:1f2e3d4c5b6a79881f2e3d4c5b6a79881f2e3d4c5b6a79881f2e3d4c5b6a7988",
-      "package_dir": "packages/ocx.sh/sha256/1f/2e3d4c5b6a79881f2e3d4c5b6a7988",
-      "content_dir": "packages/ocx.sh/sha256/1f/2e3d4c5b6a79881f2e3d4c5b6a7988/content",
+      "index_digest": "sha256:9c8b7a6f5e4d3c2b9c8b7a6f5e4d3c2b9c8b7a6f5e4d3c2b9c8b7a6f5e4d3c2b",
+      "package_dir": "p/1f2e3d4c5b6a7988",
+      "content_dir": "p/1f2e3d4c5b6a7988/c",
       "dependencies": [],
       "names_declared": true,
       "entrypoints": [],
       "tree": {
-        "files": [{"path": "packages/ocx.sh/sha256/1f/2e3d4c5b6a7988/content/bin/jq", "executable": true}],
-        "links": [{"path": "packages/ocx.sh/sha256/1f/2e3d4c5b6a7988/content/bin/jq-1.8", "target": "jq"}],
-        "link_free_dirs": ["packages/ocx.sh/sha256/1f/2e3d4c5b6a7988/content/share"]
+        "files": [{"path": "p/1f2e3d4c5b6a7988/c/bin/jq", "executable": true}],
+        "links": [{"path": "p/1f2e3d4c5b6a7988/c/bin/jq-1.8", "target": "jq"}],
+        "link_free_dirs": ["p/1f2e3d4c5b6a7988/c/share"]
       }
     }
   ],
@@ -148,15 +154,15 @@ The result of `ocx vendor -o out -p linux/amd64+libc.glibc jq`, with made-up dig
       "id": "selection:default",
       "scope": {"type": "selection", "selection": "default"},
       "items": [
-        {"key": "PATH", "value": "@VENDOR_DIR@/packages/ocx.sh/sha256/1f/2e3d4c5b6a7988/content/bin", "kind": "path"}
+        {"key": "PATH", "value": "@VENDOR_DIR@/p/1f2e3d4c5b6a7988/c/bin", "kind": "path"}
       ]
     }
   ],
   "selections": [
-    {"id": "default", "groups": [], "bindings": ["jq"], "roots": ["sha256:1f2e3d4c5b6a79881f2e3d4c5b6a79881f2e3d4c5b6a79881f2e3d4c5b6a7988"], "environment": "selection:default", "launcher_dir": "selections/default/shells/default/bin"}
+    {"id": "default", "groups": [], "bindings": ["jq"], "roots": ["sha256:1f2e3d4c5b6a79881f2e3d4c5b6a79881f2e3d4c5b6a79881f2e3d4c5b6a7988"], "environment": "selection:default", "launcher_dir": "l"}
   ],
   "tools": [
-    {"name": "jq", "selection": "default", "kind": "binary", "package": "sha256:1f2e3d4c5b6a79881f2e3d4c5b6a79881f2e3d4c5b6a79881f2e3d4c5b6a7988", "environment": "selection:default", "target_path": "packages/ocx.sh/sha256/1f/2e3d4c5b6a7988/content/bin/jq", "launcher_path": "selections/default/shells/default/bin/jq"}
+    {"name": "jq", "selection": "default", "kind": "binary", "package": "sha256:1f2e3d4c5b6a79881f2e3d4c5b6a79881f2e3d4c5b6a79881f2e3d4c5b6a7988", "environment": "selection:default", "target_path": "p/1f2e3d4c5b6a7988/c/bin/jq", "launcher_path": "l/jq", "record_path": "l/jq.launch"}
   ]
 }
 ```
@@ -167,7 +173,7 @@ The result of `ocx vendor -o out -p linux/amd64+libc.glibc jq`, with made-up dig
 [cmd-env]: ./command-line/commands.md#env-root
 
 <!-- external -->
-[schema-vendor-manifest]: https://ocx.sh/schemas/vendor-manifest/v1.json
+[schema-vendor-manifest]: https://ocx.sh/schemas/vendor-manifest/v2.json
 
 <!-- internal -->
 [guide-vendor]: ../guides/vendor.mdx

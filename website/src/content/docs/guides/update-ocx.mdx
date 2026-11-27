@@ -60,6 +60,8 @@ Downloading and activating a release are two separate steps. `ocx self update` p
 
 If the hand-off cannot finish, the download stands and `current` keeps naming the old binary. `ocx self update` then exits `75`, and a stderr line says to run `ocx self setup`. A profile that carries edits OCX will not overwrite is the usual cause.
 
+When `$OCX_HOME/ocx.lock` exists, the inner setup also renders the global toolchain, so its trampolines come from the new release's launcher at once. A failure there warns and never fails the update, because the swap has already happened.
+
 If the hand-off reaches the select but a later phase hits a snag, the update still counts as installed and exits `0`. The binary you asked for is the one `current` names. The advisory names what is left to do.
 
 ## Get notified of new releases \{#update-checks\}

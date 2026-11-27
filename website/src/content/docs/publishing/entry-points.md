@@ -26,7 +26,7 @@ Declare `entrypoints` when one of these is true:
 
 Skip entry points for self-contained static binaries such as [Go programs][go] or [Rust][rust] builds. [uv][uv], [ripgrep][ripgrep] and [mold][mold] have no runtime to conflict over, so a public `${self.installPath}/bin` on PATH is enough.
 
-A package with entry points usually demotes `${self.installPath}/bin` from `public` to `private` (see [declare the environment][authoring-env-surface]). OCX prepends each installed package's `entrypoints/` directory to PATH at exec time, and consumers see it as `<symlink-root>/current/entrypoints`.
+A package with entry points usually demotes `${self.installPath}/bin` from `public` to `private` (see [declare the environment][authoring-env-surface]). OCX prepends each installed package's launcher directory, `launchers/<generation>/`, to PATH at exec time.
 
 ## Pick names that do not collide {#naming}
 
@@ -130,7 +130,7 @@ The shebang resolves `python3` from PATH at exec time. With `bin/` exposed as `p
 
 At exec time this happens:
 
-1. The consumer types `mytool`, and the launcher in `entrypoints/` runs.
+1. The consumer types `mytool`, and the launcher in `launchers/<generation>/` runs.
 2. The launcher re-enters through `ocx launcher exec`. OCX composes the private env: the cpython PATH first, then this package's `bin/` on top.
 3. OCX runs `bin/mytool`. The shebang resolves `python3` against the composed PATH and finds the pinned CPython.
 

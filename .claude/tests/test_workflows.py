@@ -549,7 +549,8 @@ def _off_linux(workflow: Path, inputs: dict | None = None) -> tuple[int, dict[st
 #: The basic tier's only jobs off a literal `ubuntu-*` runner: the native smoke legs. `unit-native` is the
 #: unit bundle on macOS and Windows; `acceptance.yml:shard` is read through `acceptance-native`, whose
 #: `os` is a matrix expression, so it reads as non-Linux. Anything else is a cost every push pays.
-BASIC_NATIVE_JOBS = frozenset({"basic-repo.yml:unit-native", "acceptance.yml:shard"})
+#: `junction-proof` is the Windows-only proof of DP-41 (V-L31, V-L32): it executes two cases of the cross-built bundle.
+BASIC_NATIVE_JOBS = frozenset({"basic-repo.yml:unit-native", "basic-repo.yml:junction-proof", "acceptance.yml:shard"})
 
 
 def test_basic_runs_on_linux_except_its_native_smoke_legs() -> None:
@@ -600,7 +601,15 @@ def _runner_labels(job: dict) -> list[str]:
 # spellings a Rust toolchain arrives through.
 _BUILD_TOOLING = re.compile(r"\b(cargo|bazel|bazelisk|rustup|rustc)\b|rust-toolchain|setup-rust|build-rust|bazel-cache-rc")
 # `acceptance-native` is a call of `acceptance.yml`, so it has no runner of its own to read here.
-NATIVE_DEEP_JOBS = frozenset({"unit-native"})
+NATIVE_DEEP_JOBS = {
+    "deep-repo.yml": frozenset({"unit-native"}),
+    "basic-repo.yml": frozenset({"unit-native", "junction-proof"}),
+}
+#: Native jobs that are Windows-only by design, with the reason: the job proves an NTFS junction behaviour that
+#: has no macOS counterpart. Every other native job runs on both macOS and Windows.
+WINDOWS_ONLY_NATIVE_JOBS = {
+    "basic-repo.yml:junction-proof": "DP-41: the in-place junction retarget (V-L31, V-L32) exists on NTFS only",
+}
 
 
 def test_the_cross_workflow_is_the_one_linux_compile() -> None:
@@ -648,13 +657,14 @@ def test_non_linux_jobs_only_download_and_execute(workflow_file: str) -> None:
     }
     # The floor, before the negative below: a reader that found no native job
     # sweeps clean and says nothing.
-    assert set(native) == NATIVE_DEEP_JOBS, (
+    assert set(native) == NATIVE_DEEP_JOBS[workflow_file], (
         f"{workflow.name} non-Linux jobs are {sorted(native)}, expected exactly "
-        f"{sorted(NATIVE_DEEP_JOBS)}"
+        f"{sorted(NATIVE_DEEP_JOBS[workflow_file])}"
     )
     for name, job in native.items():
         labels = _runner_labels(job)
-        missing = [family for family in ("macos", "windows") if not any(label.startswith(f"{family}-") for label in labels)]
+        families = ("windows",) if f"{workflow_file}:{name}" in WINDOWS_ONLY_NATIVE_JOBS else ("macos", "windows")
+        missing = [family for family in families if not any(label.startswith(f"{family}-") for label in labels)]
         assert not missing, f"{workflow.name} `{name}` runs on {labels}, no {missing} entry"
         assert "exclude" not in job["strategy"]["matrix"], f"{workflow.name} `{name}` matrix has an `exclude`"
         offending = [

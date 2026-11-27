@@ -46,7 +46,7 @@ Distributing pre-built binaries across platforms and teams fragmented:
 - **Multi-platform manifests** — OCI image indexes give native OS/arch resolution
 - **Standards-based** — stable, widely adopted, vendor-neutral
 
-**Security positioning note (Windows launchers).** OCX's Windows entrypoint launchers use a native `.exe` shim that spawns `ocx launcher exec` via `CreateProcessW` directly, bypassing `cmd.exe`. This closes the BatBadBut / CVE-2024-24576 `%*` argument-injection class for default resolution — a surface that tools like Scoop and Chocolatey still expose. Directly reinforces Differentiator #5 (backend-first) and Principle #3 (keep it safe): OCX is designed for CI pipelines and automation that may interpolate untrusted strings into tool invocations. See `adr_windows_exe_shim.md`.
+**Security positioning note (Windows launchers).** OCX's Windows entrypoint launchers use the one native launcher program (its command line read from the beside-file `NAME.launch`) that spawns `ocx launcher exec` via `CreateProcessW` directly, bypassing `cmd.exe`. This closes the BatBadBut / CVE-2024-24576 `%*` argument-injection class for default resolution — a surface that tools like Scoop and Chocolatey still expose. Directly reinforces Differentiator #5 (backend-first) and Principle #3 (keep it safe): OCX is designed for CI pipelines and automation that may interpolate untrusted strings into tool invocations. See `adr_windows_exe_shim.md`.
 
 ## Target Users
 
@@ -141,7 +141,9 @@ Global flags: `--offline`, `--remote`, `--format json`, `--blob-dir`, `--blob-ca
 ~/.ocx/
 ├── blobs/{registry}/                     # Raw OCI blobs (manifests, referrers, image indexes)
 ├── layers/{registry}/                    # Extracted OCI tar layers (content-addressed, shared across packages)
-├── packages/{registry}/                  # Assembled packages (content/ hardlinked from layers/)
+├── packages/{registry}/                  # Assembled packages (content/ hardlinked from layers/; launchers/<G>/ entry-point launchers)
+├── deferred/{G}/{registry}/              # Launchers of deferred tools, written before their content exists
+├── toolchain/                            # Rendered global toolchain: active -> shells/default-<hex>, links/
 ├── index/{source}/                       # Local index collection — one dispatch-object-only copy per source
 ├── symlinks/{registry}/                  # Install symlinks (candidates + current)
 └── temp/                                 # Download staging directories

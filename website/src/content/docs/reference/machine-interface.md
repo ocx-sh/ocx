@@ -145,7 +145,7 @@ See the [command reference][cmd-reference] for flags, arguments and output modes
 [schema-metadata]: https://ocx.sh/schemas/metadata/v1.json
 [schema-patch]: https://ocx.sh/schemas/patch/v1.json
 [schema-execution-record]: https://ocx.sh/schemas/execution-record/v1.json
-[schema-vendor-manifest]: https://ocx.sh/schemas/vendor-manifest/v1.json
+[schema-vendor-manifest]: https://ocx.sh/schemas/vendor-manifest/v2.json
 
 <!-- commands -->
 [cmd-reference]: ./command-line/index.md

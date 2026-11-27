@@ -582,7 +582,7 @@ no consumer of the baked string treats `%` specially — the `.sh` launcher body
 inside a single-quoted POSIX literal), the one-line `.shim` sidecar is read
 **verbatim** by the native shim, and the shim spawns through `CreateProcessW`
 with **no `cmd.exe`** in the chain (so no `%VAR%` environment-variable
-substitution ever occurs). The only producer that treated `%` specially was the
+substitution ever occurs). This describes the launchers already on disk; the launcher of `adr_unified_launcher.md` reads only `NAME.launch` (§ 3.4 there). The only producer that treated `%` specially was the
 `.cmd` body, which the cutover removed. A real Windows install path can legally
 contain `%` (e.g. a user folder named `100%real`); forbidding it would reject
 valid roots for no security benefit. **This change is a backward-compatible
@@ -777,7 +777,7 @@ doc-writer at landing; no rebuttal/matrix row needs rewording now.
 for an installed package's `entrypoints/`) and writes its `<name>.shimref`
 sidecar — one line, the pinned identifier, newline-terminated — so
 `ocx launcher shim`'s Windows dispatch (`materialize_lazy`'s
-`GENERATED_SIBLING_EXTENSIONS`) can find it. `.shimref`, never `.shim`:
+`GENERATED_SIBLING_EXTENSIONS`) can find it. This describes the launchers already on disk; the launcher of `adr_unified_launcher.md` reads only `NAME.launch` (§ 3.4 there). `.shimref`, never `.shim`:
 `.shim` names an installed package's sidecar under `entrypoints/`, and a
 shim tree's `bin/` is a different grammar (`materialize_lazy.rs`).
 
