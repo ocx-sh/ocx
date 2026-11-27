@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Toolchain trampoline bodies (the POSIX `.sh` and the Windows `.exec` sidecar).
+//! The `toolchain` launch record a rendered trampoline carries beside its launcher program.
 //!
-//! Output is byte-stable wire ABI that the native `.exe` shim produces too, so a changed literal must change both
-//! producers (`subsystem-package-manager.md` "Wire-ABI canary rule").
+//! The record is data the launcher reads, never a script a shell runs, so a baked path is a JSON string and
+//! cannot be expanded. See `adr_unified_launcher.md` § 3.
 
 use std::path::{Path, PathBuf};
+
+use ocx_env_apply::launch::{LaunchKind, LaunchRecord, SCHEMA_VERSION, ToolchainRecord, ToolchainTier};
 
 use super::safety::LauncherSafeString;
 
@@ -20,93 +22,51 @@ pub(crate) enum TrampolineTarget {
     Global,
 }
 
-/// The unexported shell variable a POSIX trampoline assigns the baked absolute `ocx` to.
-const TRAMPOLINE_BINARY_VAR: &str = "__ocx_binary";
-
-/// The bare-name `PATH` lookup baked when no absolute `ocx` exists at render time.
-const TRAMPOLINE_BINARY_FALLBACK: &str = "ocx";
-
-/// Produces the body of a POSIX toolchain **trampoline**, the executable
-/// `<home>/toolchain/active/bin/<name>` (`--global` for the global home):
-/// ```sh
-/// #!/bin/sh
-/// # ocx-toolchain-trampoline
-/// unset OCX_GLOBAL OCX_PROJECT
-/// __ocx_binary='<abs ocx>'
-/// exec "${OCX_BINARY_PIN:-$__ocx_binary}" --project '<abs root>' exec -- "${0##*/}" "$@"
-/// ```
-/// The marker must stay exactly line two, or trampoline detection is disarmed; `unset` stops an
-/// exported `OCX_GLOBAL=1` making every trampoline exit 64; a relative `ocx_binary` (only
-/// `trampoline_ocx_binary` checks) lets `/bin/sh` re-resolve the trampoline as itself, an
-/// infinite loop (`adr_toolchain_activation.md` § Rationale from code: launcher trampolines).
+/// The `toolchain` record of every trampoline one render writes; `windows` is the home's target.
+///
+/// `ocx_binary` is baked only when absolute on some host; otherwise the launcher resolves `ocx` itself. The
+/// record is validated as the launcher will read it, so one it would refuse (exit 78) is never written.
 ///
 /// # Errors
 ///
 /// - [`crate::Error::LauncherPathNotUtf8`] when the project root or `ocx` path is not UTF-8.
 /// - [`crate::Error::ToolchainHomeNotAbsolute`] when the project root is relative.
 /// - [`crate::Error::LauncherUnsafeCharacter`] when either path holds a launcher-unsafe character.
-pub(crate) fn unix_trampoline_body(
+/// - [`crate::Error::InternalFile`] naming `context` when the launcher would refuse the record (a Windows path
+///   without a drive, a batch-file `ocx`).
+pub(crate) fn toolchain_record(
     target: &TrampolineTarget,
     ocx_binary: Option<&Path>,
-) -> Result<String, crate::Error> {
-    let selector = match target {
-        TrampolineTarget::Project(root) => {
-            let root = absolute_project_root(root)?;
-            format!("--project '{}'", root.as_str())
-        }
-        TrampolineTarget::Global => "--global".to_string(),
+    windows: bool,
+    context: &Path,
+) -> Result<LaunchRecord, crate::Error> {
+    let (tier, project_root) = match target {
+        TrampolineTarget::Project(root) => (
+            ToolchainTier::Project,
+            Some(absolute_project_root(root)?.as_str().to_owned()),
+        ),
+        TrampolineTarget::Global => (ToolchainTier::Global, None),
     };
-    let binary = match ocx_binary {
-        Some(path) => LauncherSafeString::new(utf8_baked_path(path)?)?,
-        None => LauncherSafeString::new(TRAMPOLINE_BINARY_FALLBACK)?,
-    };
-    // Imported, never re-spelled: the detection predicate reads exactly this constant.
-    let marker = ocx_config::env::TRAMPOLINE_MARKER;
-    let variable = TRAMPOLINE_BINARY_VAR;
-    let binary = binary.as_str();
-    Ok(format!(
-        "#!/bin/sh\n\
-         {marker}\n\
-         unset OCX_GLOBAL OCX_PROJECT\n\
-         {variable}='{binary}'\n\
-         exec \"${{OCX_BINARY_PIN:-${variable}}}\" {selector} exec -- \"${{0##*/}}\" \"$@\"\n"
-    ))
-}
-
-/// Produces a Windows `.exec` sidecar: line one the absolute project root or
-/// [`EXEC_SIDECAR_GLOBAL`], line two (only when `ocx_binary` is absolute) the baked `ocx.exe`.
-///
-/// Without line two the shim spawns bare `ocx`, which Windows finds first in the trampoline's own
-/// `bin` and loops; a non-absolute line two would make every trampoline exit 78, so it degrades to one line.
-///
-/// # Errors
-///
-/// The same three refusals as [`unix_trampoline_body`].
-pub(crate) fn exec_sidecar_body(target: &TrampolineTarget, ocx_binary: Option<&Path>) -> Result<String, crate::Error> {
-    let home = match target {
-        TrampolineTarget::Project(root) => absolute_project_root(root)?,
-        TrampolineTarget::Global => LauncherSafeString::new(EXEC_SIDECAR_GLOBAL)?,
-    };
-    let baked = match ocx_binary {
+    let ocx = match ocx_binary {
         Some(path) => {
             let text = utf8_baked_path(path)?;
             is_absolute_any_host(text)
                 .then(|| LauncherSafeString::new(text))
                 .transpose()?
+                .map(|safe| safe.as_str().to_owned())
         }
         None => None,
     };
-    Ok(match baked {
-        Some(ocx) => format!("{}\n{}\n", home.as_str(), ocx.as_str()),
-        None => format!("{}\n", home.as_str()),
-    })
+    let record = LaunchRecord::Toolchain(ToolchainRecord {
+        kind: LaunchKind::Toolchain,
+        schema_version: SCHEMA_VERSION,
+        tier,
+        project_root,
+        ocx,
+    });
+    super::validate_for_write(&record, windows, context)?;
+    Ok(record)
 }
-
-/// The literal a `.exec` sidecar carries for the global home, matched by byte equality.
-///
-/// Only [`absolute_project_root`]'s refusal of relative roots stops a project named `global`
-/// being read back as the global home.
-pub(crate) const EXEC_SIDECAR_GLOBAL: &str = "global";
 
 /// Validates a baked project root: UTF-8, then absolute, then launcher-safe.
 ///
@@ -137,10 +97,8 @@ pub(super) fn utf8_baked_path(path: &Path) -> Result<&str, crate::Error> {
     })
 }
 
-/// Whether `value` is an absolute path on any host, not on the rendering one.
-///
-/// Not `Path::is_absolute`: one target renders both a `.sh` and a `.exec`, and it answers per host.
-/// Must stay clause-for-clause equal to `ocx_shim::core::is_absolute_path`, which no crate edge binds.
+/// Whether `value` is an absolute path on any host, not on the rendering one; the record's own
+/// `validate` then applies the target's rule.
 fn is_absolute_any_host(value: &str) -> bool {
     let bytes = value.as_bytes();
     if value.starts_with("\\\\") {
@@ -155,1136 +113,113 @@ fn is_absolute_any_host(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::super::safety::LauncherSafeString;
-
-    // ── POSIX trampoline body ────────────────
-    //
-    // The third generated body. Everything it bakes is here: the marker on
-    // line two, the `unset`, the single-quoted absolute `ocx`, and the single
-    // home selector. Nothing else — no group, no entry, no digest, no flag.
-
-    use super::{EXEC_SIDECAR_GLOBAL, TrampolineTarget, exec_sidecar_body, unix_trampoline_body};
     use std::path::{Path, PathBuf};
 
-    /// The absolute install path a trampoline bakes, in the shape
-    /// `ocx_install_bin_path` computes:
-    /// `$OCX_HOME/symlinks/<ocx cli id>/current/content/bin/ocx`.
+    use super::{TrampolineTarget, toolchain_record};
+
     const INSTALLED_OCX: &str = "/home/u/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx";
 
     fn project(root: &str) -> TrampolineTarget {
         TrampolineTarget::Project(PathBuf::from(root))
     }
 
-    #[test]
-    fn unix_trampoline_body_project_byte_exact_golden() {
-        let body = unix_trampoline_body(&project("/w/proj"), Some(Path::new(INSTALLED_OCX)))
-            .expect("an ordinary absolute root carries no launcher-unsafe character");
-        let expected = "#!/bin/sh\n\
-                        # ocx-toolchain-trampoline\n\
-                        unset OCX_GLOBAL OCX_PROJECT\n\
-                        __ocx_binary='/home/u/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx'\n\
-                        exec \"${OCX_BINARY_PIN:-$__ocx_binary}\" --project '/w/proj' exec -- \"${0##*/}\" \"$@\"\n";
-        assert_eq!(
-            body, expected,
-            "the trampoline body is a byte-exact golden: shebang, marker, unset, the \
-             single-quoted absolute ocx, and one exec line carrying only the home selector"
-        );
+    fn encoded(target: &TrampolineTarget, ocx: Option<&str>, windows: bool) -> Result<String, crate::Error> {
+        toolchain_record(target, ocx.map(Path::new), windows, Path::new("/home"))
+            .map(|record| String::from_utf8(record.encode()).expect("a record is UTF-8"))
     }
 
+    /// § 3.3's two examples, byte for byte: the launcher reads exactly these keys.
     #[test]
-    fn unix_trampoline_body_global_byte_exact_golden() {
-        let body = unix_trampoline_body(&TrampolineTarget::Global, Some(Path::new(INSTALLED_OCX)))
-            .expect("the global target bakes no path of its own");
-        let expected = "#!/bin/sh\n\
-                        # ocx-toolchain-trampoline\n\
-                        unset OCX_GLOBAL OCX_PROJECT\n\
-                        __ocx_binary='/home/u/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx'\n\
-                        exec \"${OCX_BINARY_PIN:-$__ocx_binary}\" --global exec -- \"${0##*/}\" \"$@\"\n";
+    fn the_record_is_the_decision_records_golden() {
         assert_eq!(
-            body, expected,
-            "`--global` carries NO value token — a trailing `''` would make ocx read the \
-             next word as the flag's argument"
-        );
-    }
-
-    /// The marker is [`ocx_config::env::TRAMPOLINE_MARKER`] verbatim, as
-    /// **exactly line two** — the position [`ocx_config::env::is_ocx_trampoline`]
-    /// matches, compared whole. Not "somewhere in the probed head": that weaker
-    /// rule is rejected, because an operator-controlled path can
-    /// spell the marker anywhere in a body's head.
-    ///
-    /// The bound is pinned too, but as the emitter's own obligation rather than
-    /// a `contains` scan: line one is a fixed-width shebang, so the marker ends
-    /// well inside [`ocx_config::env::TRAMPOLINE_PROBE_BYTES`] no matter how deep
-    /// the baked root is — which is exactly why the deep-root fixture here must
-    /// still be seen, and why the marker may never move *after* that root.
-    #[test]
-    fn unix_trampoline_body_carries_the_shared_marker_on_line_two() {
-        // A root long enough to push anything after it past the probe window.
-        let deep = format!("/w/{}", "d".repeat(400));
-        let body = unix_trampoline_body(&project(&deep), Some(Path::new(INSTALLED_OCX))).expect("a long root is legal");
-        assert!(
-            body.len() > ocx_config::env::TRAMPOLINE_PROBE_BYTES,
-            "the fixture must exceed the probe window, or this proves nothing: {} bytes",
-            body.len()
+            encoded(&project("/work/app"), Some(INSTALLED_OCX), false).expect("legal"),
+            format!(
+                "{{\"kind\":\"toolchain\",\"schema_version\":1,\"tier\":\"project\",\"project_root\":\"/work/app\",\"ocx\":\"{INSTALLED_OCX}\"}}\n"
+            )
         );
         assert_eq!(
-            body.lines().nth(1),
-            Some(ocx_config::env::TRAMPOLINE_MARKER),
-            "the marker is line two verbatim — the one canonical spelling, imported from \
-             `env.rs`, never re-spelled here (D-V12)"
-        );
-        let shebang = body.lines().next().expect("the body has a first line");
-        let marker_end = shebang.len() + "\n".len() + ocx_config::env::TRAMPOLINE_MARKER.len();
-        assert!(
-            marker_end <= ocx_config::env::TRAMPOLINE_PROBE_BYTES,
-            "`is_ocx_trampoline` reads only the first {} bytes; line two must END inside them, \
-             and it does only while line one stays a fixed-width shebang (ends at byte {})",
-            ocx_config::env::TRAMPOLINE_PROBE_BYTES,
-            marker_end
+            encoded(&TrampolineTarget::Global, Some(INSTALLED_OCX), false).expect("legal"),
+            format!(
+                "{{\"kind\":\"toolchain\",\"schema_version\":1,\"tier\":\"global\",\"ocx\":\"{INSTALLED_OCX}\"}}\n"
+            )
         );
     }
 
-    /// The baked selector is the only selector. Without the `unset`, one
-    /// exported `OCX_GLOBAL=1` makes every trampoline on that PATH exit 64 from
-    /// `check_global_project_exclusivity`, for flags the caller never typed.
+    /// Without an absolute `ocx` the key is omitted and the launcher resolves `ocx` itself.
     #[test]
-    fn unix_trampoline_body_clears_both_tier_selectors_before_the_exec() {
-        for target in [project("/w/proj"), TrampolineTarget::Global] {
-            let body = unix_trampoline_body(&target, None).expect("legal target");
-            let unset = body
-                .find("unset OCX_GLOBAL OCX_PROJECT")
-                .unwrap_or_else(|| panic!("both tier selectors must be cleared: {body}"));
-            let exec = body.find("\nexec ").expect("the body execs");
-            assert!(
-                unset < exec,
-                "the unset must precede the exec, or the child still inherits the stale \
-                 selector: {body}"
-            );
-        }
-    }
-
-    /// The self-resolution loop `ocx` → trampoline → `ocx` runs inside `/bin/sh`, before
-    /// any ocx process starts, so no in-process guard can see it. The absolute
-    /// install path is what closes it; `OCX_BINARY_PIN` still overrides.
-    #[test]
-    fn unix_trampoline_body_bakes_the_absolute_ocx_under_an_overridable_pin() {
-        let body = unix_trampoline_body(&project("/w/proj"), Some(Path::new(INSTALLED_OCX))).expect("legal target");
-        assert!(
-            body.contains(&format!("__ocx_binary='{INSTALLED_OCX}'")),
-            "the absolute install path is baked as a single-quoted literal: {body}"
-        );
-        assert!(
-            body.contains("\"${OCX_BINARY_PIN:-$__ocx_binary}\""),
-            "OCX_BINARY_PIN must still win when set — the absolute path is the FALLBACK: {body}"
-        );
-        assert!(
-            !body.contains("${OCX_BINARY_PIN:-ocx}"),
-            "the bare-name fallback is the self-resolution loop R-W12 closes; it must not \
-             appear when an install path was resolved: {body}"
-        );
-    }
-
-    /// The one case that legitimately re-enters through `PATH`: no install path
-    /// existed at render time. Named separately because it is the state the self-resolution
-    /// loop needs, so it must be reachable *only* here.
-    #[test]
-    fn unix_trampoline_body_falls_back_to_a_bare_name_only_without_an_install_path() {
-        let body = unix_trampoline_body(&project("/w/proj"), None).expect("legal target");
-        assert!(
-            body.contains("__ocx_binary='ocx'"),
-            "no install path at render time → a bare-name PATH lookup: {body}"
-        );
-    }
-
-    /// The `$`-expansion trap the single-quoted assignment exists to close.
-    /// `LauncherSafeString` deliberately admits `$` and backtick, and inside
-    /// `"${VAR:-word}"` the *word* is still expanded — so interpolating the
-    /// path directly into the `:-` word would run a command substitution at
-    /// every invocation for any `$OCX_HOME` containing one.
-    #[test]
-    fn unix_trampoline_body_never_expands_the_baked_ocx_path() {
-        let hostile = "/home/$(id -u)/`whoami`/.ocx/bin/ocx";
-        let body = unix_trampoline_body(&project("/w/proj"), Some(Path::new(hostile)))
-            .expect("`$` and backtick are admitted by LauncherSafeString by design");
-        assert!(
-            body.contains(&format!("__ocx_binary='{hostile}'")),
-            "the path is quoted where it is ASSIGNED, so the shell never expands it: {body}"
-        );
-        assert!(
-            !body.contains(&format!("OCX_BINARY_PIN:-{hostile}")),
-            "interpolating it into the `:-` word would command-substitute at every \
-             invocation: {body}"
-        );
-    }
-
-    /// The writer refuses at render, naming the path. A `'` would
-    /// terminate the single-quoted literal; a newline would append a line to
-    /// the body. Both are the reason the rejection set is sufficient at all.
-    #[test]
-    fn unix_trampoline_body_refuses_a_root_carrying_a_quote_or_a_newline() {
-        for (label, root) in [("single quote", "/w/pro'j"), ("newline", "/w/pro\nj")] {
-            let error = match unix_trampoline_body(&project(root), None) {
-                Err(error) => error,
-                Ok(body) => panic!("{label} must be refused before any body is produced, got: {body:?}"),
-            };
-            match error {
-                crate::Error::LauncherUnsafeCharacter { value, .. } => {
-                    assert_eq!(value, root, "{label}: the refusal must name the offending path");
-                }
-                other => panic!("{label}: expected LauncherUnsafeCharacter, got {other:?}"),
-            }
-        }
-        // The same refusal on the OTHER baked literal. Without this row a
-        // resolved `ocx` path carrying a `'` would be interpolated unchecked.
-        let error = unix_trampoline_body(&project("/w/proj"), Some(Path::new("/opt/o'cx")))
-            .expect_err("the baked ocx path is a single-quoted literal too");
-        assert!(
-            matches!(error, crate::Error::LauncherUnsafeCharacter { .. }),
-            "both single-quoted literals go through the one validator: {error:?}"
-        );
-    }
-
-    #[test]
-    fn unix_trampoline_body_bakes_the_home_selector_and_nothing_else() {
-        let body = unix_trampoline_body(&project("/w/proj"), Some(Path::new(INSTALLED_OCX))).expect("legal target");
-        assert!(
-            body.contains("--project '/w/proj' exec --"),
-            "control: the selector must be present, or every absence below is vacuous: {body}"
-        );
-        // `@sha`, not a bare `@`: the body legitimately ends in `"$@"`, and a
-        // denylist that reds on its own subject is no denylist at all.
-        for forbidden in ["sha256:", "--group", "-g ", "@sha", "launcher"] {
-            assert!(
-                !body.contains(forbidden),
-                "C-028 bakes only the home selector; found `{forbidden}`: {body}"
-            );
-        }
-        assert!(
-            !body.contains("basename"),
-            "D-V3 covers all three POSIX bodies, the trampoline included: {body}"
-        );
-        assert_eq!(
-            body.lines().count(),
-            5,
-            "shebang, marker, unset, binary assignment, exec — and nothing else: {body:?}"
-        );
-        assert!(
-            body.ends_with('\n') && !body.ends_with("\n\n"),
-            "exactly one trailing LF"
-        );
-    }
-
-    // ── The paired byte-exact golden for the `exec` wire vocabulary ──
-
-    /// Wire-ABI canary for the THIRD verb — the sibling of
-    /// [`launcher_wire_token_is_bound_to_shim_producer`] and
-    /// [`launcher_shim_wire_token_is_bound_to_shim_producer`].
-    ///
-    /// The trampoline vocabulary has two producers and no compiler-visible
-    /// binding: this `.sh` body, and `crates/ocx_shim`'s
-    /// `core::WIRE_SUBCOMMAND_EXEC` plus its root-flag arm in
-    /// `build_child_command_line`. `ocx_lib` cannot depend on a binary crate,
-    /// so the pair IS the binding — this states it from the `.sh` side and
-    /// `ocx_shim::tests::trampoline_wire_tokens_match_the_sh_trampoline_body`
-    /// states it from the shim side.
-    ///
-    /// Four tokens are shared, not one: the root-flag-first ORDER is itself
-    /// wire ABI (`--project <root> exec`, never `exec --project <root>`), and
-    /// the `global` sidecar literal is what makes a valueless `--global`
-    /// reachable on Windows at all. The constants are declared INSIDE the test
-    /// on purpose — a production constant shared by body and canary would make
-    /// the canary self-referential and unable to go red.
-    #[test]
-    fn trampoline_wire_tokens_are_bound_to_shim_producer() {
-        const SHARED_WIRE_SUBCOMMAND: &str = "exec";
-        const SHARED_PROJECT_FLAG: &str = "--project";
-        const SHARED_GLOBAL_FLAG: &str = "--global";
-        const SHARED_GLOBAL_SIDECAR_LITERAL: &str = "global";
-
-        let project_body = unix_trampoline_body(&project("/w/proj"), None).expect("legal target");
-        assert!(
-            project_body.contains(&format!("{SHARED_PROJECT_FLAG} '/w/proj' {SHARED_WIRE_SUBCOMMAND} -- ")),
-            "the `.sh` trampoline must carry the shared root-flag-FIRST shape \
-             `--project <root> exec --` (must stay in sync with `crates/ocx_shim/src/core.rs` \
-             WIRE_SUBCOMMAND_EXEC and its root-flag arm): {project_body}"
-        );
-
-        let global_body = unix_trampoline_body(&TrampolineTarget::Global, None).expect("legal target");
-        assert!(
-            global_body.contains(&format!("{SHARED_GLOBAL_FLAG} {SHARED_WIRE_SUBCOMMAND} -- ")),
-            "the global selector emits NO value token between the flag and the verb: {global_body}"
-        );
-
-        assert_eq!(
-            exec_sidecar_body(&TrampolineTarget::Global, None).expect("the global literal is safe"),
-            format!("{SHARED_GLOBAL_SIDECAR_LITERAL}\n"),
-            "the `.exec` sidecar's global literal is matched by BYTE EQUALITY on the shim \
-             side, so the two spellings must agree exactly"
-        );
-
-        // The fifth shared token is a SHAPE, not a word: the baked `ocx`
-        // is line TWO of the sidecar, and the shim splits on the first newline
-        // to find it. Restated here from the writer's side; `ocx_shim`'s
-        // `parse_exec_sidecar_reads_the_baked_ocx_from_the_second_line` states
-        // the reader's. A producer that appended the path to line one, or
-        // wrote it before the home, would pass every assertion above.
-        let baked = exec_sidecar_body(&project("/w/proj"), Some(Path::new("/o/ocx"))).expect("legal target");
-        let mut lines = baked.lines();
-        assert_eq!(lines.next(), Some("/w/proj"), "line one is the home: {baked:?}");
-        assert_eq!(lines.next(), Some("/o/ocx"), "line two is the baked ocx: {baked:?}");
-        assert_eq!(lines.next(), None, "and there is no line three: {baked:?}");
-    }
-
-    // ── `.exec` sidecar body golden ───────────────────────────────
-
-    #[test]
-    fn exec_sidecar_body_byte_exact_golden() {
-        assert_eq!(
-            exec_sidecar_body(&project("C:\\w\\proj"), None).expect("a Windows root is legal"),
-            "C:\\w\\proj\n",
-            "one line holding the absolute project root, then a single LF — the same \
-             frozen shape the `.shim` sidecar uses"
-        );
-        assert_eq!(
-            exec_sidecar_body(&TrampolineTarget::Global, None).expect("legal target"),
-            "global\n",
-            "the global home is the literal `global`, not an empty line and not a path"
-        );
-    }
-
-    // ── The baked `ocx` is the second line ───────────────────────────
-
-    /// The Windows half of the absolute `__ocx_binary` the `.sh` body bakes.
-    ///
-    /// Without it the shim resolves the bare name `ocx`, and `CreateProcessW`
-    /// with a NULL `lpApplicationName` searches the calling image's own
-    /// directory FIRST — `<home>/toolchain/active/bin`, where a package claiming the
-    /// name `ocx` renders `ocx.exe`. Every trampoline beside it then spawns
-    /// that instead, without bound and without consulting `PATH`.
-    ///
-    /// Both producers take the same resolved path in
-    /// `render_toolchain::reconcile_bin`, so this and
-    /// `unix_trampoline_body`'s own golden are the two halves of one contract.
-    ///
-    /// RED: emit only the home line.
-    #[test]
-    fn exec_sidecar_body_bakes_the_resolved_ocx_as_a_second_line() {
-        let ocx = Path::new("C:\\Users\\u\\.ocx\\bin\\ocx.exe");
-        assert_eq!(
-            exec_sidecar_body(&project("C:\\w\\proj"), Some(ocx)).expect("a Windows root is legal"),
-            "C:\\w\\proj\nC:\\Users\\u\\.ocx\\bin\\ocx.exe\n",
-            "home line, LF, baked ocx, LF — the shape `parse_exec_sidecar` reads back"
-        );
-        assert_eq!(
-            exec_sidecar_body(&TrampolineTarget::Global, Some(ocx)).expect("legal target"),
-            "global\nC:\\Users\\u\\.ocx\\bin\\ocx.exe\n",
-            "the global home bakes one too — the two lines are independent clauses"
-        );
-        // The control: the same two targets with `None` emit one line, so the
-        // rows above pin the second line and not merely "some output".
-        assert_eq!(
-            exec_sidecar_body(&project("C:\\w\\proj"), None).expect("legal target"),
-            "C:\\w\\proj\n"
-        );
-    }
-
-    /// `None` — and an unusable candidate — degrade to the one-line form
-    /// rather than refusing.
-    ///
-    /// `trampoline_ocx_binary`'s ladder answers `None` only when the running
-    /// ocx cannot be resolved at all, and `super::super::generate`'s doc
-    /// records that population's self-resolution loop as **accepted**. A
-    /// refusal here would refuse a render POSIX performs. A relative candidate
-    /// degrades for a sharper reason: the read side refuses a relative second
-    /// line, so emitting one would make every trampoline in the home exit 78.
-    ///
-    /// RED: make the second line mandatory, or emit a relative candidate.
-    #[test]
-    fn exec_sidecar_body_degrades_to_one_line_rather_than_refusing() {
-        for (label, candidate) in [
-            ("bare relative", "ocx.exe"),
-            ("dot-relative", ".\\ocx.exe"),
-            ("drive-relative", "C:ocx.exe"),
-        ] {
+    fn a_relative_or_absent_ocx_is_not_baked() {
+        for ocx in [None, Some("ocx"), Some("bin/ocx")] {
             assert_eq!(
-                exec_sidecar_body(&project("C:\\w\\proj"), Some(Path::new(candidate)))
-                    .unwrap_or_else(|error| panic!("{label} must not refuse the render: {error:?}")),
-                "C:\\w\\proj\n",
-                "{label}: a candidate the reader would refuse is omitted, not emitted"
+                encoded(&TrampolineTarget::Global, ocx, false).expect("legal"),
+                "{\"kind\":\"toolchain\",\"schema_version\":1,\"tier\":\"global\"}\n",
+                "{ocx:?}"
             );
         }
     }
 
-    /// The character set is shared with the `.sh` body's own baked binary, so
-    /// a value neither can express refuses on both platforms rather than
-    /// producing a sidecar the shim rejects at every invocation.
-    ///
-    /// RED: bake the path without routing it through `LauncherSafeString`.
+    /// A shell metacharacter in the root is data: the record carries it verbatim.
     #[test]
-    fn exec_sidecar_body_refuses_a_baked_ocx_the_line_grammar_cannot_express() {
-        let error = exec_sidecar_body(&project("C:\\w\\proj"), Some(Path::new("C:\\o\\o\nx.exe")))
-            .expect_err("a newline in the baked path would make the sidecar three lines");
-        assert!(
-            matches!(error, crate::Error::LauncherUnsafeCharacter { .. }),
-            "the same refusal `unix_trampoline_body` applies to its own baked binary: {error:?}"
-        );
-        // The control: the identical call with a legal path is admitted, so
-        // the refusal above is the character and not the second line itself.
-        assert!(exec_sidecar_body(&project("C:\\w\\proj"), Some(Path::new("C:\\o\\ox.exe"))).is_ok());
+    fn a_hostile_root_is_carried_verbatim_as_json() {
+        let root = "/w/he$(touch pwned)`id`re";
+        let text = encoded(&project(root), None, false).expect("`$`, `(` and a backtick are launcher-safe");
+        let value: serde_json::Value = serde_json::from_str(&text).expect("JSON");
+        assert_eq!(value["project_root"], root);
     }
 
     #[test]
-    fn exec_sidecar_body_is_utf8_without_bom_and_one_lf() {
-        let body = exec_sidecar_body(&project("C:\\w\\proj"), None).expect("legal target");
-        assert!(
-            !body.starts_with('\u{feff}') && !body.as_bytes().starts_with(&[0xEF, 0xBB, 0xBF]),
-            "no UTF-8 BOM: the read side does not strip one, so it would fail the clause: {body:?}"
-        );
-        assert_eq!(
-            body.matches('\n').count(),
-            1,
-            "exactly one LF — a second is an INTERIOR newline to the reader: {body:?}"
-        );
-        assert!(!body.contains('\r'), "terminators are LF only, never CRLF: {body:?}");
+    fn a_relative_project_root_is_refused() {
+        assert!(matches!(
+            encoded(&project("w/proj"), None, false),
+            Err(crate::Error::ToolchainHomeNotAbsolute { value }) if value == "w/proj"
+        ));
     }
 
     #[test]
-    fn exec_sidecar_body_refuses_a_root_the_one_line_grammar_cannot_express() {
-        let error = exec_sidecar_body(&project("C:\\w\\pro\nj"), None)
-            .expect_err("a newline would make the sidecar two lines and the reader reject it");
-        assert!(
-            matches!(error, crate::Error::LauncherUnsafeCharacter { .. }),
-            "the sidecar shares the `.sh` refusal set, so a home renders on both platforms \
-             or neither: {error:?}"
-        );
-    }
-
-    // ── A baked home is refused at render unless it is absolute ──────
-
-    /// The collision the `EXEC_SIDECAR_GLOBAL` doc comment claims cannot
-    /// happen. Without the absoluteness refusal `exec_sidecar_body` returns
-    /// `Ok("global\n")` for a *project* whose directory is named `global`, and
-    /// the shim reads that sidecar back as [`ToolchainHome::Global`] — a
-    /// project home silently becoming the global one.
-    #[test]
-    fn exec_sidecar_body_refuses_a_project_root_that_would_read_back_as_the_global_home() {
-        let error = match exec_sidecar_body(&project(EXEC_SIDECAR_GLOBAL), None) {
-            Err(error) => error,
-            Ok(body) => panic!("a project root spelled `global` must never be emitted, got {body:?}"),
-        };
-        assert!(
-            matches!(error, crate::Error::ToolchainHomeNotAbsolute { ref value } if value == EXEC_SIDECAR_GLOBAL),
-            "the refusal must name the offending root: {error:?}"
-        );
-        // The control: the GLOBAL target still emits the literal. Without this
-        // row the assertion above would also pass for a writer that refused
-        // every `global`, including the one that is correct.
-        assert_eq!(
-            exec_sidecar_body(&TrampolineTarget::Global, None).expect("the global target is not a project root"),
-            "global\n",
-            "the literal is produced from the Global variant, never from a root that spells it"
-        );
-    }
-
-    /// A relative `--project` resolves against the **invoking process's** CWD,
-    /// so one trampoline would select two different homes from two directories.
-    /// Both writers refuse, through the one shared validator.
-    #[test]
-    fn a_relative_project_root_is_refused_by_both_writers() {
-        for (label, root) in [
-            ("bare relative", "rel/proj"),
-            ("dot-relative", "./proj"),
-            ("parent-relative", "../../proj"),
-            // Drive-RELATIVE, the case `has_windows_prefix` would admit: `C:proj`
-            // resolves against the process's per-drive working directory.
-            ("drive-relative", "C:proj"),
-            ("bare name", "proj"),
-        ] {
-            let trampoline = match unix_trampoline_body(&project(root), None) {
-                Err(error) => error,
-                Ok(body) => panic!("{label}: the trampoline must refuse a relative root, got {body:?}"),
-            };
-            assert!(
-                matches!(trampoline, crate::Error::ToolchainHomeNotAbsolute { .. }),
-                "{label}: expected ToolchainHomeNotAbsolute from the trampoline, got {trampoline:?}"
-            );
-
-            let sidecar = match exec_sidecar_body(&project(root), None) {
-                Err(error) => error,
-                Ok(body) => panic!("{label}: the sidecar must refuse a relative root, got {body:?}"),
-            };
-            assert!(
-                matches!(sidecar, crate::Error::ToolchainHomeNotAbsolute { .. }),
-                "{label}: expected ToolchainHomeNotAbsolute from the sidecar, got {sidecar:?}"
-            );
-        }
-    }
-
-    /// The admitted set, stated as its own row so the refusal above cannot be
-    /// satisfied by a validator that refuses everything. Three absolute forms,
-    /// host-independent: the renderer answers the same on Linux and Windows.
-    #[test]
-    fn every_host_absolute_form_is_admitted_on_both_writers() {
-        for (label, root) in [
-            ("POSIX-absolute", "/w/proj"),
-            ("drive-absolute backslash", "C:\\w\\proj"),
-            ("drive-absolute forward slash", "C:/w/proj"),
-            ("UNC", "\\\\server\\share\\proj"),
-            ("verbatim", "\\\\?\\C:\\w\\proj"),
-        ] {
-            let body = unix_trampoline_body(&project(root), None)
-                .unwrap_or_else(|error| panic!("{label} must be admitted by the trampoline: {error:?}"));
-            assert!(
-                body.contains(&format!("--project '{root}'")),
-                "{label}: the root is baked verbatim inside single quotes: {body}"
-            );
-            assert_eq!(
-                exec_sidecar_body(&project(root), None)
-                    .unwrap_or_else(|error| panic!("{label} must be admitted by the sidecar: {error:?}")),
-                format!("{root}\n"),
-                "{label}: the sidecar carries the root verbatim plus one LF"
-            );
-        }
-    }
-
-    /// Absoluteness is checked **before** the character set, so a relative root
-    /// that also carries a `'` reports the refusal a reader can act on rather
-    /// than whichever validator happened to run first.
-    #[test]
-    fn the_absoluteness_refusal_precedes_the_character_refusal() {
-        let error = match unix_trampoline_body(&project("rel/pro'j"), None) {
-            Err(error) => error,
-            Ok(body) => panic!("a doubly-invalid root must be refused, got {body:?}"),
-        };
-        assert!(
-            matches!(error, crate::Error::ToolchainHomeNotAbsolute { .. }),
-            "the absoluteness clause runs first: {error:?}"
-        );
-    }
-
-    // ── A baked path that is not UTF-8 is refused at render ──
-
-    /// The silent-corruption case `to_string_lossy` produces. `0xFF` is not a
-    /// legal UTF-8 byte anywhere, so a lossy conversion turns `/w/pro\xFFj`
-    /// into `/w/pro\u{FFFD}j` — a *different, absolute, launcher-safe* path
-    /// that renders cleanly and does not exist. `/bin/sh` then reports a bare
-    /// `ENOENT` naming a path the operator never wrote.
-    #[cfg(unix)]
-    fn non_utf8_path(bytes: &[u8]) -> PathBuf {
-        use std::os::unix::ffi::OsStrExt as _;
-        PathBuf::from(std::ffi::OsStr::from_bytes(bytes))
-    }
-
-    /// The project-root half: **both** writers refuse, and the
-    /// refusal names the value.
-    #[cfg(unix)]
-    #[test]
-    fn a_project_root_that_is_not_utf8_is_refused_by_both_writers() {
-        let root = non_utf8_path(b"/w/pro\xFFj");
-        let target = TrampolineTarget::Project(root.clone());
-        let lossy = root.to_string_lossy().into_owned();
-
-        // The precondition that makes this row worth having: the lossy form
-        // passes every OTHER clause, so nothing but this one can refuse it.
-        assert!(
-            super::is_absolute_any_host(&lossy) && LauncherSafeString::new(lossy.clone()).is_ok(),
-            "precondition: the lossy substitution is absolute and launcher-safe, which is \
-             exactly why it would be baked: {lossy:?}"
-        );
-
-        match unix_trampoline_body(&target, Some(Path::new(INSTALLED_OCX))) {
-            Err(crate::Error::LauncherPathNotUtf8 { path }) => {
-                assert_eq!(path, lossy, "the refusal names the value, in its only printable form");
-            }
-            Err(other) => panic!("expected LauncherPathNotUtf8, got {other:?}"),
-            Ok(body) => panic!("a non-UTF-8 root must never be baked, got {body:?}"),
-        }
-        assert!(
-            matches!(
-                exec_sidecar_body(&target, None),
-                Err(crate::Error::LauncherPathNotUtf8 { .. })
-            ),
-            "the sidecar writer shares the refusal — and its own read side rejects non-UTF-8 \
-             bytes as E2, so a lossy write would produce a file the shim refuses forever"
-        );
-    }
-
-    /// The **second** baked literal. Without this row the resolved
-    /// `ocx` path — derived from `$OCX_HOME`, which is equally free to be
-    /// non-UTF-8 — would still be lossily converted and baked, and the
-    /// trampoline would exec a binary that does not exist.
-    #[cfg(unix)]
-    #[test]
-    fn a_resolved_ocx_path_that_is_not_utf8_is_refused_at_render() {
-        let binary = non_utf8_path(b"/opt/o\xFFcx/bin/ocx");
-        match unix_trampoline_body(&project("/w/proj"), Some(binary.as_path())) {
-            Err(crate::Error::LauncherPathNotUtf8 { path }) => {
-                assert_eq!(path, binary.to_string_lossy());
-            }
-            Err(other) => panic!("expected LauncherPathNotUtf8, got {other:?}"),
-            Ok(body) => panic!("a non-UTF-8 ocx path must never be baked, got {body:?}"),
-        }
-    }
-
-    /// The control for both rows above: a root whose bytes ARE valid UTF-8 but
-    /// are not ASCII still renders. Without it the refusal is satisfied by a
-    /// validator that rejects every byte above `0x7F`.
-    #[test]
-    fn a_non_ascii_but_valid_utf8_root_is_still_admitted() {
-        let root = "/w/projekt-ünicode-\u{1f600}";
-        let body = unix_trampoline_body(&project(root), Some(Path::new(INSTALLED_OCX)))
-            .expect("valid UTF-8 is baked whatever code points it uses");
-        assert!(
-            body.contains(&format!("--project '{root}'")),
-            "the root is baked verbatim: {body}"
-        );
-        assert_eq!(
-            exec_sidecar_body(&project(root), None).expect("the sidecar admits it too"),
-            format!("{root}\n")
-        );
-    }
-
-    #[test]
-    fn exec_sidecar_body_carries_no_wire_vocabulary() {
-        // The sidecar names a home; the VERB comes from which file the shim
-        // found, never from what is inside it.
-        let body = exec_sidecar_body(&project("C:\\w\\proj"), None).expect("legal target");
-        for token in ["exec", "--project", "--global", "launcher"] {
-            assert!(
-                !body.contains(token),
-                "the `.exec` sidecar must carry only the home selector; found `{token}`: {body:?}"
-            );
-        }
-    }
-
-    // ── The whole refusal set, and the whole admitted set ──────────
-    //
-    // The shipped rows cover `'` and `\n`. The character set is five, and the
-    // three untested members are the ones a reader would assume rather than
-    // check: a lone `\r` is a terminator on exactly one platform, `\0` is
-    // invisible in every diff, and `"` is tolerated by the `.shim` READER yet
-    // forbidden by the writer.
-
-    /// Stated once for the whole set:
-    /// every member of `LAUNCHER_UNSAFE_CHARS` is refused at render, and the
-    /// refusal names both the offending path and the offending character.
-    #[test]
-    fn unix_trampoline_body_refuses_every_launcher_unsafe_character_in_the_root() {
-        for (label, root, expected) in [
-            ("single quote", "/w/pro'j", '\''),
-            ("double quote", "/w/pro\"j", '"'),
-            ("newline", "/w/pro\nj", '\n'),
-            ("carriage return", "/w/pro\rj", '\r'),
-            ("NUL", "/w/pro\0j", '\0'),
-        ] {
-            let error = match unix_trampoline_body(&project(root), Some(Path::new(INSTALLED_OCX))) {
-                Err(error) => error,
-                Ok(body) => panic!("{label} must be refused before any body exists, got {body:?}"),
-            };
-            match error {
-                crate::Error::LauncherUnsafeCharacter { value, character } => {
-                    assert_eq!(value, root, "{label}: the refusal must name the offending path");
-                    assert_eq!(character, expected, "{label}: …and the offending character");
-                }
-                other => panic!("{label}: expected LauncherUnsafeCharacter, got {other:?}"),
-            }
-
-            // The `.exec` writer refuses the same root for the same reason, so
-            // a home renders on both platforms or on neither.
+    fn a_launcher_unsafe_character_in_the_root_is_refused() {
+        for character in ['\'', '"', '\n', '\r', '\0'] {
+            let root = format!("/w/a{character}b");
             assert!(
                 matches!(
-                    exec_sidecar_body(&project(root), None),
-                    Err(crate::Error::LauncherUnsafeCharacter { .. })
+                    encoded(&project(&root), None, false),
+                    Err(crate::Error::LauncherUnsafeCharacter { character: found, .. }) if found == character
                 ),
-                "{label}: the sidecar writer shares the refusal set"
+                "{character:?}"
             );
         }
     }
 
-    /// A root that is *only* the offending character. The
-    /// assertions compare the whole value, never a `starts_with`/`ends_with`
-    /// shape — a prefix-based check passes trivially on this input and would
-    /// hide a refusal that named the wrong path.
-    #[test]
-    fn the_refusal_names_a_root_that_is_nothing_but_the_offending_character() {
-        // Absoluteness is adjudicated first, so a bare `'` is refused for not
-        // being a path at all. It still names the value, which is what the refusal owes.
-        match unix_trampoline_body(&project("'"), None) {
-            Err(crate::Error::ToolchainHomeNotAbsolute { value }) => {
-                assert_eq!(value, "'", "the refusal names the whole root, verbatim");
-            }
-            Err(other) => panic!("expected ToolchainHomeNotAbsolute for a bare quote, got {other:?}"),
-            Ok(body) => panic!("a root that is a bare quote must never render, got {body:?}"),
-        }
-
-        // …and the absolute form of the same degenerate root, which reaches the
-        // character clause. `/'` is one slash and one quote: no prefix, no
-        // suffix, nothing for a sloppy assertion to match on.
-        match unix_trampoline_body(&project("/'"), None) {
-            Err(crate::Error::LauncherUnsafeCharacter { value, character }) => {
-                assert_eq!(value, "/'", "the refusal names the whole root, verbatim");
-                assert_eq!(character, '\'');
-            }
-            Err(other) => panic!("expected LauncherUnsafeCharacter for `/'`, got {other:?}"),
-            Ok(body) => panic!("`/'` would terminate the single-quoted literal, got {body:?}"),
-        }
-    }
-
-    /// The deliberately **admitted** characters. Without this
-    /// row the refusal rows above are satisfied by a validator that refuses
-    /// everything — and `$`, backtick, `\` and `%` are exactly the characters
-    /// the single-quoted context exists to make safe rather than to ban.
-    #[test]
-    fn unix_trampoline_body_admits_the_characters_the_single_quoting_makes_safe() {
-        for (label, root) in [
-            ("dollar", "/w/$HOME"),
-            ("command substitution", "/w/$(id -u)"),
-            ("backtick", "/w/`id`"),
-            ("backslash", "/w/back\\slash"),
-            ("percent", "/w/100%real"),
-            ("space", "/w/pro j"),
-        ] {
-            let body = unix_trampoline_body(&project(root), Some(Path::new(INSTALLED_OCX)))
-                .unwrap_or_else(|error| panic!("{label} must be admitted: {error:?}"));
-            assert!(
-                body.contains(&format!("--project '{root}' exec -- ")),
-                "{label}: the root is baked verbatim inside single quotes: {body}"
-            );
-            assert_eq!(
-                exec_sidecar_body(&project(root), None).unwrap_or_else(|error| panic!("{label}: {error:?}")),
-                format!("{root}\n"),
-                "{label}: the sidecar carries the same root verbatim plus one LF"
-            );
-        }
-    }
-
-    /// The **trampoline** half. The shipped row covers the
-    /// `.exec` writer, where the collision is byte-visible; the trampoline
-    /// refuses the same root for the CWD-dependence reason, and both must
-    /// refuse or a home renders on one platform and not the other.
-    #[test]
-    fn unix_trampoline_body_refuses_a_project_root_spelled_like_the_global_literal() {
-        match unix_trampoline_body(&project(EXEC_SIDECAR_GLOBAL), Some(Path::new(INSTALLED_OCX))) {
-            Err(crate::Error::ToolchainHomeNotAbsolute { value }) => {
-                assert_eq!(value, EXEC_SIDECAR_GLOBAL, "the refusal names the offending root");
-            }
-            Err(other) => panic!("expected ToolchainHomeNotAbsolute, got {other:?}"),
-            Ok(body) => panic!("a project root spelled `global` must never render, got {body:?}"),
-        }
-        // The control: the Global VARIANT still renders. Without it the row
-        // above also passes for a writer that refused the global home outright.
-        let global = unix_trampoline_body(&TrampolineTarget::Global, Some(Path::new(INSTALLED_OCX)))
-            .expect("the global target bakes no root of its own");
-        assert!(
-            global.contains("--global exec -- "),
-            "the selector comes from the variant, never from a root that spells it: {global}"
-        );
-    }
-
-    /// An install path containing a space. It is
-    /// assigned under single quotes and expanded inside double quotes, so it
-    /// reaches `execve` as one token — the runtime half of this claim is
-    /// [`executed::the_trampoline_execs_the_baked_absolute_ocx_verbatim`].
-    #[test]
-    fn unix_trampoline_body_bakes_an_install_path_containing_a_space() {
-        let spaced = "/opt/Program Files/ocx";
-        let body = unix_trampoline_body(&project("/w/proj"), Some(Path::new(spaced))).expect("a space is admitted");
-        assert!(
-            body.contains(&format!("__ocx_binary='{spaced}'")),
-            "the space sits inside the single-quoted assignment: {body}"
-        );
-        assert!(
-            body.contains("exec \"${OCX_BINARY_PIN:-$__ocx_binary}\""),
-            "…and the expansion is double-quoted, so the word is not field-split: {body}"
-        );
-    }
-
-    /// The trampoline resolves argv0 with the parameter expansion and never forks `basename`. The absence is the
-    /// contract — a body carrying both forms would satisfy a presence-only check while still forking.
-    #[test]
-    fn the_posix_trampoline_resolves_argv0_without_a_basename_fork() {
-        let body = unix_trampoline_body(&project("/w/proj"), Some(Path::new(INSTALLED_OCX))).expect("legal target");
-        assert!(
-            body.contains("-- \"${0##*/}\" \"$@\"\n"),
-            "argv0 is the POSIX 2.6.2 parameter expansion, after `--`: {body}"
-        );
-        assert!(
-            !body.contains("basename"),
-            "`$(basename \"$0\")` forks and does an ambient-PATH lookup BEFORE the exec line runs — the string must \
-             not appear at all: {body}"
-        );
-    }
-
-    // ── The bodies read as `/bin/sh` reads them, not as strings ───────────
-    //
-    // Everything above asserts source text. These run the emitted body under
-    // its own shebang against a stub `ocx` and assert the argv and the
-    // environment that actually arrive — the only evidence that distinguishes
-    // a body that parses the way its author read it from one that merely
-    // looks right.
     #[cfg(unix)]
-    mod executed {
-        use super::super::{TrampolineTarget, unix_trampoline_body};
-        use super::project;
-        use std::path::{Path, PathBuf};
-        #[expect(
-            clippy::disallowed_types,
-            reason = "test-only /bin/sh harness running the emitted launcher body against a stub `ocx`"
-        )]
-        use std::process::Command;
+    #[test]
+    fn a_path_that_is_not_utf8_is_refused() {
+        use std::os::unix::ffi::OsStrExt as _;
+        let root = PathBuf::from(std::ffi::OsStr::from_bytes(b"/w/\xff"));
+        assert!(matches!(
+            toolchain_record(
+                &TrampolineTarget::Project(root.clone()),
+                None,
+                false,
+                Path::new("/home")
+            ),
+            Err(crate::Error::LauncherPathNotUtf8 { .. })
+        ));
+        assert!(matches!(
+            toolchain_record(&TrampolineTarget::Global, Some(&root), false, Path::new("/home")),
+            Err(crate::Error::LauncherPathNotUtf8 { .. })
+        ));
+    }
 
-        /// A stand-in for `ocx` that records what reached it and then
-        /// reproduces `check_global_project_exclusivity`: an invocation that
-        /// selects **both** tiers — by flag or by exported variable — exits 64.
-        ///
-        /// The exit-64 clause is what makes the negative control below
-        /// meaningful. Without it a leaked `OCX_GLOBAL` would be recorded and
-        /// then ignored, and a body with the `unset` would be indistinguishable
-        /// by exit code from one without it.
-        const STUB_OCX: &str = r#"#!/bin/sh
-printf '%s\n' "$@" > "$OCX_STUB_ARGV"
-printf 'OCX_GLOBAL=%s\nOCX_PROJECT=%s\n' "${OCX_GLOBAL-<unset>}" "${OCX_PROJECT-<unset>}" > "$OCX_STUB_ENV"
-printf '%s\n' "$0" > "$OCX_STUB_PROGRAM"
-selects_global=0
-selects_project=0
-[ -n "${OCX_GLOBAL+set}" ] && selects_global=1
-[ -n "${OCX_PROJECT+set}" ] && selects_project=1
-for argument in "$@"; do
-  case "$argument" in
-    --global) selects_global=1 ;;
-    --project) selects_project=1 ;;
-  esac
-done
-[ "$selects_global" = 1 ] && [ "$selects_project" = 1 ] && exit 64
-exit 0
-"#;
-
-        /// What the stub `ocx` saw for one executed body.
-        #[derive(Debug)]
-        struct Observed {
-            status: i32,
-            argv: Vec<String>,
-            environment: String,
-            program: String,
-        }
-
-        fn write_executable(path: &Path, body: &str) {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::write(path, body).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).expect("make it executable");
-        }
-
-        /// Installs the stub at `path` and hands back the path, so a body can
-        /// be rendered against it *before* it is executed.
-        fn stub_ocx_at(path: PathBuf) -> PathBuf {
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).expect("create the stub's directory");
-            }
-            write_executable(&path, STUB_OCX);
-            path
-        }
-
-        /// Runs `body` under its own shebang as `<scratch>/<name>`, with
-        /// `caller_environment` standing in for what the *caller* exported —
-        /// the whole point of the strip is that those names must not arrive.
-        ///
-        /// `PATH` is `<scratch>` first, so a bare-name re-entry resolves a stub
-        /// placed there and nothing else on the host.
-        #[expect(
-            clippy::disallowed_types,
-            reason = "test-only /bin/sh harness running the emitted launcher body against a stub `ocx`"
-        )]
-        fn run_body(scratch: &Path, name: &str, body: &str, caller_environment: &[(&str, &str)]) -> Observed {
-            let script = scratch.join(name);
-            write_executable(&script, body);
-
-            let argv_log = scratch.join("observed-argv");
-            let environment_log = scratch.join("observed-environment");
-            let program_log = scratch.join("observed-program");
-
-            let mut command = Command::new(&script);
-            command
-                .env_clear()
-                .env("PATH", format!("{}:/usr/bin:/bin", scratch.display()))
-                .env("OCX_STUB_ARGV", &argv_log)
-                .env("OCX_STUB_ENV", &environment_log)
-                .env("OCX_STUB_PROGRAM", &program_log);
-            for (key, value) in caller_environment {
-                command.env(key, value);
-            }
-            // ETXTBSY is a property of the harness, not of the body. `cargo
-            // test` runs these in parallel threads: one thread's still-open
-            // write descriptor on ITS script is inherited by another thread's
-            // `fork`, and the first thread's `execve` then fails with
-            // `Text file busy` until that forked child reaches its own `exec`.
-            // The window is microseconds and closes on its own, so retry rather
-            // than serialize the whole module — a bounded retry keeps the
-            // assertions below deterministic without hiding a real failure,
-            // which would exhaust the budget and panic.
-            //
-            // KNOWN RESIDUAL, and the reason to reach for `cargo nextest` when
-            // this module misbehaves: this loop guards the OUTER `execve` — the
-            // trampoline body itself. The same race can strike the INNER one,
-            // where `/bin/sh` execs the stub `ocx` the body resolved, and that
-            // exec is inside the child, past anything this harness can retry.
-            // It surfaces as `Observed { status: 126 }` with
-            // `/bin/sh: bad interpreter: Text file busy` on stderr — a failure
-            // that is NOT about the body under test. It cannot occur under the
-            // gate: `task rust:verify` runs `cargo nextest`, which is
-            // process-per-test, so no sibling test's write descriptor is ever
-            // in this process to be inherited. A red here under a bare
-            // `cargo test -p ocx_lib --lib` that goes green under `cargo
-            // nextest run` is this, not a regression.
-            let status = {
-                let mut attempt = 0;
-                loop {
-                    match command.status() {
-                        Ok(status) => break status,
-                        Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy && attempt < 100 => {
-                            attempt += 1;
-                            std::thread::sleep(std::time::Duration::from_millis(10));
-                        }
-                        Err(error) => panic!("the body must be executable via its shebang: {error}"),
-                    }
-                }
-            };
-
-            Observed {
-                status: status.code().expect("the child was not signalled"),
-                argv: std::fs::read_to_string(&argv_log)
-                    .unwrap_or_default()
-                    .lines()
-                    .map(str::to_string)
-                    .collect(),
-                environment: std::fs::read_to_string(&environment_log).unwrap_or_default(),
-                program: std::fs::read_to_string(&program_log)
-                    .unwrap_or_default()
-                    .trim()
-                    .to_string(),
-            }
-        }
-
-        /// The baked
-        /// selector is the only selector. Three caller environments times both
-        /// targets, all exit 0 — and the stub confirms neither name arrived.
-        #[test]
-        fn the_trampoline_strips_both_tier_selectors_it_never_baked() {
-            for (label, caller) in [
-                ("global exported", vec![("OCX_GLOBAL", "1")]),
-                ("project exported", vec![("OCX_PROJECT", "/elsewhere")]),
-                (
-                    "both exported",
-                    vec![("OCX_GLOBAL", "1"), ("OCX_PROJECT", "/elsewhere")],
-                ),
-            ] {
-                for (target_label, target) in [
-                    ("project target", project("/w/proj")),
-                    ("global target", TrampolineTarget::Global),
-                ] {
-                    let scratch = tempfile::tempdir().expect("tempdir");
-                    let stub = stub_ocx_at(scratch.path().join("stub-ocx"));
-                    let body = unix_trampoline_body(&target, Some(stub.as_path())).expect("legal target");
-                    let observed = run_body(scratch.path(), "cmake", &body, &caller);
-
-                    assert_eq!(
-                        observed.status, 0,
-                        "{label} / {target_label}: the trampoline must succeed for flags the \
-                         caller never typed: {observed:?}"
-                    );
-                    assert_eq!(
-                        observed.environment, "OCX_GLOBAL=<unset>\nOCX_PROJECT=<unset>\n",
-                        "{label} / {target_label}: `unset` removes an EXPORTED name from the \
-                         environment, so the exec'd child inherits neither"
-                    );
-                }
-            }
-        }
-
-        /// The **negative control** for the rows above. Same caller
-        /// environment, same invocation, against a body with line three
-        /// deleted: the selector survives and `ocx` exits 64.
-        ///
-        /// Without this row those rows are indistinguishable from a run in
-        /// which the caller's export never reached the child at all.
-        #[test]
-        fn a_trampoline_body_without_the_unset_leaks_the_callers_tier_selectors() {
-            let scratch = tempfile::tempdir().expect("tempdir");
-            let stub = stub_ocx_at(scratch.path().join("stub-ocx"));
-            let body = unix_trampoline_body(&project("/w/proj"), Some(stub.as_path())).expect("legal target");
-
-            let without_unset: String = body
-                .lines()
-                .filter(|line| !line.starts_with("unset "))
-                .map(|line| format!("{line}\n"))
-                .collect();
-            assert_eq!(
-                (body.lines().count(), without_unset.lines().count()),
-                (5, 4),
-                "the control must differ from the real body by exactly the unset line"
-            );
-
-            let observed = run_body(scratch.path(), "cmake", &without_unset, &[("OCX_GLOBAL", "1")]);
-            assert_eq!(
-                observed.environment, "OCX_GLOBAL=1\nOCX_PROJECT=<unset>\n",
-                "without the unset the caller's export reaches the child"
-            );
-            assert_eq!(
-                observed.status, 64,
-                "…and a baked `--project` beside an inherited OCX_GLOBAL is the exit-64 \
-                 collision `check_global_project_exclusivity` reports, for a flag nobody typed"
-            );
-        }
-
-        /// Runtime halves: the body execs the
-        /// baked path **verbatim**. The install path carries both hazards at
-        /// once — a space and a command substitution — so a body that expanded
-        /// the `:-` word, or one that field-split it, runs something else or
-        /// nothing at all.
-        #[test]
-        fn the_trampoline_execs_the_baked_absolute_ocx_verbatim() {
-            let scratch = tempfile::tempdir().expect("tempdir");
-            let stub = stub_ocx_at(scratch.path().join("Program Files $(id -u)").join("ocx"));
-
-            let body = unix_trampoline_body(&project("/w/pro j"), Some(stub.as_path())).expect("legal target");
-            let observed = run_body(scratch.path(), "cmake", &body, &[]);
-
-            assert_eq!(observed.status, 0, "the baked binary must be reachable: {observed:?}");
-            assert_eq!(
-                observed.program,
-                stub.display().to_string(),
-                "the exec'd program is the baked path byte for byte — not a substitution's \
-                 output, and not a PATH lookup"
-            );
-            assert_eq!(
-                observed.argv,
-                vec!["--project", "/w/pro j", "exec", "--", "cmake"],
-                "the root with a space is ONE argv token, and the trampoline's own filename \
-                 is argv0 after `--`"
-            );
-        }
-
-        /// A **defined but empty** `OCX_BINARY_PIN` falls through
-        /// to the baked path, because POSIX `${VAR:-word}` substitutes on unset
-        /// *or* empty.
-        ///
-        /// This diverges from the Windows shim on purpose, and the divergence is
-        /// invisible from either side alone: `core::spawn_application_name` takes
-        /// the pin branch whenever the variable is *defined*, empty included
-        /// (`IF DEFINED` parity, pinned by `ocx_shim`'s
-        /// `resolve_program_set_empty_pin_takes_pin_branch_not_ocx`), so the same
-        /// environment runs the baked ocx on POSIX and fails the spawn
-        /// deterministically on Windows. `ocx_lib` cannot call across the crate
-        /// boundary, so this row states the POSIX half and names its counterpart.
-        #[test]
-        fn an_empty_ocx_binary_pin_falls_through_to_the_baked_path_on_posix() {
-            let scratch = tempfile::tempdir().expect("tempdir");
-            let baked = stub_ocx_at(scratch.path().join("baked-ocx"));
-
-            let body = unix_trampoline_body(&project("/w/proj"), Some(baked.as_path())).expect("legal target");
-            let observed = run_body(scratch.path(), "cmake", &body, &[("OCX_BINARY_PIN", "")]);
-
-            assert_eq!(observed.status, 0, "the fallback must still be reachable: {observed:?}");
-            assert_eq!(
-                observed.program,
-                baked.display().to_string(),
-                "`:-` treats a defined-but-empty pin as unset, so the baked absolute path runs"
-            );
-        }
-
-        /// `OCX_BINARY_PIN` still wins at runtime — the baked
-        /// absolute path is the FALLBACK, not a hard-coding.
-        #[test]
-        fn ocx_binary_pin_overrides_the_baked_absolute_path_at_runtime() {
-            let scratch = tempfile::tempdir().expect("tempdir");
-            let baked = stub_ocx_at(scratch.path().join("baked-ocx"));
-            let pinned = stub_ocx_at(scratch.path().join("pinned-ocx"));
-
-            let body = unix_trampoline_body(&project("/w/proj"), Some(baked.as_path())).expect("legal target");
-            let observed = run_body(
-                scratch.path(),
-                "cmake",
-                &body,
-                &[("OCX_BINARY_PIN", &pinned.display().to_string())],
-            );
-
-            assert_eq!(
-                observed.program,
-                pinned.display().to_string(),
-                "the pin wins over the baked path: {observed:?}"
-            );
-            assert_ne!(
-                observed.program,
-                baked.display().to_string(),
-                "…and the baked path is genuinely not what ran"
-            );
-        }
-
-        /// With no install path at render time the body falls back
-        /// to a bare-name `PATH` lookup — the one state the self-resolution
-        /// loop needs, so it must be reachable only here.
-        ///
-        /// The dangerous consequence is visible in the assertion: what runs is
-        /// decided entirely by whichever `ocx` sits first on the invocation's
-        /// `PATH`. Put a toolchain `bin/ocx` there and the trampoline re-enters
-        /// itself, in `/bin/sh`, before any ocx process starts.
-        #[test]
-        fn without_an_install_path_the_trampoline_resolves_ocx_through_path() {
-            let scratch = tempfile::tempdir().expect("tempdir");
-            let on_path = stub_ocx_at(scratch.path().join("ocx"));
-
-            let body = unix_trampoline_body(&project("/w/proj"), None).expect("legal target");
-            assert!(
-                body.contains("__ocx_binary='ocx'"),
-                "the precondition for this row is the bare-name fallback: {body}"
-            );
-            let observed = run_body(scratch.path(), "cmake", &body, &[]);
-
-            assert_eq!(observed.status, 0, "the bare name must resolve through PATH");
-            assert_eq!(
-                observed.program,
-                on_path.display().to_string(),
-                "the bare name resolved to whatever `PATH` offered first — nothing in the \
-                 body decided it: {observed:?}"
-            );
-        }
-
-        /// `${0##*/}` against the inputs whose answer is not
-        /// obvious, measured against `basename` on the same input. Identical for
-        /// every name a trampoline can be invoked under; the one divergence is
-        /// `$0 = "/"`, which no `execve` can produce.
-        #[test]
-        fn the_argv0_expansion_matches_basename_except_for_a_bare_root() {
-            #[expect(
-                clippy::disallowed_types,
-                reason = "test-only /bin/sh harness running the emitted launcher body against a stub `ocx`"
-            )]
-            fn under_sh(script: &str, argv0: &str) -> String {
-                let output = Command::new("/bin/sh")
-                    .args(["-c", script, argv0])
-                    .output()
-                    .expect("run /bin/sh");
-                String::from_utf8(output.stdout).expect("printf emits what it was given")
-            }
-            let expansion = |argv0: &str| under_sh("printf %s \"${0##*/}\"", argv0);
-            let basename = |argv0: &str| under_sh("printf %s \"$(basename \"$0\")\"", argv0);
-
-            for argv0 in ["cmake", "/usr/bin/cmake", "./cmake", "my tool", "/opt/bin/my tool"] {
-                assert_eq!(
-                    expansion(argv0),
-                    basename(argv0),
-                    "{argv0}: the fork-free form must answer identically for every name a \
-                     trampoline can be invoked under"
-                );
-            }
-            assert_eq!(expansion("cmake"), "cmake", "no slash at all → `$0` unchanged");
-            assert_eq!(expansion("my tool"), "my tool", "a name with a space survives whole");
-
-            // The documented divergence, and why it is harmless: `/` is not a
-            // name a trampoline can be invoked under — `execve` cannot exec a
-            // directory, so `$0` is never a bare root.
-            assert_eq!(expansion("/"), "", "`##*/` strips the whole string");
-            assert_eq!(basename("/"), "/", "…where `basename` answers `/`");
-        }
+    /// LA: the launcher exits 78 on a driveless Windows path and on a batch-file `ocx`; such a record is refused
+    /// at render, never written.
+    #[test]
+    fn a_record_the_windows_launcher_refuses_is_never_built() {
+        assert!(matches!(
+            encoded(&project("/w/proj"), None, true),
+            Err(crate::Error::InternalFile(..))
+        ));
+        assert!(matches!(
+            encoded(&TrampolineTarget::Global, Some("C:\\ocx\\ocx.cmd"), true),
+            Err(crate::Error::InternalFile(..))
+        ));
+        assert!(encoded(&project("C:\\w\\proj"), Some("C:\\ocx\\ocx.exe"), true).is_ok());
     }
 }

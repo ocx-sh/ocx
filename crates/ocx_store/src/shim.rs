@@ -416,8 +416,8 @@ mod tests {
 
     // ── C-001 corrupt-blob pre-check ──────────────────────────────────────
     //
-    // `ShimBinStore::ensure` decides "already published" by existence, so a
-    // torn write is served forever. `published_blob_is_intact` is the predicate
+    // A publisher that decides "already published" by existence serves a
+    // torn write forever. `published_blob_is_intact` is the predicate
     // that pre-check consults, driven here red and green from a fixture.
 
     /// The six-byte fixture the length rows compare against. Its content is

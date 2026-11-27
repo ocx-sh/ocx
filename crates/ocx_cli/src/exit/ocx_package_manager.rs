@@ -293,8 +293,8 @@ mod tests {
                     PathBuf::from("/out"),
                     std::io::Error::from(std::io::ErrorKind::PermissionDenied),
                 )),
-                ExitCode::IoError,
-                "package_manager_internal_file",
+                ExitCode::PermissionDenied,
+                "permission_denied",
             ),
             (
                 VendorError::Package(PackageManagerError::from(ocx_project::Error::from(

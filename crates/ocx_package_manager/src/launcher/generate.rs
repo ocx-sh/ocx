@@ -66,6 +66,7 @@ pub(super) async fn generate_for(
         schema_version: SCHEMA_VERSION,
         package_root: package_root.as_str().to_owned(),
     });
+    super::validate_for_write(&record, windows, dest)?;
 
     tokio::fs::create_dir_all(dest)
         .await
@@ -698,6 +699,26 @@ mod tests {
         assert!(!dest.exists(), "no directory, no file");
     }
 
+    /// A root holding the `@VENDOR_DIR@` token passes the unsafe-character gate but not the record's own rule, so
+    /// nothing is written.
+    #[tokio::test]
+    async fn a_package_root_holding_the_vendor_token_is_refused_before_anything_is_written() {
+        let tmp = tempdir().unwrap();
+        let dest = tmp.path().join("pkg").join("launchers");
+
+        let result = super::generate_for(
+            &tmp.path().join("@VENDOR_DIR@").join("pkg"),
+            &entries_for(&["cmake"]),
+            &dest,
+            host_blob(),
+            false,
+        )
+        .await;
+
+        assert!(result.is_err(), "the launcher would refuse this record");
+        assert!(!dest.exists(), "no directory, no file");
+    }
+
     /// A non-Windows target lists exactly `NAME` and `NAME.launch` per name.
     #[tokio::test]
     async fn a_unix_target_lists_only_the_launcher_and_its_record_per_name() {
@@ -994,6 +1015,11 @@ mod tests {
             matches!(&error, crate::Error::InternalFile(path, cause)
                 if *path == package.launchers_root() && cause.kind() == std::io::ErrorKind::PermissionDenied),
             "{error:?}"
+        );
+        assert_eq!(
+            ocx_exit::ClassifyExitCode::classify(&error),
+            Some(ocx_exit::ExitCode::PermissionDenied),
+            "C-127: a permission refusal on first use exits 77"
         );
     }
 

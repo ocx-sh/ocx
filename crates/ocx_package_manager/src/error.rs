@@ -178,9 +178,19 @@ pub enum Error {
     /// `#[source]` alone leaves every `to_string()` naming only the path.
     #[error("internal file error for '{path}': {cause}", path = .0.display(), cause = .1)]
     #[exit(
-        IoError,
-        slug = "package_manager_internal_file",
-        summary = "Reading or writing an internal package file failed"
+        with = internal_file_row,
+        rows(
+            (
+                PermissionDenied,
+                slug = "permission_denied",
+                summary = "The operating system refused access to a file or directory"
+            ),
+            (
+                IoError,
+                slug = "package_manager_internal_file",
+                summary = "Reading or writing an internal package file failed"
+            ),
+        )
     )]
     InternalFile(std::path::PathBuf, std::io::Error),
 
@@ -276,6 +286,14 @@ pub enum Error {
     #[error(transparent)]
     #[exit(delegate = 0)]
     ProjectRegistry(#[from] ocx_project::registry::error::Error),
+}
+
+/// An internal file refused for permission answers 77, the caller obtains it; any other kind keeps 74.
+fn internal_file_row(error: &Error, [denied, other]: [Row; 2]) -> Pick<'_> {
+    match error {
+        Error::InternalFile(_, cause) if cause.kind() == std::io::ErrorKind::PermissionDenied => Pick::row(denied),
+        _ => Pick::row(other),
+    }
 }
 
 /// A batch answers as its first member when that member decides the exit code, else defers to the walker.
@@ -601,6 +619,26 @@ pub enum DependencyError {
 
 #[cfg(test)]
 mod tests {
+    /// C-127: an internal file refused for permission answers 77 (obtain it); any other I/O kind stays 74.
+    #[test]
+    fn internal_file_answers_by_io_kind() {
+        use ocx_exit::{ClassifyErrorKind, Detail, ExitCode};
+        let verdict = |kind: std::io::ErrorKind| {
+            let error = Error::InternalFile("/home/launchers".into(), std::io::Error::from(kind));
+            let Detail::Fixed(entry) = error.kind_detail() else {
+                panic!("InternalFile names its slug directly");
+            };
+            (error.classify().expect("InternalFile always has a code"), entry.slug)
+        };
+        assert_eq!(
+            verdict(std::io::ErrorKind::PermissionDenied),
+            (ExitCode::PermissionDenied, "permission_denied")
+        );
+        for kind in [std::io::ErrorKind::Other, std::io::ErrorKind::ReadOnlyFilesystem] {
+            assert_eq!(verdict(kind), (ExitCode::IoError, "package_manager_internal_file"));
+        }
+    }
+
     #[test]
     fn not_installed_names_the_digest_and_the_install_command() {
         let identifier = ocx_oci::PackageRef::new_registry("cmake", "example.com");

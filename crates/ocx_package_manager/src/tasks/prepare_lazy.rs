@@ -188,12 +188,14 @@ async fn write_shim_launchers(
     package: &ocx_oci::PinnedPackageRef,
     names: &BTreeSet<BinaryName>,
 ) -> Result<(), PackageErrorKind> {
+    let record = crate::launcher::deferred_record(package).map_err(PackageErrorKind::Internal)?;
+    crate::launcher::validate_for_write(&record, cfg!(windows), bin_dir).map_err(PackageErrorKind::Internal)?;
+
     // Even for no names: `bin/` is the completeness marker.
     tokio::fs::create_dir_all(bin_dir)
         .await
         .map_err(|e| PackageErrorKind::Internal(crate::error::file_error(bin_dir, e)))?;
 
-    let record = crate::launcher::deferred_record(package).map_err(PackageErrorKind::Internal)?;
     let blob = crate::launcher::host_launcher_blob(bin_dir).map_err(PackageErrorKind::Internal)?;
     for name in names {
         crate::launcher::write_launcher(bin_dir, name.as_str(), blob, &record, cfg!(windows))
@@ -397,6 +399,17 @@ mod tests {
             &["cmake", "cmake.launch"]
         };
         assert_eq!(listing, expected);
+    }
+
+    /// A deferred identifier is pinned by type (`PinnedPackageRef` renders `<registry>/<repo>@sha256:<hex>`), so the
+    /// record `deferred_record` builds always satisfies the launcher's `deferred` rule: the validation in the writer
+    /// is defence in depth, and this pins that the rule holds for a representative identifier.
+    #[test]
+    fn a_deferred_record_of_a_pinned_identifier_validates_for_both_targets() {
+        let record = crate::launcher::deferred_record(&pinned("ns/cmake", "a")).unwrap();
+        for windows in [false, true] {
+            crate::launcher::validate_for_write(&record, windows, Path::new("/ctx")).expect("valid");
+        }
     }
 
     // ── the config-blob forward-refs ─────────────────

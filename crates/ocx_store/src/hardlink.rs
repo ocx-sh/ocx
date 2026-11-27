@@ -87,17 +87,6 @@ pub(crate) fn create_in_existing_parent(
     Ok(())
 }
 
-/// Like [`create`], replacing whatever is at `link`.
-pub fn update(source: impl AsRef<std::path::Path>, link: impl AsRef<std::path::Path>) -> Result<()> {
-    let source = source.as_ref();
-    let link = link.as_ref();
-
-    if link.exists() || ocx_util::fs::symlink::is_link(link) {
-        std::fs::remove_file(link).map_err(|error| FileError::new(link, error))?;
-    }
-    create(source, link)
-}
-
 fn hard_link_or_err(source: &std::path::Path, link: &std::path::Path) -> std::io::Result<()> {
     if let Some(parent) = link.parent() {
         std::fs::create_dir_all(parent)?;
@@ -324,51 +313,6 @@ mod tests {
             std::io::ErrorKind::CrossesDevices,
             "cross-device must surface CrossesDevices, got {:?}",
             io_err.kind()
-        );
-    }
-
-    // ── update ───────────────────────────────────────────────────────────────
-
-    /// H6: update() when link already exists — old file is removed and new
-    /// hardlink is placed pointing to the new source.
-    #[test]
-    fn update_replaces_existing_file() {
-        let (_dir, root) = setup();
-        let file_a = make_file(&root, "file_a.txt", b"version A");
-        let file_b = make_file(&root, "file_b.txt", b"version B");
-        let link = root.join("link.txt");
-
-        // First create a hardlink to file_a
-        create(&file_a, &link).unwrap();
-        assert_eq!(std::fs::read(&link).unwrap(), b"version A");
-
-        // Now update to point to file_b
-        update(&file_b, &link).unwrap();
-
-        assert!(link.exists(), "link must still exist after update()");
-        assert_eq!(
-            std::fs::read(&link).unwrap(),
-            b"version B",
-            "link must now contain file_b's content"
-        );
-    }
-
-    /// update() when no link exists — should create the hardlink as if create()
-    /// was called.
-    #[test]
-    fn update_creates_new_link_when_none_exists() {
-        let (_dir, root) = setup();
-        let source = make_file(&root, "source.txt", b"fresh content");
-        let link = root.join("link.txt");
-
-        // link does not exist yet — update() must handle this gracefully
-        update(&source, &link).unwrap();
-
-        assert!(link.exists(), "link must be created by update() when absent");
-        assert_eq!(
-            std::fs::read(&link).unwrap(),
-            b"fresh content",
-            "link must carry the source content"
         );
     }
 

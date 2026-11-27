@@ -820,6 +820,76 @@ fn bin_matches_recorded(bin_dir: &Path, recorded: &BTreeMap<String, file_structu
     seen == recorded.len()
 }
 
+/// This project's stamp, never `Global`; `read` runs on the blocking pool and any failure reads as absent.
+async fn read_project_stamp<T: Send + 'static>(
+    input: &SessionInput<'_>,
+    project: &ProjectIdentity,
+    read: fn(&file_structure::StateStore, file_structure::RenderStampTarget<'_>) -> Option<T>,
+) -> Option<T> {
+    let state = input.file_structure.state.clone();
+    let key = project.key.clone();
+    match tokio::task::spawn_blocking(move || read(&state, file_structure::RenderStampTarget::Project(&key))).await {
+        Ok(stamp) => stamp,
+        Err(error) => {
+            tracing::debug!("the render-stamp read task failed: {error}");
+            None
+        }
+    }
+}
+
+/// The v2 gate: the stamp is this home's and project's, `active` names exactly `shells/<shell_dir>`, and that
+/// directory holds what the stamp recorded. Never a name pattern, so a complete sibling directory is refused.
+async fn v2_gate_passes(
+    input: &SessionInput<'_>,
+    project: &ProjectIdentity,
+    home: &file_structure::ToolchainHome,
+    scope: &file_structure::RenderStampScope,
+) -> bool {
+    let Some(stamp) = read_project_stamp(input, project, file_structure::StateStore::render_stamp_v2).await else {
+        return false;
+    };
+    if stamp.home != home.root() || stamp.scope != *scope {
+        return false;
+    }
+    // `active_target_name` rejects an illegal component in the stamp's own text before it is joined onto a path.
+    if home.active_target_name().as_deref() != Some(stamp.shell_dir.as_str()) || !home.active_is_valid(&stamp.shell_dir)
+    {
+        return false;
+    }
+    let directory = home.render_dir(&stamp.shell_dir);
+    let recorded = stamp.bin_fingerprint;
+    match tokio::task::spawn_blocking(move || crate::tasks::render_toolchain::directory_matches(&directory, &recorded))
+        .await
+    {
+        Ok(matched) => matched,
+        Err(error) => {
+            tracing::debug!("the v2 render-stamp comparison task failed: {error}");
+            false
+        }
+    }
+}
+
+/// The v1 gate, as an older ocx wrote it: `active` names `shells/default` and its `bin/` matches the v1 stamp.
+async fn v1_gate_passes(
+    input: &SessionInput<'_>,
+    project: &ProjectIdentity,
+    home: &file_structure::ToolchainHome,
+    scope: &file_structure::RenderStampScope,
+) -> bool {
+    let Some(stamp) = read_project_stamp(input, project, file_structure::StateStore::render_stamp).await else {
+        return false;
+    };
+    if stamp.home != home.root() || stamp.scope != *scope {
+        return false;
+    }
+    // The returned `bin()` resolves through `active`, so a repointed link puts any directory on `PATH`.
+    if !home.active_is_valid(file_structure::DEFAULT_SHELL) {
+        return false;
+    }
+    // The physical directory: through `active`, the gate judges whatever `active` names.
+    bin_stamp_matches(&home.shell_bin(file_structure::DEFAULT_SHELL), &stamp).await
+}
+
 /// The `bin`-mode arm: the project `PATH` entry, or `None` for the caller's hint.
 ///
 /// Step order is the contract, and this path never prunes: a prompt-time delete would run in an
@@ -834,35 +904,13 @@ pub(crate) async fn bin_mode_entry(
     home: &file_structure::ToolchainHome,
     lock: &ProjectLock,
 ) -> Result<Option<PathBuf>, SessionError> {
-    use file_structure::{RenderStampScope, RenderStampTarget};
+    use file_structure::RenderStampScope;
 
-    // 1. This project's stamp, never `Global`.
-    let state = input.file_structure.state.clone();
-    let key = project.key.clone();
-    let stamp = match tokio::task::spawn_blocking(move || state.render_stamp(RenderStampTarget::Project(&key))).await {
-        Ok(stamp) => stamp,
-        Err(error) => {
-            tracing::debug!("the render-stamp read task failed: {error}");
-            None
-        }
-    };
-    let Some(stamp) = stamp else {
-        return Ok(None);
-    };
-
-    // 2. Identity before content, both halves: two projects colliding in `name_for_path` share a home and stamp.
+    // 1. Identity before content, both halves: two projects colliding in `name_for_path` share a home and stamp.
     let scope = RenderStampScope::Project(project.dir.clone());
-    if stamp.home != home.root() || stamp.scope != scope {
-        return Ok(None);
-    }
 
-    // 3a. The returned `bin()` resolves through `active`, so a repointed link puts any directory on `PATH`.
-    if !home.active_is_valid(file_structure::DEFAULT_SHELL) {
-        return Ok(None);
-    }
-
-    // 3b. The physical directory: through `active`, the gate judges whatever `active` names.
-    if !bin_stamp_matches(&home.shell_bin(file_structure::DEFAULT_SHELL), &stamp).await {
+    // 2. v2 first, then v1 exactly as before: an older ocx that rendered last leaves `active` on `shells/default`.
+    if !v2_gate_passes(input, project, home, &scope).await && !v1_gate_passes(input, project, home, &scope).await {
         return Ok(None);
     }
 
@@ -3251,7 +3299,7 @@ mod bin_mode_entry_tests {
     use ocx_package::metadata::env::entry::Entry;
     use ocx_project::{DECLARATION_HASH_VERSION, DEFAULT_GROUP, LockMetadata, LockVersion, LockedTool, ProjectLock};
     use ocx_store::file_structure::{
-        BinEntryStamp, DEFAULT_SHELL, FileStructure, RenderStamp, RenderStampScope, RenderStampTarget,
+        BinEntryStamp, DEFAULT_SHELL, FileStructure, RenderStamp, RenderStampScope, RenderStampTarget, RenderStampV2,
     };
 
     use super::{ProjectIdentity, SessionInput, bin_mode_entry};
@@ -4098,6 +4146,144 @@ mod bin_mode_entry_tests {
             entry, None,
             "a tree the heal refused to enter must not be exposed on `PATH`"
         );
+    }
+
+    // ── The v2 gate (C-133, V-L33): `active` must name the stamp's own `shell_dir` ────
+
+    const PLANTED: &str = "default-0000000000000000";
+    const RENDERED: &str = "default-8d41c2e07a95b3f6";
+
+    impl Arena {
+        /// Publish `<home>/shells/<name>/bin/cmake` (executable) and answer its stamp.
+        fn publish_render_dir(&self, name: &str, body: &str) -> BTreeMap<String, BinEntryStamp> {
+            use std::os::unix::fs::PermissionsExt as _;
+            let bin = self.home.render_dir(name).join("bin");
+            std::fs::create_dir_all(&bin).expect("mkdir shells/<name>/bin");
+            let path = bin.join("cmake");
+            std::fs::write(&path, body).expect("write the launcher");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+            let metadata = std::fs::symlink_metadata(&path).expect("stat the launcher");
+            let stamped = BinEntryStamp::of_file(&path, &metadata).expect("stamp the launcher");
+            BTreeMap::from([("cmake".to_owned(), stamped)])
+        }
+
+        fn point_active_at(&self, name: &str) {
+            self.corrupt_active(ActiveState::LinkTo(&self.home.expected_active_target(name)));
+        }
+
+        fn stamp_v2(&self, shell_dir: &str, entries: BTreeMap<String, BinEntryStamp>) -> RenderStampV2 {
+            RenderStampV2::new(
+                self.home.root().to_path_buf(),
+                RenderStampScope::Project(self.project.dir.clone()),
+                shell_dir.to_owned(),
+                DEFAULT_SHELL.to_owned(),
+                "f".repeat(64),
+                "g".to_owned(),
+                entries,
+                BTreeMap::new(),
+            )
+        }
+
+        fn persist_v2(&self, stamp: &RenderStampV2) {
+            self.file_structure
+                .state
+                .set_render_stamp_v2(RenderStampTarget::Project(&self.project.key), stamp)
+                .expect("persist the v2 stamp");
+        }
+
+        async fn prompt(&self) -> Option<PathBuf> {
+            let session = Session::new(&self.file_structure);
+            bin_mode_entry(
+                &session.input(&self.file_structure, &[]),
+                &self.project,
+                &self.home,
+                &lock_pinning(DIGEST_A),
+            )
+            .await
+            .expect("a gate verdict is not an error")
+        }
+    }
+
+    #[tokio::test]
+    async fn v2_stamp_naming_the_active_directory_gates() {
+        let arena = Arena::new();
+        arena.link_default_cmake_at(DIGEST_A);
+        let entries = arena.publish_render_dir(RENDERED, "launcher\n");
+        arena.point_active_at(RENDERED);
+        arena.persist_v2(&arena.stamp_v2(RENDERED, entries));
+
+        assert_eq!(arena.prompt().await, Some(arena.home.bin()));
+    }
+
+    /// V-L33 mutation guard: a `default-<16 hex>` name check would admit the planted directory.
+    #[tokio::test]
+    async fn v2_stamp_refuses_an_active_that_names_another_complete_directory() {
+        let arena = Arena::new();
+        arena.link_default_cmake_at(DIGEST_A);
+        let entries = arena.publish_render_dir(RENDERED, "launcher\n");
+        arena.publish_render_dir(PLANTED, "launcher\n");
+        arena.point_active_at(PLANTED);
+        arena.persist_v2(&arena.stamp_v2(RENDERED, entries));
+
+        assert_eq!(arena.prompt().await, None);
+    }
+
+    #[tokio::test]
+    async fn v2_stamp_refuses_a_directory_whose_content_changed() {
+        let arena = Arena::new();
+        arena.link_default_cmake_at(DIGEST_A);
+        let entries = arena.publish_render_dir(RENDERED, "launcher\n");
+        arena.point_active_at(RENDERED);
+        arena.persist_v2(&arena.stamp_v2(RENDERED, entries));
+        std::fs::write(
+            arena.home.render_dir(RENDERED).join("bin").join("cmake"),
+            "tampered, longer\n",
+        )
+        .expect("tamper");
+
+        assert_eq!(arena.prompt().await, None);
+    }
+
+    #[tokio::test]
+    async fn v1_stamp_alone_still_gates_shells_default() {
+        let arena = Arena::new();
+        let cmake = arena.render_trampoline("cmake", "#!/bin/sh\ncmake\n");
+        arena.link_default_cmake_at(DIGEST_A);
+        arena.persist(&arena.stamp(BTreeMap::from([("cmake".to_owned(), cmake)])));
+
+        assert_eq!(arena.prompt().await, Some(arena.home.bin()));
+    }
+
+    /// An older ocx rendered last: it healed `active` back to `shells/default` and wrote v1.
+    #[tokio::test]
+    async fn failed_v2_gate_falls_back_to_the_v1_gate() {
+        let arena = Arena::new();
+        let cmake = arena.render_trampoline("cmake", "#!/bin/sh\ncmake\n");
+        arena.link_default_cmake_at(DIGEST_A);
+        let entries = arena.publish_render_dir(RENDERED, "launcher\n");
+        arena.persist_v2(&arena.stamp_v2(RENDERED, entries));
+        arena.persist(&arena.stamp(BTreeMap::from([("cmake".to_owned(), cmake)])));
+        // `active` names `shells/default` (Arena::new), not the v2 stamp's directory.
+
+        assert_eq!(arena.prompt().await, Some(arena.home.bin()));
+    }
+
+    #[tokio::test]
+    async fn v2_stamp_with_an_unknown_version_reads_absent() {
+        let arena = Arena::new();
+        arena.link_default_cmake_at(DIGEST_A);
+        let entries = arena.publish_render_dir(RENDERED, "launcher\n");
+        arena.point_active_at(RENDERED);
+        arena.persist_v2(&arena.stamp_v2(RENDERED, entries));
+        let file = arena.file_structure.state.render_stamp_v2_file(&arena.project.key);
+        let text = std::fs::read_to_string(&file).expect("read the v2 stamp");
+        assert!(
+            text.contains("\"v\": 2"),
+            "the fixture must carry the version it rewrites"
+        );
+        std::fs::write(&file, text.replace("\"v\": 2", "\"v\": 9")).expect("rewrite the version");
+
+        assert_eq!(arena.prompt().await, None);
     }
 }
 

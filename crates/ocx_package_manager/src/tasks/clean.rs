@@ -370,8 +370,8 @@ async fn retire_other_generations(fs: &FileStructure, dry_run: bool) -> crate::R
 }
 
 /// Retires, for every home a v2 stamp names, each `default-<16 hex>`, `.staging-*` and `.gc-*` under
-/// `shells/` that is neither the stamp's `shell_dir` nor its `previous_shell_dir`. `default` and every
-/// other name stay. A home that cannot be locked or fails the symlink guard is skipped with a warning.
+/// `shells/` that is neither the stamp's `shell_dir` nor its `previous_shell_dir`
+/// nor the name `active` points at. `default` and every other name stay. A home that cannot be locked or fails the symlink guard is skipped with a warning.
 async fn retire_superseded_shells(fs: &FileStructure, dry_run: bool) -> crate::Result<Vec<PathBuf>> {
     let state = fs.state.clone();
     let homes = tokio::task::spawn_blocking(move || stamped_homes(&state))
@@ -403,6 +403,14 @@ async fn retire_superseded_shells(fs: &FileStructure, dry_run: bool) -> crate::R
         let Some(shells) = home.render_dir(DEFAULT_SHELL).parent().map(Path::to_path_buf) else {
             continue;
         };
+        // The stamp is written after the `active` switch, so it can lag: retiring what `active` names would dangle it.
+        let active = {
+            let home = ToolchainHome::new(&stamp.home);
+            tokio::task::spawn_blocking(move || home.active_target_name())
+                .await
+                .ok()
+                .flatten()
+        };
         let Ok(mut entries) = tokio::fs::read_dir(&shells).await else {
             continue;
         };
@@ -411,7 +419,11 @@ async fn retire_superseded_shells(fs: &FileStructure, dry_run: bool) -> crate::R
             let Ok(name) = entry.file_name().into_string() else {
                 continue;
             };
-            if !is_render_debris(&name) || name == stamp.shell_dir || name == stamp.previous_shell_dir {
+            if !is_render_debris(&name)
+                || name == stamp.shell_dir
+                || name == stamp.previous_shell_dir
+                || active.as_deref() == Some(name.as_str())
+            {
                 continue;
             }
             if entry.file_type().await.is_ok_and(|kind| kind.is_dir()) {
@@ -1887,6 +1899,29 @@ repository = "localhost:5000/shfmt"
         assert!(!kept.contains(&format!("default-{GEN_C}")));
         assert!(kept.contains(&format!("default-{GEN_A}")));
         assert!(kept.contains(&"default".to_string()));
+    }
+
+    /// The stamp is written after the `active` switch: until then (or after a failed stamp write) it
+    /// names the old pair while `active` names a complete newer directory, which a clean must keep.
+    #[tokio::test]
+    async fn clean_keeps_the_directory_active_names_when_the_stamp_lags() {
+        let (_tmp, manager, home) = global_shells_home().await;
+        let target = format!("shells/default-{GEN_C}");
+        ocx_util::fs::symlink::create(std::path::Path::new(&target), home.join("active")).unwrap();
+
+        manager.clean(false, false).await.unwrap();
+
+        let kept = survivors(&home).await;
+        assert!(
+            kept.contains(&format!("default-{GEN_C}")),
+            "active's target survives: {kept:?}"
+        );
+        assert!(
+            home.join("active").join("bin").join("x").exists(),
+            "active is not dangling"
+        );
+        assert!(kept.contains(&format!("default-{GEN_A}")) && kept.contains(&format!("default-{GEN_B}")));
+        assert!(!kept.contains(&".staging-dddddddddddddddd".to_string()));
     }
 
     #[tokio::test]
