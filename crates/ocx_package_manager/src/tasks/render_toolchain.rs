@@ -83,8 +83,8 @@ pub struct RenderRequest<'a> {
     pub dry_run: bool,
 
     /// Default-group tools whose closure could not be walked, so [`Self::surface`] omits them. Their
-    /// launcher names are unknown, so while any exist an intact stamped directory is kept as it is:
-    /// a new one from the partial surface would drop the launchers of tools that are still locked.
+    /// launcher names are unknown, so while any exist the previous stamp's names join the computed ones:
+    /// a new directory from the partial surface would otherwise drop the launchers of tools still locked.
     pub unrendered: &'a [String],
 }
 
@@ -617,6 +617,7 @@ async fn render_bin(
             !record
         })
         .collect();
+    let names = with_stamped_names(names, request, previous);
 
     // Before any write: a record the launcher would refuse is never written.
     let ocx_binary = trampoline_ocx_binary(file_structure).await;
@@ -636,17 +637,25 @@ async fn render_bin(
     let records: BTreeMap<String, Vec<u8>> = names.iter().map(|name| (name.clone(), record_bytes.clone())).collect();
     let fingerprint = render_fingerprint(generation, &records);
 
-    let keep_partial = !request.unrendered.is_empty();
     let current = match previous.cloned() {
         Some(stamp) => {
             let (root, scope, fingerprint) = (home.root().to_path_buf(), request.scope.clone(), fingerprint.clone());
-            blocking(root.clone(), move || {
-                let current =
-                    stamp_directory_is_current(&ToolchainHome::new(root), &scope, &stamp, &fingerprint, keep_partial);
+            match blocking(root.clone(), move || {
+                let current = stamp_directory_is_current(&ToolchainHome::new(root), &scope, &stamp, &fingerprint);
                 Ok(current.then_some(stamp))
             })
             .await
-            .unwrap_or(None)
+            {
+                Ok(current) => current,
+                Err(error) => {
+                    // A stamp that cannot be checked is not current: the render publishes a complete directory.
+                    log::warn!(
+                        "The render stamp of '{}' could not be checked: {error}",
+                        home.root().display()
+                    );
+                    None
+                }
+            }
         }
         None => None,
     };
@@ -669,12 +678,22 @@ async fn render_bin(
     }
 
     let blob = host_launcher_blob(home.root()).map_err(PackageErrorKind::Internal)?;
-    let previous_shell_dir = blocking(home.root().to_path_buf(), {
+    let previous_shell_dir = match blocking(home.root().to_path_buf(), {
         let root = home.root().to_path_buf();
         move || Ok(ToolchainHome::new(root).active_target_name().unwrap_or_default())
     })
     .await
-    .unwrap_or_default();
+    {
+        Ok(name) => name,
+        Err(error) => {
+            // Empty means "no earlier directory": `ocx clean` then keeps only `shell_dir`.
+            log::warn!(
+                "The directory '{}' named before this render could not be read: {error}",
+                home.active().display()
+            );
+            String::new()
+        }
+    };
 
     let staged = match stage_render_dir(home, &names, blob, &record, cfg!(windows)).await {
         Ok(staged) => staged,
@@ -700,9 +719,18 @@ async fn render_bin(
     switch_active(home, &shell_dir).await;
 
     let bin = home.render_dir(&shell_dir).join(TRAMPOLINE_BIN_DIR);
-    let bin_fingerprint = blocking(bin.clone(), move || Ok(fingerprint_bin(&bin)))
-        .await
-        .unwrap_or_default();
+    let bin_fingerprint = match blocking(bin.clone(), move || Ok(fingerprint_bin(&bin))).await {
+        Ok(fingerprint) => fingerprint,
+        Err(error) => {
+            // An empty fingerprint would never match the directory: leave it unstamped so the next render republishes.
+            log::warn!(
+                "The render directory '{shell_dir}' of '{}' could not be fingerprinted and is left unstamped: {error}",
+                home.root().display()
+            );
+            push_all(items, &names, &RenderOutcome::Written);
+            return Ok(None);
+        }
+    };
     push_all(items, &names, &RenderOutcome::Written);
     Ok(Some(LandedBin {
         shell_dir,
@@ -749,20 +777,44 @@ async fn switch_active(home: &ToolchainHome, shell_dir: &str) {
     }
 }
 
+/// The names a render publishes. A partial surface (`unrendered` non-empty) cannot see every tool, so the
+/// previous stamp's names join the computed ones: every record is name-independent and every launcher is the
+/// one blob, so a launcher for an unrendered name stays exactly right. A full render is the computed set.
+fn with_stamped_names(
+    names: Vec<String>,
+    request: &RenderRequest<'_>,
+    previous: Option<&RenderStampV2>,
+) -> Vec<String> {
+    let Some(stamp) = previous.filter(|stamp| {
+        !request.unrendered.is_empty() && stamp.home == request.home.root() && &stamp.scope == request.scope
+    }) else {
+        return names;
+    };
+    let mut union: BTreeSet<String> = names.into_iter().collect();
+    for entry in stamp.names.iter().filter(|entry| !is_record_name(entry)) {
+        let tool = if cfg!(windows) {
+            entry.strip_suffix(".exe").unwrap_or(entry)
+        } else {
+            entry
+        };
+        union.insert(tool.to_owned());
+    }
+    union.into_iter().collect()
+}
+
 /// Whether `stamp`'s directory is what this render would publish: written for this home and tier, under the
-/// same fingerprint (unless `keep_partial`), and still holding exactly the stamped entries. A published
-/// directory that differs from its stamp is never repaired: the render publishes another.
+/// same fingerprint, and still holding exactly the stamped entries. A published directory that differs from
+/// its stamp is never repaired: the render publishes another.
 fn stamp_directory_is_current(
     home: &ToolchainHome,
     scope: &RenderStampScope,
     stamp: &RenderStampV2,
     fingerprint: &str,
-    keep_partial: bool,
 ) -> bool {
     is_render_dir_name(&stamp.shell_dir)
         && stamp.home == home.root()
         && &stamp.scope == scope
-        && (keep_partial || stamp.fingerprint == fingerprint)
+        && stamp.fingerprint == fingerprint
         && directory_matches(&home.render_dir(&stamp.shell_dir), &stamp.bin_fingerprint)
 }
 
@@ -3052,9 +3104,9 @@ mod tests {
         );
     }
 
-    /// An unwalked tool keeps the intact stamped directory as it is: the launchers of the tool the
-    /// partial surface omits stay on `active/bin`, and the stamp still certifies them. The `&[]`
-    /// control publishes a new directory from the same partial surface.
+    /// An unwalked tool keeps the intact stamped directory as it is: the union of stamped and computed names
+    /// is the stamped set, so nothing is published and the stamp still certifies both launchers. The `&[]`
+    /// control publishes a new directory from the same surface.
     #[tokio::test]
     async fn an_unwalked_tool_keeps_the_intact_stamped_directory() {
         let tree = Tree::new();
@@ -3091,6 +3143,64 @@ mod tests {
             "the control: a whole surface publishes"
         );
         assert_eq!(tree.bin_entries(), expected_bin_entries(&["cmake"]));
+    }
+
+    /// A partial surface (`unrendered` non-empty) still publishes a new launcher generation: a stamp written
+    /// under another generation is never current, and the unrendered tool's launcher is carried by name.
+    #[tokio::test]
+    async fn a_partial_render_publishes_a_new_generation_holding_the_stamped_names() {
+        let tree = Tree::new();
+        render_names(&tree, &["cmake", "ctest"]).await;
+        let kept = tree.home.active_target_name().expect("published");
+        let mut stamp = tree.stamp().expect("the stamp exists");
+        stamp.fingerprint = "0".repeat(64);
+        stamp.generation = "an-older-generation".to_string();
+        tree.file_structure
+            .state
+            .set_render_stamp_v2(RenderStampTarget::Project(&tree.key()), &stamp)
+            .unwrap();
+
+        let surface = vec![node(pinned("ns/cmake", 'a'), Some(&["cmake"]), &[])];
+        let lock = lock_of(vec![locked_tool(
+            "cmake",
+            DEFAULT_GROUP,
+            "ns/cmake",
+            &[(PLATFORM_KEY, 'a')],
+        )]);
+        let unrendered = vec!["ns/other".to_string()];
+        render_body(&tree, &lock, &surface, &groups_of(&[DEFAULT_GROUP]), &unrendered).await;
+
+        let now = tree.home.active_target_name().expect("published");
+        assert_ne!(now, kept, "a new directory is published");
+        assert_eq!(tree.bin_entries(), expected_bin_entries(&["cmake", "ctest"]));
+        let stamp = tree.stamp().expect("the stamp exists");
+        assert_eq!(stamp.shell_dir, now);
+        assert_ne!(stamp.generation, "an-older-generation");
+    }
+
+    /// A partial render whose computed names add one the stamp lacks publishes the union.
+    #[tokio::test]
+    async fn a_partial_render_that_adds_a_name_publishes_the_union() {
+        let tree = Tree::new();
+        render_names(&tree, &["cmake"]).await;
+        let kept = tree.home.active_target_name().expect("published");
+
+        let surface = vec![node(pinned("ns/cmake", 'a'), Some(&["cmake", "ctest"]), &[])];
+        let lock = lock_of(vec![locked_tool(
+            "cmake",
+            DEFAULT_GROUP,
+            "ns/cmake",
+            &[(PLATFORM_KEY, 'a')],
+        )]);
+        let unrendered = vec!["ns/other".to_string()];
+        render_body(&tree, &lock, &surface, &groups_of(&[DEFAULT_GROUP]), &unrendered).await;
+
+        assert_ne!(
+            tree.home.active_target_name(),
+            Some(kept),
+            "a new directory is published"
+        );
+        assert_eq!(tree.bin_entries(), expected_bin_entries(&["cmake", "ctest"]));
     }
 
     /// C-044, case 14 — an entry that left the lock loses its link and its
