@@ -360,6 +360,7 @@ patch_wrong_layer_count	DataError	A patch descriptor manifest carries other than
 path_escape	DataError	A relative path is absolute, escapes its root, or is otherwise unsafe to join
 payload_type_unsupported	DataError	The envelope payload type is not in-toto JSON
 permission_denied	PermissionDenied	The operating system refused access to a file or directory
+permission_denied	PermissionDenied	The operating system refused access to a file or directory
 pin_digest_mismatch	DataError	The registry resolved the pinned tag to a different digest
 pin_digest_mismatch	DataError	The registry resolved the pinned tag to a different digest
 pinned_identifier_missing_digest	DataError	An identifier that must be pinned carries no digest
