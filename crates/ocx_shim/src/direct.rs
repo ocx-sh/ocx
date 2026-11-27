@@ -258,6 +258,21 @@ pub(super) fn is_absolute(path: &str, windows: bool) -> bool {
     }
 }
 
+/// Whether `path` names one file whatever the working directory: on Windows a drive letter and separator, or a
+/// `\\` prefix; [`is_absolute`] also takes a driveless `\x`, which Windows reads on the current drive (CWE-427).
+pub(super) fn is_fully_qualified(path: &str, windows: bool) -> bool {
+    if !windows {
+        return path.starts_with('/');
+    }
+    let bytes = path.as_bytes();
+    let separator = |byte: u8| matches!(byte, b'/' | b'\\');
+    match bytes {
+        [first, second, ..] if separator(*first) && separator(*second) => true,
+        [drive, b':', third, ..] => drive.is_ascii_alphabetic() && separator(*third),
+        _ => false,
+    }
+}
+
 pub(super) fn separators(windows: bool) -> &'static [char] {
     if windows { &['/', '\\'] } else { &['/'] }
 }
@@ -454,7 +469,7 @@ fn checked_manifest_root(root: &[u8], windows: bool) -> Result<String, String> {
     };
     let text = if text.is_empty() && !windows { "/" } else { text };
     let list_separator = if windows { ';' } else { ':' };
-    let hygienic = is_absolute(text, windows)
+    let hygienic = is_fully_qualified(text, windows)
         && !text.contains(['\0', '\r', '\n', list_separator])
         && !text
             .split(separators(windows))
@@ -2988,6 +3003,17 @@ mod tests {
         for root in ["C:/vendor/a;b", "vendor/set", "C:/vendor/../set"] {
             let manifest = manifest_line(root);
             let fs = windows_manifest_world(&manifest, root);
+            let message = refusal(locate(WINDOWS_TOOL, &windows_context(), &fs));
+            assert!(message.contains("1 candidate(s) rejected"), "{root:?}: {message}");
+        }
+    }
+
+    /// A driveless root names a directory on the current drive, which follows the working directory.
+    #[test]
+    fn a_windows_manifest_root_on_the_current_drive_is_rejected() {
+        for root in ["/vendor/set", "\\vendor\\set"] {
+            let manifest = manifest_line(root);
+            let fs = windows_manifest_world(&manifest, &root.replace('\\', "/"));
             let message = refusal(locate(WINDOWS_TOOL, &windows_context(), &fs));
             assert!(message.contains("1 candidate(s) rejected"), "{root:?}: {message}");
         }

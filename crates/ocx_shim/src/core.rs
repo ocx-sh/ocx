@@ -4,7 +4,7 @@
 //! Pure shim logic, split from the Win32 calls in [`crate::run`] so the Linux CI host can unit-test it.
 
 use super::ShimError;
-use super::direct::{fold, is_absolute, refuse, separators};
+use super::direct::{fold, is_fully_qualified, refuse, separators};
 use ocx_env_apply::launch::{LaunchRecord, ToolchainTier, is_batch_target, record_path_for};
 use std::ffi::{OsStr, OsString};
 
@@ -240,7 +240,7 @@ pub(super) fn resolve_program(inputs: &ProgramInputs<'_>, fs: &dyn ProgramFs) ->
         .or(inputs.baked.map(|baked| ("the record's ocx", baked)));
     let program = match explicit {
         Some((source, program)) => {
-            if !is_absolute(program, inputs.windows) {
+            if !is_fully_qualified(program, inputs.windows) {
                 return Err(refuse(format!(
                     "{source} must be an absolute path: {}",
                     super::escape_controls(program)
@@ -275,7 +275,7 @@ fn find_on_path(inputs: &ProgramInputs<'_>, fs: &dyn ProgramFs) -> Result<String
     for entry in inputs.path.unwrap_or_default().split(separator) {
         // A quoted Windows entry may hold a `;`, which the split above cannot see; it is a miss, never a wrong hit.
         let entry = if windows { entry.trim_matches('"') } else { entry };
-        if entry.is_empty() || !is_absolute(entry, windows) || comparable_directory(entry, windows) == own {
+        if entry.is_empty() || !is_fully_qualified(entry, windows) || comparable_directory(entry, windows) == own {
             continue;
         }
         let candidate = format!(
@@ -283,7 +283,11 @@ fn find_on_path(inputs: &ProgramInputs<'_>, fs: &dyn ProgramFs) -> Result<String
             entry.trim_end_matches(separators(windows)),
             if windows { '\\' } else { '/' }
         );
-        if fs.is_program_file(&candidate) && !fs.is_regular_file(&record_path_for(&candidate, windows)) {
+        // An entry of separators alone trims to nothing and would name the current drive's root.
+        if is_fully_qualified(&candidate, windows)
+            && fs.is_program_file(&candidate)
+            && !fs.is_regular_file(&record_path_for(&candidate, windows))
+        {
             return Ok(candidate);
         }
     }
@@ -703,6 +707,53 @@ mod tests {
         assert!(
             both.contains("batch file"),
             "an empty or ignored lower rung does not rescue a batch pin: {both}"
+        );
+    }
+
+    /// A Windows path with a leading separator and no drive names a file on the current drive, which follows the
+    /// working directory (CWE-427).
+    #[test]
+    fn a_windows_program_on_the_current_drive_is_refused_on_every_rung() {
+        let fs = FakeFs::default()
+            .with_program("/tools\\ocx.exe")
+            .with_program("\\ocx.exe")
+            .with_program("D:\\real\\ocx.exe");
+        for driveless in ["/tools/ocx.exe", "\\tools\\ocx.exe"] {
+            let pin = refusal(resolve_program(&windows(Some(driveless), None, None), &fs));
+            assert!(pin.contains("must be an absolute path"), "pin {driveless}: {pin}");
+            let baked = refusal(resolve_program(&windows(None, Some(driveless), None), &fs));
+            assert!(baked.contains("must be an absolute path"), "baked {driveless}: {baked}");
+        }
+        assert_eq!(
+            resolve_program(&windows(None, None, Some("/tools;\\\\;/;D:\\real")), &fs)
+                .as_deref()
+                .ok(),
+            Some("D:\\real\\ocx.exe"),
+            "a PATH entry that names the current drive is skipped"
+        );
+    }
+
+    #[test]
+    fn control_a_windows_drive_or_unc_program_is_accepted() {
+        let fs = FakeFs::default().with_program("\\\\server\\share\\ocx.exe");
+        for program in [
+            "C:\\t\\ocx.exe",
+            "C:/t/ocx.exe",
+            "\\\\server\\share\\ocx.exe",
+            "\\\\?\\C:\\t\\ocx.exe",
+        ] {
+            assert_eq!(
+                resolve_program(&windows(Some(program), None, None), &fs)
+                    .as_deref()
+                    .ok(),
+                Some(program)
+            );
+        }
+        assert_eq!(
+            resolve_program(&windows(None, None, Some("\\\\server\\share")), &fs)
+                .as_deref()
+                .ok(),
+            Some("\\\\server\\share\\ocx.exe")
         );
     }
 
