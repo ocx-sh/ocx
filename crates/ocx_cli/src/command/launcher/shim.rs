@@ -63,7 +63,8 @@ impl LauncherShim {
             .argv
             .split_first()
             .expect("clap `required = true, num_args = 1..` guarantees at least one argv element");
-        let claimed = manager.claimed_shim_names(&self.identifier).await?;
+        let platform = ocx_oci::Platform::current().unwrap_or_else(ocx_oci::Platform::any);
+        let claimed = manager.claimed_shim_names(&self.identifier, platform.clone()).await?;
         let name = validate_argv0(argv0, &self.identifier, &claimed).map_err(anyhow::Error::new)?;
 
         // Folded before the download, so a malformed name template fails before a large transfer.
@@ -71,7 +72,6 @@ impl LauncherShim {
 
         // `materialize_deferred` owns the read-only-view routing that keeps `index/` at zero bytes.
         let report = self.report(project_in_scope(&context).await.as_ref());
-        let platform = ocx_oci::Platform::current().unwrap_or_else(ocx_oci::Platform::any);
         let found = manager
             .materialize_deferred(&self.identifier, platform.clone(), report)
             .await?;
@@ -110,27 +110,21 @@ impl LauncherShim {
         crate::app::report_projection_warnings(&child.warnings);
         let mut process_env = child.env;
 
-        // Strip the shim `bin/` first, or an unshipped claimed name resolves back here and `execvp(2)`
-        // re-enters forever at 100% CPU. `prepare_lazy` cannot catch that claim: no content exists yet.
-        // No launcher blob for this host means no tree was ever published: nothing to prune.
-        let shim_bin = ocx_store::launcher_generation::LauncherGeneration::host().map(|generation| {
-            context
-                .file_structure()
-                .deferred(&generation)
-                .shim_dir(&self.identifier)
-                .bin()
-        });
-        if let (Some(shim_bin), Some(path)) = (&shim_bin, process_env.get("PATH")) {
-            let pruned = ocx_env_apply::remove_segment(path, shim_bin.as_os_str());
+        // Strip every deferred launcher directory of this package first (this release's, another
+        // generation's, an older release's `shims/`), or an unshipped claimed name resolves into one of
+        // them and `execvp(2)` re-enters forever at 100% CPU; an older script never bumps the depth.
+        let launcher_dirs = existing_launcher_dirs(context.file_structure(), &self.identifier).await;
+        if let Some(path) = process_env.get("PATH") {
+            let pruned = launcher_dirs.iter().fold(path.to_os_string(), |path, dir| {
+                ocx_env_apply::remove_segment(&path, dir.as_os_str())
+            });
             process_env.set("PATH", pruned);
         }
 
         // Two signals, since `remove_segment` compares exactly: a name `PATH` lacks, and an answer that
-        // resolves back inside the shim tree. Neither may reach `exec`.
+        // resolves back inside a launcher tree. Neither may reach `exec`.
         let resolved = resolve_claimed(&process_env, &self.identifier, name.clone())?;
-        if let Some(shim_bin) = shim_bin
-            && resolves_inside(resolved.clone(), shim_bin).await?
-        {
+        if resolves_inside_any(&resolved, &launcher_dirs).await? {
             return Err(shim_claim_unfulfilled(&self.identifier, name));
         }
 
@@ -211,6 +205,50 @@ fn shim_claim_unfulfilled(package: &PinnedPackageRef, name: BinaryName) -> anyho
     })))
 }
 
+/// Every launcher directory of `package` that exists: `shims/<id>/bin` (older releases) and
+/// `deferred/<G>/<id>/l` for every generation directory.
+///
+/// Existing directories only: [`resolves_inside`] fails closed on a path it cannot canonicalize, so a
+/// missing candidate would make every answer "inside".
+async fn existing_launcher_dirs(
+    file_structure: &ocx_store::file_structure::FileStructure,
+    package: &PinnedPackageRef,
+) -> Vec<std::path::PathBuf> {
+    let mut candidates = vec![file_structure.shims.shim_dir(package).bin()];
+    if let Ok(mut generations) = tokio::fs::read_dir(file_structure.deferred_root()).await {
+        while let Ok(Some(entry)) = generations.next_entry().await {
+            let generation = entry
+                .file_name()
+                .to_str()
+                .and_then(ocx_store::launcher_generation::LauncherGeneration::from_hex);
+            if let Some(generation) = generation {
+                candidates.push(file_structure.deferred(&generation).shim_dir(package).bin());
+            }
+        }
+    }
+    let mut existing = Vec::new();
+    for candidate in candidates {
+        if tokio::fs::metadata(&candidate)
+            .await
+            .is_ok_and(|metadata| metadata.is_dir())
+        {
+            existing.push(candidate);
+        }
+    }
+    existing.sort();
+    existing
+}
+
+/// [`resolves_inside`] over every directory in `launcher_dirs`.
+async fn resolves_inside_any(resolved: &std::path::Path, launcher_dirs: &[std::path::PathBuf]) -> anyhow::Result<bool> {
+    for dir in launcher_dirs {
+        if resolves_inside(resolved.to_path_buf(), dir.clone()).await? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Whether `resolved` lands inside `shim_bin` once both paths are canonicalized.
 ///
 /// Catches what the string-compare strip cannot: a trailing slash, a symlink alias, a differently
@@ -262,8 +300,8 @@ fn parse_pinned_identifier(value: &str) -> Result<PinnedPackageRef, String> {
 
 /// Validates the wire's `argv0` against both legs of the name contract.
 ///
-/// `claimed` is the shim directory's own `bin/` listing: the generated launchers are that set, and
-/// whoever can write the shim store controls body and name alike.
+/// `claimed` is the interface-name set the package's own metadata declares, read from the blobs the
+/// home holds: no launcher directory, whichever release wrote it, decides membership.
 ///
 /// # Errors
 ///
@@ -653,6 +691,44 @@ mod tests {
         assert!(
             matches!(error, PackageErrorKind::ShimNameNotClaimed(_)),
             "an empty claim set must refuse, got {error:?}"
+        );
+    }
+
+    // ── an older or other-generation launcher directory is still ours ────────
+
+    /// The strip and the containment guard cover `shims/<id>/bin` and every `deferred/<G'>/<id>/l`, and only
+    /// the directories that exist. Reds on a list that names the host generation's directory alone.
+    #[tokio::test]
+    async fn the_launcher_dirs_cover_older_and_other_generation_trees_that_exist() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let file_structure = ocx_store::file_structure::FileStructure::with_root(home.path().to_path_buf());
+        let package = pinned();
+        let other = ocx_store::launcher_generation::LauncherGeneration::from_hex("0123456789abcdef").expect("hex");
+        let another = ocx_store::launcher_generation::LauncherGeneration::from_hex("fedcba9876543210").expect("hex");
+        let old = file_structure.shims.shim_dir(&package).bin();
+        let deferred = file_structure.deferred(&other).shim_dir(&package).bin();
+        std::fs::create_dir_all(&old).expect("seed shims tree");
+        std::fs::create_dir_all(&deferred).expect("seed deferred tree");
+        // A generation directory without a tree for this package, a non-generation sibling and a tree of
+        // another package must not appear.
+        std::fs::create_dir_all(file_structure.deferred_root().join(another.as_str())).expect("empty generation");
+        std::fs::create_dir_all(file_structure.deferred_root().join("not-a-generation")).expect("stray");
+
+        let mut expected = vec![old, deferred];
+        expected.sort();
+        assert_eq!(existing_launcher_dirs(&file_structure, &package).await, expected);
+
+        let inside = expected[0].join("cmake");
+        std::fs::write(&inside, b"x").expect("seed launcher");
+        assert!(
+            resolves_inside_any(&inside, &expected).await.expect("canonicalizes"),
+            "a hit inside any launcher directory is our own launcher"
+        );
+        let outside = home.path().join("elsewhere");
+        std::fs::write(&outside, b"x").expect("seed outside");
+        assert!(
+            !resolves_inside_any(&outside, &expected).await.expect("canonicalizes"),
+            "a path outside every launcher directory is not"
         );
     }
 

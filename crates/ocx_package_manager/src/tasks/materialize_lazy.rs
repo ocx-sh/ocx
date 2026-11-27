@@ -12,55 +12,34 @@ use ocx_package::metadata::BinaryName;
 use ocx_project::lazy::LazyReport;
 
 use super::super::PackageManager;
+use super::common;
+use super::toolchain_names::{NotEnumerablePolicy, exposed_names};
 
 impl PackageManager {
-    /// The interface names a deferred tool's tree claims: one `<name>.launch` record per name under `deferred/<G>/…/l/`.
+    /// The interface names the package's metadata declares: the exposed-name algebra [`PackageManager::prepare_lazy`]
+    /// writes a tree from, so a launcher any release or generation published is judged by one answer.
+    ///
+    /// Read offline through a read-only view, from the manifests and config blobs the home already holds; nothing
+    /// is fetched, so an unclaimed name never downloads and nothing is written under `index/`, `shims/` or any
+    /// launcher directory.
     ///
     /// # Errors
     ///
-    /// Propagates an I/O failure reading `bin/`; a non-UTF-8 or non-[`BinaryName`] file name is skipped.
-    pub async fn claimed_shim_names(&self, package: &ocx_oci::PinnedPackageRef) -> crate::Result<BTreeSet<BinaryName>> {
-        let Some(generation) = crate::launcher::host_generation() else {
-            return Ok(BTreeSet::new());
-        };
-        let bin = self.file_structure().deferred(generation).shim_dir(package).bin();
-        let mut entries = match tokio::fs::read_dir(&bin).await {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                // Empty fails closed: every name is refused, so nothing downloads for a collected shim.
-                log::debug!(
-                    "No shim launchers for '{package}' at {}; the claim set is empty.",
-                    bin.display()
-                );
-                return Ok(BTreeSet::new());
-            }
-            Err(error) => return Err(crate::error::file_error(&bin, error)),
-        };
-
-        // The record, not the launcher, names a claim: a Windows launcher is `<name>.exe`, and a claimed
-        // `mytool.exe` has the launcher `mytool.exe.exe`. A claimed name ending `.launch` has no launcher at all.
-        let suffix = format!(".{}", ocx_env_apply::launch::RECORD_EXTENSION);
-        let mut claimed = BTreeSet::new();
-        while let Some(entry) = entries
-            .next_entry()
+    /// [`Error::FindFailed`] when the metadata is not readable locally. `ocx clean` keeps a deferred tree's
+    /// config blobs but not its manifests, so a cleaned home refuses with the manifest digest and the
+    /// `ocx install` remedy instead of guessing a claim set.
+    pub async fn claimed_shim_names(
+        &self,
+        package: &ocx_oci::PinnedPackageRef,
+        platform: ocx_oci::Platform,
+    ) -> crate::Result<BTreeSet<BinaryName>> {
+        let local = ocx_index::LocalIndex::new(ocx_index::LocalConfig {
+            index_store: self.effective_index_store(),
+        });
+        let view = self.offline_view(local).read_only_view();
+        declared_names(&view, package, platform)
             .await
-            .map_err(|error| crate::error::file_error(&bin, error))?
-        {
-            let Some(file_name) = entry.file_name().to_str().map(str::to_owned) else {
-                log::debug!("Ignoring non-UTF-8 shim launcher in {}", bin.display());
-                continue;
-            };
-            let Some(stem) = file_name.strip_suffix(&suffix) else {
-                continue;
-            };
-            match BinaryName::try_from(stem) {
-                Ok(name) => {
-                    claimed.insert(name);
-                }
-                Err(error) => log::debug!("Ignoring '{file_name}' in {}: {error}", bin.display()),
-            }
-        }
-        Ok(claimed)
+            .map_err(|kind| Error::FindFailed(vec![PackageError::new(package.as_identifier().clone(), kind)]))
     }
 
     /// Materializes a deferred tool by digest, writing nothing under `index/`.
@@ -106,6 +85,31 @@ impl PackageManager {
             Error::FindFailed(vec![PackageError::new(identifier, PackageErrorKind::NotFound)])
         })
     }
+}
+
+/// `exposed_names` over the closure `view` can read, the same walk `prepare_lazy` runs.
+async fn declared_names(
+    view: &PackageManager,
+    package: &ocx_oci::PinnedPackageRef,
+    platform: ocx_oci::Platform,
+) -> Result<BTreeSet<BinaryName>, PackageErrorKind> {
+    let resolved = view.resolve(package.as_identifier(), platform.clone()).await?;
+    let metadata = common::load_config_metadata(view.index(), &resolved.pinned, &resolved.final_manifest).await?;
+    let config_digest = common::config_blob_digest(&resolved.final_manifest)?;
+    let nodes = common::walk_closure_nodes(
+        view.file_structure(),
+        view.index(),
+        true,
+        &resolved.pinned,
+        &metadata,
+        config_digest,
+        &platform,
+    )
+    .await?;
+    // `Refuse`, as `prepare_lazy` writes: a node that cannot be enumerated claims nothing.
+    Ok(exposed_names(&nodes, NotEnumerablePolicy::Refuse)?
+        .into_keys()
+        .collect())
 }
 
 #[cfg(test)]
@@ -197,59 +201,112 @@ mod tests {
         );
     }
 
-    /// The claim set is the `bin/` records: one name per `<name>.launch`, whatever the launcher beside it is called.
-    ///
-    /// Reds on a reader that lists launchers: it reports `cmake.exe` on a Windows tree, and a dotted claim such as
-    /// `python3.12` or `mytool.exe` under its launcher's own name.
-    #[tokio::test]
-    async fn claimed_shim_names_reads_the_records() {
+    const HOST: &str = "linux/amd64";
+
+    /// Stages a single-platform package the way a pull leaves it in the blob store: an image index naming one
+    /// leaf, the leaf manifest and its metadata config blob. Returns the leaf's pinned identifier.
+    async fn stage_package(file_structure: &FileStructure, metadata: &str) -> ocx_oci::PinnedPackageRef {
+        let registry = "ocx.sh";
+        let config_bytes = metadata.as_bytes();
+        let config_digest = ocx_oci::Algorithm::Sha256.hash(config_bytes);
+        let leaf = format!(
+            r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{{"mediaType":"{}","digest":"{config_digest}","size":{}}},"layers":[]}}"#,
+            ocx_oci::media_type::MEDIA_TYPE_PACKAGE_METADATA_V1,
+            config_bytes.len(),
+        );
+        let leaf_digest = ocx_oci::Algorithm::Sha256.hash(leaf.as_bytes());
+        let image_index = format!(
+            r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"{leaf_digest}","size":{},"platform":{{"os":"linux","architecture":"amd64"}}}}]}}"#,
+            leaf.len(),
+        );
+        let top_digest = ocx_oci::Algorithm::Sha256.hash(image_index.as_bytes());
+        for (digest, bytes) in [
+            (&config_digest, config_bytes),
+            (&leaf_digest, leaf.as_bytes()),
+            (&top_digest, image_index.as_bytes()),
+        ] {
+            file_structure
+                .blobs
+                .write_blob(registry, digest, bytes)
+                .await
+                .expect("stage a blob");
+        }
+        pinned(&top_digest)
+    }
+
+    /// The claim set is what the package metadata declares, whether or not any `deferred/` tree exists. Reds on a
+    /// reader that lists a launcher directory: a package whose trees are gone, or were never written by this
+    /// release, would claim nothing.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn claims_come_from_the_metadata_when_no_deferred_tree_exists() {
         let tmp = TempDir::new().unwrap();
         let file_structure = FileStructure::with_root(tmp.path().to_path_buf());
         let manager = manager_for(&file_structure);
-        let package = pinned(&ocx_oci::Algorithm::Sha256.hash(b"content"));
+        let package = stage_package(
+            &file_structure,
+            r#"{"type":"bundle","version":1,"binaries":["cmake","ctest"]}"#,
+        )
+        .await;
 
-        let Some(generation) = crate::launcher::host_generation() else {
-            return;
-        };
-        let bin = file_structure.deferred(generation).shim_dir(&package).bin();
-        tokio::fs::create_dir_all(&bin).await.unwrap();
-        for file in [
-            "cmake",
-            "cmake.launch",
-            "python3.12",
-            "python3.12.launch",
-            "mytool.exe.exe",
-            "mytool.exe.launch",
-            "stray",
-        ] {
-            tokio::fs::write(bin.join(file), b"x").await.unwrap();
+        let claimed = manager
+            .claimed_shim_names(&package, HOST.parse().expect("platform"))
+            .await
+            .expect("the metadata blobs are in the store");
+        let names: Vec<&str> = claimed.iter().map(BinaryName::as_str).collect();
+        assert_eq!(names, ["cmake", "ctest"]);
+        assert!(
+            !file_structure.root().join("deferred").exists(),
+            "reading writes no tree"
+        );
+        assert!(
+            !file_structure.root().join("index").exists(),
+            "reading writes nothing under index/"
+        );
+    }
+
+    /// Trees of an older release (`shims/`) and of another generation, carrying other names, change nothing.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn launcher_trees_with_other_names_do_not_change_the_claim_set() {
+        let tmp = TempDir::new().unwrap();
+        let file_structure = FileStructure::with_root(tmp.path().to_path_buf());
+        let manager = manager_for(&file_structure);
+        let package = stage_package(
+            &file_structure,
+            r#"{"type":"bundle","version":1,"binaries":["cmake","ctest"]}"#,
+        )
+        .await;
+
+        let older = file_structure.shims.shim_dir(&package).bin();
+        let other = ocx_store::launcher_generation::LauncherGeneration::from_hex("0123456789abcdef").expect("hex");
+        let other_bin = file_structure.deferred(&other).shim_dir(&package).bin();
+        for dir in [&older, &other_bin] {
+            std::fs::create_dir_all(dir).unwrap();
+            for file in ["ghost", "ghost.exe", "ghost.shimref", "ghost.launch"] {
+                std::fs::write(dir.join(file), b"x").unwrap();
+            }
         }
 
         let claimed = manager
-            .claimed_shim_names(&package)
+            .claimed_shim_names(&package, HOST.parse().expect("platform"))
             .await
-            .expect("the listing is readable");
+            .expect("the metadata blobs are in the store");
         let names: Vec<&str> = claimed.iter().map(BinaryName::as_str).collect();
-        assert_eq!(names, ["cmake", "mytool.exe", "python3.12"]);
+        assert_eq!(names, ["cmake", "ctest"], "no directory listing decides membership");
     }
 
-    /// An absent shim directory claims nothing, so every name is refused — the
-    /// fail-closed direction. Reds on a reader that treats "cannot enumerate"
-    /// as "admit everything".
-    #[tokio::test]
-    async fn an_absent_shim_directory_claims_no_names() {
+    /// Metadata that is not in the store claims nothing and refuses with the manifest digest, never an empty set
+    /// that reads as "refuse" by accident nor an admit-everything one.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unreadable_metadata_is_an_error_and_downloads_nothing() {
         let tmp = TempDir::new().unwrap();
         let file_structure = FileStructure::with_root(tmp.path().to_path_buf());
         let manager = manager_for(&file_structure);
         let package = pinned(&ocx_oci::Algorithm::Sha256.hash(b"content"));
 
-        assert!(
-            manager
-                .claimed_shim_names(&package)
-                .await
-                .expect("an absent directory is not an error")
-                .is_empty(),
-            "no shim directory means no claimed names"
-        );
+        let error = manager
+            .claimed_shim_names(&package, HOST.parse().expect("platform"))
+            .await
+            .expect_err("nothing is staged for this digest");
+        assert!(matches!(error, Error::FindFailed(_)), "{error:?}");
     }
 }
