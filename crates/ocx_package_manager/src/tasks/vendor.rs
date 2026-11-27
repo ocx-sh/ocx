@@ -464,7 +464,7 @@ async fn build_manifest(
 
     let roots = compose_roots_of(manager, closures).await?;
     check_declared_values(&roots, closures)?;
-    let forbidden = host_paths(manager, &request.output);
+    let forbidden = host_paths(manager.file_structure().root(), &request.output)?;
     let keys = &selection.keys;
     let selection_items = environment_items(manager, &roots, false, platform, &forbidden, keys).await?;
 
@@ -792,15 +792,20 @@ fn check_declared_values(roots: &[Arc<InstallInfo>], closures: &ClosureSet) -> R
 ///
 /// shortcut: the spellings are the home and `DIR` as given and canonicalised, not every 8.3 or `\\?\` form; widen
 /// when a Windows run shows one.
-fn host_paths(manager: &PackageManager, output: &Path) -> Vec<String> {
-    let home = manager.file_structure().root();
+fn host_paths(home: &Path, output: &Path) -> Result<Vec<String>, VendorError> {
     let mut paths = vec![home.to_path_buf(), output.to_path_buf()];
     paths.extend(dunce::canonicalize(home).ok());
-    paths
-        .into_iter()
-        .filter_map(|path| path.to_str().map(str::to_owned))
-        .filter(|path| !path.is_empty())
-        .collect()
+    let mut spelled = Vec::new();
+    for path in paths {
+        // A path no UTF-8 string can hold could not be searched for in a value: refuse it, never skip it.
+        let text = path.to_str().ok_or_else(|| VendorError::PathUnrepresentable {
+            path: path.to_string_lossy().into_owned(),
+        })?;
+        if !text.is_empty() {
+            spelled.push(text.to_owned());
+        }
+    }
+    Ok(spelled)
 }
 
 /// The vendored name of every package in `surface`.
@@ -882,10 +887,23 @@ fn check_value(value: &str, forbidden: &[String]) -> Result<(), String> {
     }
     // The token is what stands for `DIR`; whatever it leaves behind must not name a host path.
     let literal = value.replace(DIR_TOKEN, "");
-    if let Some(path) = forbidden.iter().find(|path| literal.contains(path.as_str())) {
+    if let Some(path) = forbidden.iter().find(|path| holds_path(&literal, path)) {
         return Err(format!("the value holds the host path '{path}'"));
     }
     Ok(())
+}
+
+/// Whether `value` holds `path` as a whole path: the match must not run on into another name (`/tmp/o` is not in
+/// `/tmp/opt/x`). Separators, list delimiters and the end of the value end a match.
+fn holds_path(value: &str, path: &str) -> bool {
+    let open_ended = path.ends_with(['/', '\\']);
+    value.match_indices(path).any(|(at, _)| {
+        open_ended
+            || value[at + path.len()..]
+                .chars()
+                .next()
+                .is_none_or(|next| !(next.is_alphanumeric() || matches!(next, '_' | '-' | '.')))
+    })
 }
 
 /// The packages of the manifest as the report lists them.
@@ -1036,7 +1054,7 @@ async fn write_content(
 
     // No blob for the platform means no launcher and no sidecar; the manifest then lists no `launcher_path`.
     if let Some(blob) = ocx_store::shim::blob_for(platform) {
-        let forbidden = host_paths(manager, &request.output);
+        let forbidden = host_paths(manager.file_structure().root(), &request.output)?;
         write_entrypoint_launchers(&layout, manifest, &entrypoints, &forbidden, blob, windows).await?;
         write_selection_launchers(&layout, manifest, blob, windows).await?;
     }
@@ -1517,6 +1535,40 @@ mod tests {
     use ocx_project::LockedTool;
 
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn host_paths_refuse_a_non_utf8_output_directory_and_home() {
+        use std::os::unix::ffi::OsStrExt;
+        let bad = Path::new(std::ffi::OsStr::from_bytes(b"/tmp/\xff"));
+
+        for (home, output) in [(Path::new("/home/ocx"), bad), (bad, Path::new("/tmp/out"))] {
+            let error = host_paths(home, output).unwrap_err();
+            assert!(matches!(error, VendorError::PathUnrepresentable { .. }), "{error:?}");
+            assert_eq!(error.classify(), Some(ExitCode::DataError));
+        }
+        assert_eq!(
+            host_paths(Path::new("/home/ocx"), Path::new("/tmp/out")).unwrap(),
+            ["/home/ocx", "/tmp/out"]
+        );
+    }
+
+    #[test]
+    fn forbidden_paths_match_whole_segments() {
+        let forbidden = ["/tmp/o".to_owned()];
+        assert!(check_value("/tmp/opt/x", &forbidden).is_ok());
+        assert!(check_value("/tmp/o.d", &forbidden).is_ok());
+        assert!(check_value("/tmp/o/x", &["/tmp/o/".to_owned()]).is_err());
+        for value in [
+            "/tmp/o",
+            "/tmp/o/x",
+            "/bin:/tmp/o:/usr",
+            "/tmp/opt/x:/tmp/o/bin",
+            r"/tmp/o\x",
+        ] {
+            assert!(check_value(value, &forbidden).is_err(), "{value}");
+        }
+    }
 
     #[test]
     fn output_not_empty_is_a_usage_error_with_its_slug() {
