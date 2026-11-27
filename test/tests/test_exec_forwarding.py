@@ -9,6 +9,7 @@ such as `--no-verify` is never written. The receiver side is `test_env_received_
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from collections.abc import Callable
@@ -18,6 +19,7 @@ import pytest
 
 from src import exec_state
 from src.helpers import make_package_with_entrypoints
+from src.launcher_fixtures import install_entrypoint_package
 from src.runner import OcxRunner
 
 pytestmark = pytest.mark.skipif(
@@ -311,46 +313,22 @@ def test_interactive_flag_rejected(ocx: OcxRunner, published_package) -> None:
 def test_generated_launcher_uses_ocx_binary_and_silences_presentation(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    """The Unix launcher template uses `${OCX_BINARY_PIN:-ocx}` and bakes the
-    `launcher exec` subcommand so the entrypoint chain is opaque to the
-    surrounding tool. Presentation overrides (--log-level=off / --color=never /
-    --format=plain) and self-view are forced inside `launcher exec` and are
-    NOT baked per-launcher; the launcher body must therefore contain neither
-    presentation flags nor `--self`. Inspecting the generated file is the
-    cheapest assertion of the One-Way Door wire vocabulary committed in
-    `adr_package_entry_points.md` §Stable Surfaces."""
-    pkg = make_package_with_entrypoints(
-        ocx,
-        unique_repo,
-        tmp_path,
-        entrypoints=["hello"],
-        bins=["hello"],
-    )
-    ocx.plain("package", "install", "--select", pkg.short)
+    """The launcher is a native program whose only input is `NAME.launch`, a `package`
+    record naming the package root. The record bakes no presentation override
+    (--log-level / --color / --format) and no `--self`: those are forced inside
+    `launcher exec`. The `launcher exec` argv is built by the launcher program, so
+    this asserts the record is the whole of what is baked per package."""
+    installed = install_entrypoint_package(ocx, unique_repo, tmp_path, "hello")
 
-    from src.runner import registry_dir
-
-    reg = registry_dir(ocx.registry)
-    launcher = (
-        Path(str(ocx.ocx_home))
-        / "symlinks"
-        / reg
-        / pkg.repo
-        / "current"
-        / "entrypoints"
-        / "hello"
-    )
-    assert launcher.exists(), f"launcher must exist: {launcher}"
-    body = launcher.read_text()
-    assert '"${OCX_BINARY_PIN:-ocx}"' in body, (
-        f"launcher must invoke inner ocx via `${{OCX_BINARY_PIN:-ocx}}`: {body!r}"
-    )
-    assert "launcher exec" in body, (
-        f"launcher must call the `launcher exec` subcommand: {body!r}"
-    )
+    text = installed.record.read_text(encoding="utf-8")
+    assert json.loads(text) == {
+        "kind": "package",
+        "schema_version": 1,
+        "package_root": str(installed.package_root),
+    }
     for forbidden in ("--log-level", "--color", "--format", "--self", "file://"):
-        assert forbidden not in body, (
-            f"launcher must NOT bake `{forbidden}` (hidden inside `launcher exec`): {body!r}"
+        assert forbidden not in text, (
+            f"record must NOT bake `{forbidden}` (hidden inside `launcher exec`): {text!r}"
         )
 
 

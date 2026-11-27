@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from src.helpers import make_package_with_entrypoints
+from src.launcher_fixtures import only_generation
 from src.runner import OcxRunner, PackageInfo, registry_dir
 
 EXIT_NOT_FOUND = 79  # ocx_exit::ExitCode::NotFound
@@ -33,9 +34,8 @@ def _launcher_output(ocx: OcxRunner, pkg: PackageInfo) -> str:
         / registry_dir(ocx.registry)
         / pkg.repo
         / "current"
-        / "entrypoints"
-        / "hello"
     )
+    launcher = only_generation(launcher / "launchers") / "hello"
     env = dict(ocx.env)
     env["PATH"] = f"{ocx.binary.parent}{os.pathsep}{env.get('PATH', '')}"
     result = subprocess.run(
