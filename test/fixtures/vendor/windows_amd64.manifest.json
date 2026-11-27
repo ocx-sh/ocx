@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "content": "present",
   "platform": "windows/amd64",
   "available_platforms": [
@@ -11,21 +11,21 @@
     {
       "identifier": "@REGISTRY@/@REPO@:1.0.0@sha256:@DIGEST64@",
       "digest": "sha256:@DIGEST64@",
-      "package_dir": "packages/@REGISTRY@/sha256/@XX@/@DIGEST30@",
-      "content_dir": "packages/@REGISTRY@/sha256/@XX@/@DIGEST30@/content",
+      "package_dir": "p/@HEX16@",
+      "content_dir": "p/@HEX16@/c",
       "dependencies": [],
       "names_declared": true,
       "entrypoints": [],
       "tree": {
         "files": [
           {
-            "path": "packages/@REGISTRY@/sha256/@XX@/@DIGEST30@/content/bin/tool.exe",
+            "path": "p/@HEX16@/c/bin/tool.exe",
             "executable": true
           }
         ],
         "links": [],
         "link_free_dirs": [
-          "packages/@REGISTRY@/sha256/@XX@/@DIGEST30@/content/bin"
+          "p/@HEX16@/c/bin"
         ]
       }
     }
@@ -40,12 +40,12 @@
       "items": [
         {
           "key": "PATH",
-          "value": "@VENDOR_DIR@/packages/@REGISTRY@/sha256/@XX@/@DIGEST30@/content/bin",
+          "value": "@VENDOR_DIR@/p/@HEX16@/c/bin",
           "kind": "path"
         },
         {
           "key": "@REPO_UPPER@_HOME",
-          "value": "@VENDOR_DIR@/packages/@REGISTRY@/sha256/@XX@/@DIGEST30@/content",
+          "value": "@VENDOR_DIR@/p/@HEX16@/c",
           "kind": "constant"
         }
       ]
@@ -64,7 +64,7 @@
         "sha256:@DIGEST64@"
       ],
       "environment": "selection:default",
-      "launcher_dir": "selections/default/shells/default/bin"
+      "launcher_dir": "l"
     }
   ],
   "tools": [
@@ -74,8 +74,9 @@
       "kind": "binary",
       "package": "sha256:@DIGEST64@",
       "environment": "selection:default",
-      "target_path": "packages/@REGISTRY@/sha256/@XX@/@DIGEST30@/content/bin/tool.exe",
-      "launcher_path": "selections/default/shells/default/bin/tool.exe"
+      "target_path": "p/@HEX16@/c/bin/tool.exe",
+      "launcher_path": "l/tool.exe",
+      "record_path": "l/tool.launch"
     }
   ]
 }
