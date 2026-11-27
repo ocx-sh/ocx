@@ -194,6 +194,17 @@ Recorded decisions, second run:
   the criteria that depend on it as not met and names the two-word repair as the next step for the owner.
   Two other red checks need the squash to clear and stay red for the same reason: `Conventional Commits` (one
   `Revert "…"` subject) and the launcher recency gate (six `Cross-build` jobs).
+- **Gate run 45994015903 at 8deab266 ended red (2026-11-27).** 35 jobs passed, 3 were skipped and 2 failed:
+  `Acceptance (windows-latest, shard-1-of-4)` and its `merged` aggregate. One case fails, 681 pass:
+  `tests/test_project_run.py::test_run_flat_manifest_image_any_package_resolves_via_any_fallback`. On a Windows
+  host `ocx exec -- hello` exits 65 for a package of platform `any` that declares no binaries ("does not
+  resolve in the composed environment"). This branch does not change the test, and the Windows acceptance job
+  passed on `main` at 03adc12b (run 45819780051), so the cause is in this branch. Windows and macOS unit tests,
+  every macOS acceptance shard, the other three Windows shards and all cross-builds passed.
+  Question: rerun or repair? Research: the failure is an assertion on an exit code, not a runner or network
+  fault, so a rerun is not allowed; a repair is a third outer cycle. Decision: nothing is fixed. The criteria
+  "One launcher and one record file everywhere" and "Atomic launcher publish and refresh (issue 679)" are not
+  ticked, because their Windows acceptance evidence is this red job. The DONE block reports them not met.
 
 ## Loop shape
 
