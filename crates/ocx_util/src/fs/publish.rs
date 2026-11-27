@@ -23,6 +23,8 @@ pub enum Retired {
     /// The directory was not removed and is whole; a later call may retire it.
     ///
     /// Also the answer for a path that exists but is not a real directory: it is never acted on.
+    /// One exception to "whole": the EXDEV fallback removes in place, so a busy entry can leave
+    /// the directory partial under its own name. A completeness check treats it as retire-and-rebuild.
     LeftForLater,
 }
 
@@ -91,10 +93,18 @@ fn move_without_replace(staged: &Path, target: &Path) -> std::io::Result<()> {
     }
 }
 
+/// Name prefix of the sibling link a retarget stages before publishing it.
+const RETARGET_PREFIX: &str = ".tmp-retarget-";
+
 /// Points `link` at `target`.
 ///
 /// Unix stages a sibling link by exclusive create and renames it over `link`. Windows sets the junction's
-/// mount-point data in place. An absent `link` is created.
+/// mount-point data in place; an absent `link` is staged as a sibling junction and published by one
+/// no-replace rename, so no empty real directory is ever visible under `link`.
+///
+/// Blocking I/O: an async caller wraps it in `spawn_blocking`. The caller holds the lock that excludes other
+/// retargeters of `link`'s parent (the toolchain-render lock): staging first sweeps stale `.tmp-retarget-*`
+/// links a crashed retarget left, which would also remove a live retargeter's staged link.
 ///
 /// # Errors
 ///
@@ -108,6 +118,35 @@ pub fn retarget_link(target: &Path, link: &Path) -> std::io::Result<()> {
     {
         retarget_junction(target, link)
     }
+}
+
+/// Removes sibling `.tmp-retarget-*` entries that are links; lstat only, never followed, no other name touched.
+fn sweep_retarget_debris(parent: &Path) {
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if !entry.file_name().to_string_lossy().starts_with(RETARGET_PREFIX) {
+            continue;
+        }
+        let path = entry.path();
+        let removal = match std::fs::symlink_metadata(&path) {
+            #[cfg(unix)]
+            Ok(metadata) if metadata.file_type().is_symlink() => std::fs::remove_file(&path),
+            #[cfg(windows)]
+            Ok(metadata) if is_reparse_point(&metadata) => std::fs::remove_dir(&path),
+            _ => continue,
+        };
+        if let Err(error) = removal {
+            tracing::debug!(path = %path.display(), %error, "stale retarget link not removed; left for the next call");
+        }
+    }
+}
+
+#[cfg(windows)]
+fn is_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
 }
 
 #[cfg(unix)]
@@ -124,10 +163,11 @@ fn retarget_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
         Err(error) => return Err(error),
     }
     let parent = link.parent().unwrap_or_else(|| Path::new("."));
+    sweep_retarget_debris(parent);
     // A name taken by a concurrent retargeter is retried under a fresh one, never overwritten.
     let mut attempts = 0;
     let staged = loop {
-        let staged = parent.join(format!(".tmp-retarget-{}", random_suffix()));
+        let staged = parent.join(format!("{RETARGET_PREFIX}{}", random_suffix()));
         match std::os::unix::fs::symlink(target, &staged) {
             Ok(()) => break staged,
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && attempts < 8 => attempts += 1,
@@ -157,16 +197,18 @@ const REPARSE_TAG_MOUNT_POINT: u32 = 0xA000_0003;
 const REPARSE_TAG_SYMLINK: u32 = 0xA000_000C;
 #[cfg(windows)]
 const MAX_REPARSE_BUFFER: usize = 16 * 1024;
+#[cfg(windows)]
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
 
 /// Sets the mount-point data of an existing junction in place, so `link` is never absent to a concurrent lookup.
 ///
-/// A directory symlink at `link` is the one exception: it is removed and replaced by a junction (the heal), with a
-/// window where `link` is absent. A real directory or a file is refused.
+/// An absent `link` is created by [`publish_new_junction`]. A directory symlink at `link` is the one exception to
+/// "never absent": it is removed and recreated as a junction (the heal). A real directory or a file is refused.
+// shortcut: only drive-letter absolute targets (`\??\C:\...`) are written, a UNC target (`\??\UNC\...`) is not; upgrade when a home may live on a network share.
 #[cfg(windows)]
 fn retarget_junction(target: &Path, link: &Path) -> std::io::Result<()> {
     use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 
-    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
     const GENERIC_READ_WRITE: u32 = 0x8000_0000 | 0x4000_0000;
     const SHARE_ALL: u32 = 0x1 | 0x2 | 0x4;
     const OPEN_REPARSE_POINT_BACKUP: u32 = 0x0020_0000 | 0x0200_0000;
@@ -179,13 +221,15 @@ fn retarget_junction(target: &Path, link: &Path) -> std::io::Result<()> {
     let target = std::path::absolute(&target)?;
     let target = dunce::simplified(&target);
 
-    // A second retargeter may create `link` first; one retry then takes the in-place path.
-    for _ in 0..2 {
+    // A concurrent creator or the symlink heal sends the loop round once more, onto the in-place path.
+    for _ in 0..3 {
         match std::fs::symlink_metadata(link) {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => match junction::create(target, link) {
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                other => return other,
-            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if publish_new_junction(target, link)? {
+                    return Ok(());
+                }
+                continue;
+            }
             Err(error) => return Err(error),
             Ok(metadata) if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0 => {
                 return Err(std::io::Error::new(
@@ -201,23 +245,59 @@ fn retarget_junction(target: &Path, link: &Path) -> std::io::Result<()> {
             .share_mode(SHARE_ALL)
             .custom_flags(OPEN_REPARSE_POINT_BACKUP)
             .open(link)?;
-        return match reparse_tag(&handle)? {
-            REPARSE_TAG_MOUNT_POINT => set_mount_point(&handle, target),
+        match reparse_tag(&handle)? {
+            REPARSE_TAG_MOUNT_POINT => return set_mount_point(&handle, target),
             REPARSE_TAG_SYMLINK => {
+                // The one heal gap: `link` is absent until the next iteration publishes the junction.
                 drop(handle);
                 std::fs::remove_dir(link)?;
-                junction::create(target, link)
             }
-            tag => Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("{} is a reparse point of unsupported tag {tag:#x}", link.display()),
-            )),
-        };
+            tag => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("{} is a reparse point of unsupported tag {tag:#x}", link.display()),
+                ));
+            }
+        }
     }
     Err(std::io::Error::new(
         std::io::ErrorKind::AlreadyExists,
         format!("{} is being created concurrently", link.display()),
     ))
+}
+
+/// Creates a junction to `target` at a sibling staging name, then publishes it at the absent `link` with one
+/// `MoveFileExW` without replace: that rename is the commit point, so a crash leaves only a staged junction.
+///
+/// `Ok(false)` means a concurrent creator won the name; the staged junction is removed (`remove_dir` on the
+/// junction itself, never recursive) and the caller retargets `link` in place.
+#[cfg(windows)]
+fn publish_new_junction(target: &Path, link: &Path) -> std::io::Result<bool> {
+    // ERROR_FILE_EXISTS / ERROR_ALREADY_EXISTS: the same occupied-target pair `publish_dir` maps.
+    const OCCUPIED: [i32; 2] = [80, 183];
+    let parent = link.parent().unwrap_or_else(|| Path::new("."));
+    sweep_retarget_debris(parent);
+    let mut attempts = 0;
+    let staged = loop {
+        let staged = parent.join(format!("{RETARGET_PREFIX}{}", random_suffix()));
+        match junction::create(target, &staged) {
+            Ok(()) => break staged,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && attempts < 8 => attempts += 1,
+            Err(error) => return Err(error),
+        }
+    };
+    match move_without_replace(&staged, link) {
+        Ok(()) => Ok(true),
+        Err(error) => {
+            // Best effort: the publish error is the one that matters.
+            let _ = std::fs::remove_dir(&staged);
+            if error.raw_os_error().is_some_and(|code| OCCUPIED.contains(&code)) {
+                Ok(false)
+            } else {
+                Err(error)
+            }
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -295,6 +375,7 @@ fn set_mount_point(handle: &std::fs::File, target: &Path) -> std::io::Result<()>
 ///
 /// The caller holds the lock that excludes stagers in `dir`'s parent: a `.staging-*` sibling of a live stager is
 /// swept as debris, and a symlink debris entry is removed as a link, never followed. An absent `dir` is `Removed`.
+/// The EXDEV fallback removes in place, so its `LeftForLater` can leave `dir` partial (see [`Retired::LeftForLater`]).
 ///
 /// # Errors
 ///
@@ -317,7 +398,6 @@ fn is_real_directory(metadata: &std::fs::Metadata) -> bool {
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;
-        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
         metadata.is_dir() && metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0
     }
     #[cfg(not(windows))]
@@ -332,8 +412,10 @@ async fn retire_real_directory(dir: &Path) -> std::io::Result<Retired> {
     };
     let graveyard = loop {
         let candidate = parent.join(format!(".gc-{}", random_suffix()));
-        if tokio::fs::symlink_metadata(&candidate).await.is_err() {
-            break candidate;
+        match tokio::fs::symlink_metadata(&candidate).await {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break candidate,
+            Err(error) => return Err(error),
+            Ok(_) => {}
         }
     };
     match super::rename_with_windows_retry(dir, &graveyard).await {
@@ -427,10 +509,13 @@ async fn remove_link_or_file(path: &Path) -> std::io::Result<()> {
     removed
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(windows)]
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+    #[cfg(unix)]
     fn staged_with_file(root: &Path) -> std::path::PathBuf {
         let staged = root.join("staged");
         std::fs::create_dir(&staged).unwrap();
@@ -438,6 +523,7 @@ mod tests {
         staged
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn contract_publish_onto_absent_target_is_new() {
         let tmp = tempfile::tempdir().unwrap();
@@ -449,6 +535,7 @@ mod tests {
         assert!(!staged.exists());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn contract_publish_onto_empty_dir_is_new() {
         let tmp = tempfile::tempdir().unwrap();
@@ -460,6 +547,7 @@ mod tests {
         assert!(target.join("NAME").is_file());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn contract_publish_onto_non_empty_dir_is_already_there_and_keeps_staged() {
         let tmp = tempfile::tempdir().unwrap();
@@ -474,6 +562,7 @@ mod tests {
         assert!(!target.join("NAME").exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn contract_retarget_creates_an_absent_link() {
         let tmp = tempfile::tempdir().unwrap();
@@ -486,6 +575,7 @@ mod tests {
         assert_eq!(std::fs::read_link(&link).unwrap(), dir);
     }
 
+    #[cfg(unix)]
     #[test]
     fn contract_retarget_replaces_an_existing_link() {
         let tmp = tempfile::tempdir().unwrap();
@@ -505,6 +595,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn contract_retarget_refuses_a_real_directory() {
         let tmp = tempfile::tempdir().unwrap();
@@ -517,6 +608,7 @@ mod tests {
         assert!(link.is_dir() && !link.is_symlink());
     }
 
+    #[cfg(unix)]
     #[test]
     fn contract_retarget_refuses_a_regular_file() {
         let tmp = tempfile::tempdir().unwrap();
@@ -529,6 +621,7 @@ mod tests {
         assert!(link.is_file());
     }
 
+    #[cfg(unix)]
     #[test]
     fn retarget_leaves_no_staged_link_behind() {
         let tmp = tempfile::tempdir().unwrap();
@@ -555,6 +648,26 @@ mod tests {
         assert_eq!(leftovers, 0);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn retarget_sweeps_a_stale_staged_link_and_leaves_bystanders() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("a");
+        std::fs::create_dir(&dir).unwrap();
+        let stale = tmp.path().join(".tmp-retarget-x");
+        std::os::unix::fs::symlink("nowhere", &stale).unwrap();
+        let bystander = tmp.path().join(".tmp-other");
+        std::os::unix::fs::symlink("nowhere", &bystander).unwrap();
+        let link = tmp.path().join("active");
+
+        retarget_link(&dir, &link).unwrap();
+
+        assert!(std::fs::symlink_metadata(&stale).is_err(), "stale staged link swept");
+        assert!(std::fs::symlink_metadata(&bystander).is_ok(), "other names untouched");
+        assert_eq!(std::fs::read_link(&link).unwrap(), dir);
+    }
+
+    #[cfg(unix)]
     #[tokio::test]
     async fn contract_retire_removes_a_real_directory() {
         let tmp = tempfile::tempdir().unwrap();
@@ -565,6 +678,7 @@ mod tests {
         assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 0, "no .gc- debris");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn contract_retire_leaves_a_symlink_alone() {
         let tmp = tempfile::tempdir().unwrap();
@@ -577,6 +691,7 @@ mod tests {
         assert!(real.join("NAME").is_file());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn contract_retire_sweeps_sibling_debris() {
         let tmp = tempfile::tempdir().unwrap();
@@ -596,6 +711,7 @@ mod tests {
         assert!(bystander.join("f").is_file(), "other siblings untouched");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn publish_two_concurrent_stagers_converge_on_one_whole_target() {
         let tmp = tempfile::tempdir().unwrap();
@@ -622,6 +738,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn publish_failure_leaves_target_absent_and_retry_succeeds() {
         let tmp = tempfile::tempdir().unwrap();
@@ -636,6 +753,7 @@ mod tests {
         assert!(target.join("NAME").is_file());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn retire_leaves_dir_whole_when_rename_is_refused() {
         use std::os::unix::fs::PermissionsExt;
@@ -657,6 +775,7 @@ mod tests {
         assert!(dir.join("NAME").is_file(), "dir stays whole");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn retire_sweep_removes_a_gc_symlink_as_a_link() {
         let tmp = tempfile::tempdir().unwrap();
@@ -673,18 +792,14 @@ mod tests {
         assert!(outside.join("f").is_file(), "link target untouched");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn retire_absent_dir_is_removed() {
         let tmp = tempfile::tempdir().unwrap();
         assert_eq!(retire_dir(&tmp.path().join("gone")).await.unwrap(), Retired::Removed);
     }
-}
 
-#[cfg(all(test, windows))]
-mod windows_tests {
-    use super::*;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-
+    #[cfg(windows)]
     fn dir_with_marker(root: &Path, name: &str) -> std::path::PathBuf {
         let dir = root.join(name);
         std::fs::create_dir(&dir).unwrap();
@@ -692,20 +807,44 @@ mod windows_tests {
         dir
     }
 
-    /// Reads through `link` until `stop`, returning how many reads failed.
-    fn lookup_failures(link: &Path, stop: &AtomicBool) -> usize {
-        let marker = link.join("marker");
-        let mut failures = 0;
-        while !stop.load(Ordering::Relaxed) {
-            if std::fs::read(&marker).is_err() {
-                failures += 1;
-            }
-        }
-        failures
+    #[cfg(windows)]
+    struct LookupTally {
+        reads: usize,
+        failures: usize,
+        saw_a: bool,
+        saw_b: bool,
     }
 
+    /// Reads through `link` until `stop`, counting every read, every failed read and which marker each returned.
+    #[cfg(windows)]
+    fn lookup_tally(link: &Path, stop: &AtomicBool) -> LookupTally {
+        let marker = link.join("marker");
+        let mut tally = LookupTally {
+            reads: 0,
+            failures: 0,
+            saw_a: false,
+            saw_b: false,
+        };
+        while !stop.load(Ordering::Relaxed) {
+            match std::fs::read(&marker) {
+                Ok(content) => {
+                    tally.reads += 1;
+                    tally.saw_a |= content == b"a";
+                    tally.saw_b |= content == b"b";
+                }
+                Err(_) => tally.failures += 1,
+            }
+        }
+        tally
+    }
+
+    /// A reader that stopped early would report zero failures too, so each phase must have read this many times.
+    #[cfg(windows)]
+    const READ_FLOOR: usize = 1000;
+
+    #[cfg(windows)]
     #[test]
-    #[ignore = "junction-proof CI job"]
+    #[ignore = "junction-proof CI job: run from the junction-proof workflow, elevated and unelevated"]
     fn junction_proof_retarget_under_lookup() {
         let tmp = tempfile::tempdir().unwrap();
         let (a, b) = (dir_with_marker(tmp.path(), "a"), dir_with_marker(tmp.path(), "b"));
@@ -715,19 +854,22 @@ mod windows_tests {
         // Phase 1: one retargeter against one lookup loop.
         let stop = AtomicBool::new(false);
         std::thread::scope(|scope| {
-            let reader = scope.spawn(|| lookup_failures(&active, &stop));
+            let reader = scope.spawn(|| lookup_tally(&active, &stop));
             for round in 0..10_000 {
                 retarget_link(if round % 2 == 0 { &b } else { &a }, &active).unwrap();
             }
             stop.store(true, Ordering::Relaxed);
-            assert_eq!(reader.join().unwrap(), 0, "lookup failed during a retarget");
+            let tally = reader.join().unwrap();
+            assert_eq!(tally.failures, 0, "lookup failed during a retarget");
+            assert!(tally.reads >= READ_FLOOR, "reader read only {} times", tally.reads);
+            assert!(tally.saw_a && tally.saw_b, "reader never saw both targets");
         });
 
         // Phase 2: two retargeters at once against the lookup loop.
         let stop = AtomicBool::new(false);
         let retarget_errors = AtomicUsize::new(0);
         std::thread::scope(|scope| {
-            let reader = scope.spawn(|| lookup_failures(&active, &stop));
+            let reader = scope.spawn(|| lookup_tally(&active, &stop));
             let writers: Vec<_> = (0..2)
                 .map(|writer| {
                     let (a, b, active, errors) = (&a, &b, &active, &retarget_errors);
@@ -745,7 +887,9 @@ mod windows_tests {
                 writer.join().unwrap();
             }
             stop.store(true, Ordering::Relaxed);
-            assert_eq!(reader.join().unwrap(), 0, "lookup failed during concurrent retargets");
+            let tally = reader.join().unwrap();
+            assert_eq!(tally.failures, 0, "lookup failed during concurrent retargets");
+            assert!(tally.reads >= READ_FLOOR, "reader read only {} times", tally.reads);
         });
         assert_eq!(
             retarget_errors.load(Ordering::Relaxed),
@@ -768,8 +912,13 @@ mod windows_tests {
         }
     }
 
+    #[cfg(windows)]
     #[test]
-    #[ignore = "junction-proof CI job"]
+    #[ignore = "junction-proof CI job: run from the junction-proof workflow, elevated and unelevated"]
+    #[expect(
+        clippy::disallowed_types,
+        reason = "runs a copy of a system exe to hold it open; no package launch is involved"
+    )]
     fn junction_proof_retire_running_exe() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("launcher");
@@ -802,5 +951,24 @@ mod windows_tests {
         child.wait().unwrap();
         assert_eq!(runtime.block_on(retire_dir(&dir)).unwrap(), Retired::Removed);
         assert!(!dir.exists());
+        let graveyards = || {
+            std::fs::read_dir(tmp.path())
+                .unwrap()
+                .filter(|entry| {
+                    entry
+                        .as_ref()
+                        .unwrap()
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".gc-")
+                })
+                .count()
+        };
+        // The exe is released now, so the sweep inside the second retire has cleared any `.gc-*` the first left.
+        assert_eq!(
+            graveyards(),
+            0,
+            "no .gc-* debris after the child exited and retire ran again"
+        );
     }
 }

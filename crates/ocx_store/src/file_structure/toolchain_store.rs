@@ -202,31 +202,21 @@ impl ToolchainHome {
 
     /// The render directory name `active` currently links to, `None` when `active` is absent or names no `shells/` child.
     pub fn active_target_name(&self) -> Option<String> {
-        // Raw `read_link`, never canonicalised: only the exact forms `expected_active_target` writes are accepted.
+        // Raw link text, never `Path` components, which fold `shells/./x`, `shells//x` and `shells/x/` into the legal form.
         let target = std::fs::read_link(self.active()).ok()?;
         let name = if cfg!(windows) {
-            let target = dunce::simplified(&target);
             let shells = self.root.join(SHELLS_DIR);
-            let shells = dunce::simplified(&shells);
-            let (target, shells) = (target.as_os_str().to_str()?, shells.as_os_str().to_str()?);
-            let prefix = target.get(..shells.len())?;
-            if !prefix.eq_ignore_ascii_case(shells) {
+            let shells = dunce::simplified(&shells).to_str()?;
+            let target = dunce::simplified(&target).to_str()?;
+            if !target.get(..shells.len())?.eq_ignore_ascii_case(shells) {
                 return None;
             }
-            let rest = target[shells.len()..].strip_prefix(['\\', '/'])?;
-            rest.to_owned()
+            target[shells.len()..].strip_prefix('\\')?.to_owned()
         } else {
-            target.strip_prefix(SHELLS_DIR).ok()?.to_str()?.to_owned()
+            target.to_str()?.strip_prefix(SHELLS_DIR)?.strip_prefix('/')?.to_owned()
         };
-        if name.ends_with(std::path::is_separator) {
-            return None;
-        }
-        let mut components = Path::new(&name).components();
-        matches!(
-            (components.next(), components.next()),
-            (Some(std::path::Component::Normal(_)), None)
-        )
-        .then_some(name)
+        let legal = !name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\\']);
+        legal.then_some(name)
     }
 
     /// `active`'s one legal target; the heal and [`Self::active_is_valid`] both use this, never a second derivation.
@@ -475,6 +465,25 @@ mod tests {
         std::os::unix::fs::symlink("shells/default-8d41c2e07a95b3f6", home.active()).unwrap();
 
         assert_eq!(home.active_target_name().as_deref(), Some("default-8d41c2e07a95b3f6"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn active_target_name_refuses_every_non_canonical_spelling() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = ToolchainHome::new(tmp.path());
+        for spelling in ["shells/./foo", "shells//foo", "shells/foo/", "shells/foo/."] {
+            let _ = std::fs::remove_file(home.active());
+            std::os::unix::fs::symlink(spelling, home.active()).unwrap();
+            assert_eq!(
+                home.active_target_name(),
+                None,
+                "{spelling} is not what a render writes"
+            );
+        }
+        std::fs::remove_file(home.active()).unwrap();
+        std::os::unix::fs::symlink("shells/foo", home.active()).unwrap();
+        assert_eq!(home.active_target_name().as_deref(), Some("foo"));
     }
 
     /// Component names D-V14 refuses, one per refusal reason, reused by the
