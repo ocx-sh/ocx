@@ -255,8 +255,9 @@ case_signature() {
     fi
 }
 
-# V-L36: three copies of the signed launcher each start and verify; the quarantine start is reported only,
-# since Gatekeeper's verdict per inode is a claim.
+# V-L36: three copies of the signed launcher each start and verify; the quarantine start is reported only
+# and counts toward no floor (it fails only when the attribute cannot be set), since Gatekeeper's verdict
+# per inode is a claim.
 case_signed_copies_start() {
     local i launcher root
     for i in 1 2 3; do
@@ -290,8 +291,8 @@ case_quarantine_start() {
         return
     fi
     start_home "$STUB:$PATH" "$launcher" "$USER_ARG"
+    # Reported, not counted: nothing here can fail on Gatekeeper's verdict, so it owes no case to the floor.
     printf 'info quarantine-start: exit %s\n' "$STATUS"
-    pass quarantine-start
 }
 
 main() {
@@ -328,7 +329,7 @@ main() {
     case_toolchain_project
     case_toolchain_global
     if [ "$target" = aarch64-apple-darwin ]; then
-        owed=$((owed + 4))
+        owed=$((owed + 3))
         case_signature
         case_signed_copies_start
         case_quarantine_start
