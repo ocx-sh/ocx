@@ -802,6 +802,10 @@ mod firewall_tests {
             "the installed-version probe is hermetic (`env_clear` plus the resolved package env, nothing inherited)",
         ),
         (
+            "ocx_util/src/fs/publish.rs",
+            "test-only Windows junction proof running a copy of a system exe to hold it open",
+        ),
+        (
             "ocx_schema/tests/schema_outputs.rs",
             "integration test running the built schema generator",
         ),

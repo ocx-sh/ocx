@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -145,7 +146,7 @@ def locked_project(ocx: OcxRunner, tmp_path: Path) -> tuple[Path, str]:
     """A project with one default-group tool and a current ``ocx.lock``.
 
     Returns ``(project_dir, tool_binary_name)``. The binary name is what a
-    rendered ``shells/default/bin`` must carry a trampoline for.
+    rendered the active shell's ``bin/`` must carry a trampoline for.
     """
     package = _published_tool(ocx, tmp_path, "locked", bins=["wp8tool"])
     project = tmp_path / "proj"
@@ -679,8 +680,6 @@ def test_lock_and_update_re_render(
         "the control: `ocx pull` must have rendered the tree first, or this case "
         "cannot tell a re-render from a tree that was never built"
     )
-    import shutil
-
     shutil.rmtree(_toolchain_home(project))
 
     result = _run(ocx, project, command)
@@ -698,7 +697,7 @@ def test_update_narrowed_to_one_group_still_re_renders_the_whole_home(
     mutation command the ruling can read on.)
 
     Mutation that reds it: narrowing the render to the groups ``-g`` named,
-    which would leave ``shells/default/bin`` — the default group's directory — describing a
+    which would leave the active shell's ``bin/`` — the default group's directory — describing a
     lock that no longer exists.
     """
     default_tool = _published_tool(ocx, tmp_path, "dflt", bins=["wp8default"])
@@ -716,15 +715,13 @@ def test_update_narrowed_to_one_group_still_re_renders_the_whole_home(
         "the control: the whole-home render must have run once, or a narrowed "
         "re-render cannot be told from a tree that was never built"
     )
-    import shutil
-
     shutil.rmtree(home)
 
     result = _run(ocx, project, "update", "-g", "ci")
     assert result.returncode == EXIT_SUCCESS, result.stderr
 
     assert (shell_bin(home) / trampoline_name("wp8default")).exists(), (
-        "RUL-59 — `-g ci` narrows resolution, not the tree: `shells/default/bin` still covers "
+        "RUL-59 — `-g ci` narrows resolution, not the tree: the active shell's `bin/` still covers "
         "the default group"
     )
 
@@ -835,9 +832,9 @@ def test_exec_never_resolves_a_command_out_of_a_trampoline_directory(
     # gone, C-069 refuses with 65; if both guards are gone, the marker appears
     # in stdout. Neither is exit 0 with the package's own output.
     if sys.platform == "win32":
-        # A Windows trampoline is the `.exe` plus its `.exec` sidecar, and the
-        # sidecar is what marks the entry as one; a `.cmd` beside it takes the
-        # `.exe`'s place on PATHEXT.
+        # A Windows trampoline is the `.exe` plus its `.launch` record, and the
+        # record (kind `toolchain`) is what marks the entry as one; a `.cmd`
+        # beside it takes the `.exe`'s place on PATHEXT.
         trampoline.unlink()
         trampoline = trampoline.with_suffix(".cmd")
         trampoline.write_text("@echo wp8-trampoline-answered\r\n")
@@ -882,24 +879,32 @@ def test_exec_refuses_a_foreign_trampoline_answer(
     the input on which C-069 is the only defence.
     """
     project, _ = locked_project
+    assert _run(ocx, project, "pull", "-g", "all").returncode == EXIT_SUCCESS
+    project_bin = shell_bin(_toolchain_home(project))
     foreign_bin = shell_bin(tmp_path / "foreign" / "toolchain")
     foreign_bin.mkdir(parents=True)
-    if sys.platform == "win32":
-        # A Windows trampoline is named by its `.exec` sidecar, not its content.
-        foreign = foreign_bin / "wp8foreign.cmd"
-        foreign.write_text("@echo wp8-foreign-answered\r\n")
-        foreign.with_suffix(".exec").write_text(f"{tmp_path / 'foreign'}\n")
-    else:
-        foreign = foreign_bin / "wp8foreign"
-        foreign.write_text(
-            "#!/bin/sh\n"
-            "# ocx-toolchain-trampoline\n"
-            "unset OCX_GLOBAL OCX_PROJECT\n"
-            "__ocx_binary='/nonexistent/ocx'\n"
-            'exec "${OCX_BINARY_PIN:-$__ocx_binary}" '
-            f'--project \'{tmp_path / "foreign"}\' exec -- "${{0##*/}}" "$@"\n'
+    # A foreign launcher is the one shared launcher program plus a `.launch`
+    # record (kind `toolchain`) naming another project's root.
+    donor = next(p for p in sorted(project_bin.iterdir()) if p.suffix in ("", ".exe"))
+    donor_record = json.loads(trampoline_body(donor).read_text(encoding="utf-8"))
+    assert donor_record["kind"] == "toolchain", (
+        "C-131 — the control: a rendered launcher is paired with a toolchain "
+        f"record; got {donor_record}"
+    )
+    foreign = foreign_bin / (
+        "wp8foreign.exe" if sys.platform == "win32" else "wp8foreign"
+    )
+    shutil.copy2(donor, foreign)
+    foreign.with_name("wp8foreign.launch").write_text(
+        json.dumps(
+            {
+                "kind": "toolchain",
+                "schema_version": 1,
+                "tier": "project",
+                "project_root": str(tmp_path / "foreign"),
+            }
         )
-        foreign.chmod(0o755)
+    )
 
     result = _run(
         ocx,

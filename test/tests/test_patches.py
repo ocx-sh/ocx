@@ -70,6 +70,22 @@ from src.runner import OcxRunner, PackageInfo, current_platform, registry_dir
 pytestmark = pytest.mark.command("patch*", "install", "env", "toolchain_env")
 
 
+def _package_launcher_dir(pkg_root: Path) -> Path:
+    """``<pkg_root>/launchers/<G>`` -- the one 16-hex generation directory (C-129).
+
+    A test does not compute ``G``; it reads the single child ``launchers/`` holds.
+    """
+    generations = sorted(
+        p
+        for p in (pkg_root / "launchers").iterdir()
+        if re.fullmatch(r"[0-9a-f]{16}", p.name)
+    )
+    assert len(generations) == 1, (
+        f"one launcher generation under {pkg_root}/launchers; got {generations}"
+    )
+    return generations[0]
+
+
 @pytest.fixture(scope="module")
 def _empty_global_descriptor_slot_afterwards(
     ocx_binary: Path, registry: str, tmp_path_factory: pytest.TempPathFactory
@@ -3323,7 +3339,9 @@ def test_a_launcher_run_by_absolute_path_matches_only_catch_all_rules(
     ocx.plain("package", "install", base_pkg.short)
 
     pkg_root = Path(ocx.json("package", "which", base_pkg.short)["paths"][base_pkg.short]["path"])
-    launcher = pkg_root / "entrypoints" / ("showenv.exe" if sys.platform == "win32" else "showenv")
+    launcher = _package_launcher_dir(pkg_root) / (
+        "showenv.exe" if sys.platform == "win32" else "showenv"
+    )
     result = subprocess.run(
         [str(launcher)],
         capture_output=True,
@@ -4098,7 +4116,7 @@ def test_patch_test_runs_generated_entrypoint(
 ) -> None:
     """A trailing command that names a base's entrypoint runs.
 
-    The composed env puts the base's ``entrypoints/`` on ``PATH``, so naming an
+    The composed env puts the base's ``launchers/<G>`` on ``PATH``, so naming an
     entrypoint as the trailing command is the ordinary way to preview a patched
     tool. The entrypoint resolves to a generated launcher that re-enters ``ocx
     launcher exec`` with the materialized package root — which for this command
@@ -6614,10 +6632,12 @@ def test_companion_launchers_stay_off_path_and_its_dependency_launchers_are_clai
     )
     launcher_dirs = [
         e["value"] for e in entries
-        if e["key"] == "PATH" and Path(e["value"]).name == "entrypoints"
+        if e["key"] == "PATH" and Path(e["value"]).parent.name == "launchers"
     ]
     dep_root = Path(ocx.json("package", "which", dep.short)["paths"][dep.short]["path"])
-    assert [Path(d).resolve() for d in launcher_dirs] == [(dep_root / "entrypoints").resolve()], (
+    assert [Path(d).resolve() for d in launcher_dirs] == [
+        _package_launcher_dir(dep_root).resolve()
+    ], (
         f"only the dependency's launchers reach PATH, never the companion's; got: {launcher_dirs}"
     )
     claimed = {claim["name"] for claim in report.get("entrypoints", [])}

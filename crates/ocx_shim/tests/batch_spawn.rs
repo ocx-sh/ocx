@@ -3,7 +3,7 @@
 
 //! Windows launches end to end. A vendored `.cmd` target: hostile arguments never run an injected command (BatBadBut,
 //! CVE-2024-24576). An argument std can quote reaches the batch file (exit 0); one holding a line break is refused (exit 64).
-//! A program whose path exceeds `MAX_PATH` starts, from a `.launch` and from a classic launcher; one that cannot names the limit.
+//! A program whose path exceeds `MAX_PATH` starts, from a `direct` record and from a `package` record; one that cannot names the limit.
 //!
 //! Runs on Windows CI only; the dispatch decision itself is a host-run unit in `direct.rs`.
 #![cfg(windows)]
@@ -169,6 +169,13 @@ impl LongPath {
         self.base.join("vendor")
     }
 
+    /// Writes the `package` record a classic launcher in `bin` reads, naming the base directory as its root.
+    fn write_package_record(&self, bin: &Path) {
+        let package_root = self.base.display().to_string().replace('\\', "\\\\");
+        let record = format!(r#"{{"kind":"package","schema_version":1,"package_root":"{package_root}"}}"#);
+        std::fs::write(bin.join("tool.launch"), record).unwrap();
+    }
+
     fn program(&self) -> PathBuf {
         self.vendor_root().join(self.relative.replace('/', "\\"))
     }
@@ -215,7 +222,7 @@ fn a_classic_launcher_starts_a_pinned_ocx_past_max_path() {
     std::fs::create_dir_all(&bin).unwrap();
     let launcher = bin.join("tool.exe");
     std::fs::copy(LAUNCHER_BINARY, &launcher).unwrap();
-    std::fs::write(bin.join("tool.shim"), format!("{}\n", long_path.base.display())).unwrap();
+    long_path.write_package_record(&bin);
 
     let output = Command::new(&launcher)
         .env("OCX_BINARY_PIN", long_path.program())
@@ -235,7 +242,7 @@ fn a_relative_pin_past_max_path_names_the_length_limit_on_the_one_stderr_line() 
     std::fs::create_dir_all(&bin).unwrap();
     let launcher = bin.join("tool.exe");
     std::fs::copy(LAUNCHER_BINARY, &launcher).unwrap();
-    std::fs::write(bin.join("tool.shim"), format!("{}\n", long_path.base.display())).unwrap();
+    long_path.write_package_record(&bin);
     let missing = format!("{}\\absent\\ocx.exe", long_path.relative.replace('/', "\\"));
     assert!(
         missing.encode_utf16().count() >= 260,
@@ -257,6 +264,33 @@ fn a_relative_pin_past_max_path_names_the_length_limit_on_the_one_stderr_line() 
     assert!(stderr.starts_with("ocx-shim: "), "{stderr}");
     assert!(
         stderr.contains("; the program path is ") && stderr.contains("cannot take the \\\\?\\ prefix"),
+        "{stderr}"
+    );
+}
+
+/// A batch target whose path reaches `MAX_PATH` never runs: whether std refuses the start or cmd.exe exits non-zero,
+/// the one stderr line carries the length-limit clause (the line's exact text is a host unit in `direct.rs`).
+#[test]
+fn a_batch_target_past_max_path_names_the_length_limit_on_the_stderr_line() {
+    let long_path = LongPath::new("batch");
+    let relative = long_path.relative.replace("probe.exe", "probe.cmd");
+    std::fs::write(long_path.vendor_root().join(relative.replace('/', "\\")), PROBE_SCRIPT).unwrap();
+    let root = long_path.vendor_root();
+    let launcher = root.join(format!("{SELF_PATH}.exe"));
+    std::fs::create_dir_all(launcher.parent().unwrap()).unwrap();
+    std::fs::copy(LAUNCHER_BINARY, &launcher).unwrap();
+    let sidecar = format!(
+        r#"{{"kind":"direct","schema_version":1,"vendor_id":"{VENDOR_ID}","self":"{SELF_PATH}","program":"@VENDOR_DIR@/{relative}","args":[],"unset":[],"env":[]}}"#
+    );
+    std::fs::write(root.join(format!("{SELF_PATH}.launch")), sidecar).unwrap();
+
+    let output = Command::new(&launcher).current_dir(&long_path.base).output().unwrap();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{stderr}");
+    assert!(stderr.starts_with("ocx-shim: "), "{stderr}");
+    assert!(
+        stderr.contains("and a batch file runs through cmd.exe, which has the same limit; move the directory"),
         "{stderr}"
     );
 }

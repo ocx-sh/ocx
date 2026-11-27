@@ -49,14 +49,17 @@ these cases exist to close, while every assertion kept passing. The fixture
 here (:func:`_committed_blob`, :func:`_install_trampoline_slot`) is deliberately
 a second, non-shared one for that reason — do not fold them together.
 
-They need no registry and no ``ocx`` binary (a ``.exec`` sidecar carries no
-containment path, so the shim never consults ``OCX_HOME``), which is what lets
+They need no registry and no ``ocx`` binary (a ``toolchain`` record carries no
+containment path, so the launcher never consults ``OCX_HOME``), which is what lets
 them run on the one Windows job that exists — ``build-windows-shims.yml``,
-whose pytest invocation names this module alongside ``test_windows_shim.py``.
+whose pytest invocation names this module alongside ``test_windows_shim.py``. The ``ocx``
+they start is a native argv recorder compiled with ``rustc`` (``launcher_fixtures.build_recorder``):
+a batch program is refused on every rung (C-108), so no ``.cmd`` stand-in exists.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import platform
 import re
@@ -68,23 +71,30 @@ from uuid import uuid4
 
 import pytest
 
+from src import PackageInfo
 from src.helpers import (
     make_package,
     make_package_with_entrypoints,
     rglob_no_links,
     write_ocx_toml,
 )
+from src.launcher_fixtures import (
+    DEPTH_VAR,
+    build_recorder,
+    launcher_env,
+    recorder_copy,
+    run_launcher,
+    stub_calls,
+    write_stub_ocx,
+)
 from src.runner import OcxRunner
 from src.toolchain_fixtures import (
     DEFAULT_GROUP,
     ToolchainProject,
-    bin_entries,
     entry_link,
     locked_project,
     run_in,
     sha256_of,
-    shell_bin,
-    trampoline_files,
     trampoline_name,
 )
 
@@ -107,6 +117,82 @@ TRAMPOLINE_MARKER = "# ocx-toolchain-trampoline"
 
 #: `crate::env::TRAMPOLINE_PROBE_BYTES` — how much of a candidate is read.
 TRAMPOLINE_PROBE_BYTES = 256
+
+
+# ---------------------------------------------------------------------------
+# The native-launcher layout (§ 4.3): `shells/default-<16 hex>/bin/NAME + NAME.launch`
+# ---------------------------------------------------------------------------
+
+_SHELL_GENERATION = re.compile(r"default-[0-9a-f]{16}")
+
+
+def shell_bin(home: Path) -> Path:
+    """The physical launcher directory `<home>/active` points at: `shells/default-<16 hex>/bin`.
+
+    Asserts the generation spelling, so a render that still writes the plain
+    `shells/default` directory fails here rather than passing on the old layout.
+    """
+    target = (home / "active").resolve()
+    assert target.parent.name == "shells" and _SHELL_GENERATION.fullmatch(
+        target.name
+    ), f"`active` must point at shells/default-<16 hex>; resolved to {target}"
+    return target / "bin"
+
+
+def record_path(launcher: Path) -> Path:
+    """`NAME.launch` beside a launcher (`NAME.exe` on Windows loses its `.exe`)."""
+    return (
+        launcher.with_suffix(".launch")
+        if launcher.suffix.lower() == ".exe"
+        else launcher.with_name(launcher.name + ".launch")
+    )
+
+
+def trampoline_files(name: str) -> list[str]:
+    """Every `bin/` entry an exposed name occupies: the launcher plus its `NAME.launch` record."""
+    return [trampoline_name(name), f"{name}.launch"]
+
+
+def bin_entries(home: Path) -> list[str]:
+    """The sorted entry names of the physical launcher directory."""
+    return sorted(entry.name for entry in shell_bin(home).iterdir())
+
+
+def assert_toolchain_launcher(launcher: Path, project_root: Path) -> dict:
+    """`launcher` is a native launcher with a project `toolchain` record for `project_root`; return the record."""
+    record = json.loads(record_path(launcher).read_text(encoding="utf-8"))
+    assert record["kind"] == "toolchain" and record["tier"] == "project", record
+    assert record["project_root"] == str(project_root), record
+    if sys.platform != "win32":
+        assert launcher.read_bytes()[:2] != b"#!", (
+            f"{launcher} must be a native launcher, not a script"
+        )
+    return record
+
+
+def render_global_tool(
+    ocx: OcxRunner, tmp_path: Path, label: str
+) -> tuple[PackageInfo, Path]:
+    """Seed and render the global tier with one tool; return the package and its launcher file."""
+    package = make_package(
+        ocx,
+        f"t_{label}_gtramp",
+        "1.0.0",
+        tmp_path,
+        cascade=False,
+        bins=[f"gtramp{label}"],
+    )
+    added = run_in(ocx, tmp_path, "--global", "add", package.fq)
+    assert added.returncode == EXIT_SUCCESS, (
+        f"seeding the global tier; rc={added.returncode}\n{added.stderr}"
+    )
+    pulled = run_in(ocx, tmp_path, "--global", "pull")
+    assert pulled.returncode == EXIT_SUCCESS, (
+        f"rendering the global tier; rc={pulled.returncode}\n{pulled.stderr}"
+    )
+    return package, shell_bin(
+        Path(ocx.env["OCX_HOME"]) / "toolchain"
+    ) / trampoline_name(f"gtramp{label}")
 
 
 # ---------------------------------------------------------------------------
@@ -181,17 +267,16 @@ def stale_trampoline(project: ToolchainProject, name: str) -> Path:
     """A rendered trampoline copied into ``<home>/bin/`` under ``name``.
 
     A byte copy is a *faithful* stale trampoline, not an approximation: the
-    body bakes the project root and nothing else, and derives the tool name at
-    run time from ``${0##*/}`` (C-028). Copying it under a new name therefore
+    record bakes the project root and nothing else, and the launcher derives the
+    tool name at run time from its own file name (C-110). Copying it under a new name therefore
     produces exactly what a rendered tree holds after a tool is dropped from
     ``ocx.toml`` without a re-render — the state D-V1's two-home loop needs,
     and the one thing the composition itself will not provide.
     """
     target = shell_bin(project.home) / trampoline_name(name)
     shutil.copy(project.default_trampoline, target)
-    if sys.platform == "win32":
-        # The Windows trampoline is the `.exe` plus its `.exec` sidecar, which is what `is_ocx_trampoline` reads.
-        shutil.copy(project.default_trampoline.with_suffix(".exec"), target.with_suffix(".exec"))
+    # The launcher is the same bytes under every name; the `NAME.launch` record beside it is what trampoline detection reads.
+    shutil.copy(record_path(project.default_trampoline), record_path(target))
     return target
 
 
@@ -222,7 +307,7 @@ def test_item22_a_name_the_composition_does_not_provide_exits_65_naming_the_sear
     """C-010: both trampoline directories are dropped from the **lookup** PATH.
 
     The name exists as a stale trampoline in the project's own
-    ``shells/default/bin`` and
+    ``shells/default-<16 hex>/bin`` and
     nowhere else, so the two guards give visibly different answers: with the
     exclusion in force the lookup never sees the file (**NotFound**, and the
     reported ``searched:`` list omits both trampoline directories); without it
@@ -241,8 +326,8 @@ def test_item22_a_name_the_composition_does_not_provide_exits_65_naming_the_sear
     stale_trampoline(project, ghost)
 
     project_bin = str(shell_bin(project.home))
-    global_bin = str(shell_bin(Path(ocx.env["OCX_HOME"]) / "toolchain"))
-    Path(global_bin).mkdir(parents=True, exist_ok=True)
+    _, global_launcher = render_global_tool(ocx, tmp_path, uuid4().hex[:8])
+    global_bin = str(global_launcher.parent)
     # `bin` mode is what puts these two on an interactive shell's PATH, and it
     # is the arrangement C-010 exists for — `ocx exec` does not add them itself.
     activated = {"PATH": os.pathsep.join([project_bin, global_bin, ocx.env["PATH"]])}
@@ -311,7 +396,7 @@ def test_item22_nothing_is_spawned_on_the_refusal(ocx: OcxRunner, tmp_path: Path
     )
 
 
-def test_item22_a_foreign_home_trampoline_on_path_is_refused_by_identity(
+def test_item22_vl40_two_project_homes_on_one_path_exit_65_through_native_launchers(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
     """C-069: a *second* project's trampoline is refused by identity, not by list.
@@ -330,8 +415,11 @@ def test_item22_a_foreign_home_trampoline_on_path_is_refused_by_identity(
     project_a = locked_project(ocx, tmp_path, label=f"a{uuid4().hex[:6]}")
     project_b = locked_project(ocx, tmp_path, label=f"b{uuid4().hex[:6]}")
     ghost = f"ghost{uuid4().hex[:8]}"
-    stale_trampoline(project_a, ghost)
+    own = stale_trampoline(project_a, ghost)
     foreign = stale_trampoline(project_b, ghost)
+    # V-L40: both homes hold native launchers with `.launch` records, under `shells/default-<16 hex>/bin`.
+    assert_toolchain_launcher(own, project_a.directory)
+    assert_toolchain_launcher(foreign, project_b.directory)
 
     result = run_in(
         ocx,
@@ -435,11 +523,7 @@ def test_item22_a_marker_bearing_project_path_is_not_refused(
     assert ran_output in result.stdout, result.stdout
 
     trampoline = shell_bin(home) / trampoline_name(name)
-    if posix:
-        body = trampoline.read_text()
-        assert f"'{directory}'" in body, (
-            f"the marker-spelling root is baked inside single quotes; got {body!r}"
-        )
+    assert_toolchain_launcher(trampoline, directory)
     invoked = run_file(trampoline, cwd=tmp_path, env=dict(ocx.env))
     assert invoked.returncode == EXIT_SUCCESS, (
         f"the trampoline for a marker-spelling root must run; rc={invoked.returncode}\n"
@@ -512,7 +596,7 @@ def test_c057_launcher_exec_propagates_65_for_a_name_that_resolves_to_a_trampoli
 
 @pytest.mark.skipif(
     sys.platform == "win32",
-    reason="the `${0##*/}` stem is a POSIX trampoline body; the Windows trampoline is a PE shim dispatched through its `.exec` sidecar",
+    reason="the `${0##*/}` stem is a POSIX trampoline body; the Windows launcher is a PE dispatched through its `.launch` record",
 )
 def test_item1_a_trampoline_invoked_through_a_symlink_elsewhere_uses_the_baked_home(
     ocx: OcxRunner, tmp_path: Path
@@ -614,19 +698,7 @@ def test_item38_a_global_trampoline_under_an_exported_ocx_project_does_not_exit_
     RED: drop ``OCX_PROJECT`` from the ``unset`` line of the trampoline body — exit 64.
     """
     label = uuid4().hex[:8]
-    package = make_package(
-        ocx,
-        f"t_{label}_gtramp",
-        "1.0.0",
-        tmp_path,
-        cascade=False,
-        bins=[f"gtramp{label}"],
-    )
-    added = run_in(ocx, tmp_path, "--global", "add", package.fq)
-    assert added.returncode == EXIT_SUCCESS, f"seeding the global tier; rc={added.returncode}\n{added.stderr}"
-    pulled = run_in(ocx, tmp_path, "--global", "pull")
-    assert pulled.returncode == EXIT_SUCCESS, f"rendering the global tier; rc={pulled.returncode}\n{pulled.stderr}"
-    trampoline = shell_bin(Path(ocx.env["OCX_HOME"]) / "toolchain") / trampoline_name(f"gtramp{label}")
+    package, trampoline = render_global_tool(ocx, tmp_path, label)
     assert trampoline.exists(), f"the global tier must render a trampoline at {trampoline}"
     other = locked_project(ocx, tmp_path, label=f"o{label}")
 
@@ -928,7 +1000,7 @@ def test_item33_flipping_pinned_changes_the_composed_path_without_re_rendering(
     lane, no composition flag — so the ladder is re-read by the ocx the
     trampoline re-enters. Flipping ``pinned`` in ``ocx.toml`` with **no
     ``ocx pull`` between** must therefore change what composes while leaving
-    ``shells/default/bin`` untouched, and flipping back must restore it.
+    the launcher directory untouched, and flipping back must restore it.
 
     Both halves are asserted every time, because either alone is satisfiable by
     the wrong implementation: a body that baked the flag would keep the old
@@ -968,7 +1040,116 @@ def test_item33_flipping_pinned_changes_the_composed_path_without_re_rendering(
 
 
 # ---------------------------------------------------------------------------
-# Windows — the COMMITTED shim blob, dispatching a `.exec` sidecar
+# V-L07 — a toolchain launcher builds the frozen argv through the stub ocx
+# ---------------------------------------------------------------------------
+
+unix_only = pytest.mark.skipif(
+    sys.platform == "win32", reason="the stub ocx is a /bin/sh script"
+)
+
+
+@unix_only
+def test_vl07_a_project_toolchain_launcher_builds_the_project_argv_and_strips_the_selectors(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """V-L07 / C-107: `ocx --project <root> exec -- NAME args…`; OCX_GLOBAL and OCX_PROJECT removed; depth +1."""
+    project = locked_project(ocx, tmp_path)
+    stub, log = write_stub_ocx(tmp_path / "stub")
+
+    result = run_launcher(
+        project.default_trampoline,
+        "x",
+        "y z",
+        env=launcher_env(
+            ocx,
+            OCX_BINARY_PIN=str(stub),
+            OCX_GLOBAL="1",
+            OCX_PROJECT=str(tmp_path),
+            **{DEPTH_VAR: "3"},
+        ),
+        cwd=tmp_path,
+    )
+
+    assert result.returncode == EXIT_SUCCESS, result.stderr
+    (call,) = stub_calls(log)
+    assert call["argv"] == [
+        "--project",
+        str(project.directory),
+        "exec",
+        "--",
+        project.default_binary,
+        "x",
+        "y z",
+    ]
+    assert call["depth"] == "4"
+    assert (call["global"], call["project"]) == (None, None), (
+        "the toolchain kind removes both tier selectors"
+    )
+
+
+@unix_only
+def test_vl07_a_global_toolchain_launcher_builds_the_global_argv(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """V-L07 / C-107: `ocx --global exec -- NAME args…` with no value token; depth starts at 1."""
+    label = uuid4().hex[:8]
+    _, launcher = render_global_tool(ocx, tmp_path, label)
+    stub, log = write_stub_ocx(tmp_path / "stub")
+
+    result = run_launcher(
+        launcher,
+        "--version",
+        env=launcher_env(ocx, OCX_BINARY_PIN=str(stub)),
+        cwd=tmp_path,
+    )
+
+    assert result.returncode == EXIT_SUCCESS, result.stderr
+    (call,) = stub_calls(log)
+    assert call["argv"] == ["--global", "exec", "--", f"gtramp{label}", "--version"]
+    assert call["depth"] == "1"
+    record = json.loads(record_path(launcher).read_text(encoding="utf-8"))
+    assert (record["kind"], record["tier"]) == ("toolchain", "global"), record
+    assert "project_root" not in record, record
+
+
+@unix_only
+def test_vl07_a_toolchain_launcher_without_a_pin_starts_the_record_ocx_not_the_path(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """V-L10 / C-108: with no pin the record's `ocx` outranks the `PATH` walk (rung 2 before rung 3).
+
+    The record names the real `ocx`; a decoy `ocx` leads `PATH`. The tool's marker in
+    stdout proves the record's `ocx` ran and the decoy did not.
+    """
+    project = locked_project(ocx, tmp_path)
+    record = json.loads(
+        record_path(project.default_trampoline).read_text(encoding="utf-8")
+    )
+    assert record.get("ocx") == str(ocx.binary), (
+        f"the render must record the ocx that wrote it; got {record}"
+    )
+    decoy_log = tmp_path / "decoy.log"
+    decoy_dir = tmp_path / "decoy"
+    decoy_dir.mkdir()
+    decoy = decoy_dir / "ocx"
+    decoy.write_text(f'#!/bin/sh\necho decoy >> "{decoy_log}"\n')
+    decoy.chmod(0o755)
+
+    result = run_file(
+        project.default_trampoline,
+        cwd=tmp_path,
+        env=launcher_env(
+            ocx, OCX_BINARY_PIN=None, PATH=f"{decoy_dir}{os.pathsep}{ocx.env['PATH']}"
+        ),
+    )
+
+    assert result.returncode == EXIT_SUCCESS, result.stderr
+    assert project.default_package.marker in result.stdout, result.stdout
+    assert not decoy_log.exists(), "the PATH decoy must never run"
+
+
+# ---------------------------------------------------------------------------
+# Windows — the COMMITTED launcher blob, dispatching a `.launch` record
 # ---------------------------------------------------------------------------
 #
 # Read the module docstring before touching anything below: these are the only
@@ -1011,73 +1192,65 @@ def _committed_blob() -> Path:
 
 
 def _install_trampoline_slot(bin_dir: Path, stem: str, selector: str, baked_ocx: Path | None = None) -> Path:
-    """``<stem>.exe`` (a byte copy of the committed blob) + ``<stem>.exec``.
+    """``<stem>.exe`` (a byte copy of the committed blob) + ``<stem>.launch`` of kind ``toolchain``.
 
-    The registry-free equivalent of what ``render_toolchain`` writes into
-    ``<home>/bin/``. The sidecar grammar: line one is an absolute project root
-    or the literal ``global``; line two, **optional**, is the absolute ``ocx``
-    the rendering ocx resolved (V-9). Each line ends in a single LF, UTF-8,
-    no BOM.
-
-    ``baked_ocx=None`` writes the one-line form, which stays valid — that is
-    the degraded arm, and the rows that predate V-9 keep exercising it.
+    The registry-free equivalent of what the render writes into a launcher
+    directory. ``selector`` is an absolute project root (tier ``project``) or
+    the literal ``global`` (tier ``global``); ``baked_ocx`` becomes the record's
+    optional ``ocx`` key and ``None`` omits it, which stays valid.
     """
     bin_dir.mkdir(parents=True, exist_ok=True)
     exe = bin_dir / f"{stem}.exe"
     exe.write_bytes(_committed_blob().read_bytes())
-    body = f"{selector}\n" if baked_ocx is None else f"{selector}\n{baked_ocx}\n"
-    (bin_dir / f"{stem}.exec").write_bytes(body.encode())
+    record: dict[str, object] = {"kind": "toolchain", "schema_version": 1}
+    if selector == "global":
+        record["tier"] = "global"
+    else:
+        record["tier"] = "project"
+        record["project_root"] = selector
+    if baked_ocx is not None:
+        record["ocx"] = str(baked_ocx)
+    (bin_dir / f"{stem}.launch").write_bytes((json.dumps(record) + "\n").encode())
     return exe
 
 
-def _install_shimref_slot(bin_dir: Path, stem: str, identifier: str) -> Path:
-    """``<stem>.exe`` (a byte copy of the committed blob) + ``<stem>.shimref``.
+def _install_deferred_slot(bin_dir: Path, stem: str, identifier: str) -> Path:
+    """``<stem>.exe`` (a byte copy of the committed blob) + ``<stem>.launch`` of kind ``deferred``.
 
-    The deferred-tool grammar (C-017): one line, an OCI pinned identifier.
-    ``core::strips_tier_selectors`` answers **false** for it (RUL-14 / D-V20),
-    which is the whole reason this slot exists here — it is the same shipped
-    blob dispatching through the one sidecar shape that must NOT delete the
-    tier selectors, and therefore the observable RED for C-033's case above.
+    The deferred-tool record: an OCI pinned identifier. Only the ``toolchain``
+    kind removes the tier selectors, which is the whole reason this slot exists
+    here — the same shipped blob dispatching through the one record kind that
+    must NOT delete them, and therefore the observable RED for C-033's case above.
     """
     bin_dir.mkdir(parents=True, exist_ok=True)
     exe = bin_dir / f"{stem}.exe"
     exe.write_bytes(_committed_blob().read_bytes())
-    (bin_dir / f"{stem}.shimref").write_bytes(f"{identifier}\n".encode())
+    record = {"kind": "deferred", "schema_version": 1, "identifier": identifier}
+    (bin_dir / f"{stem}.launch").write_bytes((json.dumps(record) + "\n").encode())
     return exe
 
 
-def _pin_recorder(directory: Path, log: Path, *, echo_env: bool = False) -> Path:
-    """An ``ocx.cmd`` that records the argv the shim built, then exits 0.
+@pytest.fixture(scope="module")
+def recorder_exe(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A native argv recorder, compiled once: a ``.cmd`` program is refused by the launcher on every rung (C-108)."""
+    if sys.platform != "win32":
+        pytest.skip("the recorder is the Windows stand-in for write_stub_ocx")
+    return build_recorder(tmp_path_factory.mktemp("recorder"))
 
-    Pinned through ``OCX_BINARY_PIN``, which the shim resolves via an explicit
-    ``lpApplicationName`` — the same branch ``test_windows_shim.py`` uses to
-    observe forwarded argv, and the only way to see the wire line without an
-    ``ocx`` on the machine.
 
-    V-9 gave it a second role: the ``.exec`` sidecar's **baked** second line
-    reaches the same explicit ``lpApplicationName`` branch, so this recorder is
-    equally what a trampoline spawns with no pin defined at all.
+def _pin_recorder(recorder: Path, directory: Path) -> Path:
+    """A copy of the recorder named ``ocx.exe``; every start appends its argv and ``OCX_*`` environment to ``ocx.log``."""
+    exe, _log = recorder_copy(recorder, directory)
+    return exe
 
-    With ``echo_env``, it also dumps every ``OCX_*`` name the child inherited
-    (``SET OCX_``), which prints one ``NAME=value`` line per **defined**
-    variable and nothing at all for an undefined one. That is the only spelling
-    that separates C-033's three candidate states — deleted, inherited, or set
-    to the empty string — because ``SET`` prints ``NAME=`` for a defined-empty
-    variable and omits the name entirely for a deleted one.
 
-    Deliberately not ``ECHO [%OCX_GLOBAL%]``: an undefined variable is echoed
-    as its own literal ``%NAME%`` only at cmd's **interactive prompt**. Inside
-    a batch file — which is how this recorder is always run — percent expansion
-    substitutes the empty string instead, so the literal never appears and
-    ``[]`` cannot be told from a defined-but-empty variable.
-    """
-    directory.mkdir(parents=True, exist_ok=True)
-    script = directory / "ocx.cmd"
-    body = "@ECHO off\r\n" + f'>"{log}" ECHO %*\r\n'
-    if echo_env:
-        body += f'>>"{log}" SET OCX_\r\n'
-    script.write_text(body + "EXIT /B 0\r\n", encoding="utf-8")
-    return script
+def _recorded(pin: Path) -> dict:
+    """The one start the recorder at ``pin`` logged: ``{"argv": [...], "env": {...}}``."""
+    log = pin.with_suffix(".log")
+    assert log.is_file(), f"the recorder at {pin} never ran"
+    lines = log.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1, f"expected exactly one recorded start; got {lines}"
+    return json.loads(lines[0])
 
 
 def _dispatch(exe: Path, *args: str, env: dict[str, str], cwd: Path) -> subprocess.CompletedProcess[str]:
@@ -1094,7 +1267,7 @@ def _dispatch(exe: Path, *args: str, env: dict[str, str], cwd: Path) -> subproce
 
 @windows_only
 def test_item15_dispatch_the_committed_blob_builds_the_project_wire_line(
-    tmp_path: Path,
+    tmp_path: Path, recorder_exe: Path
 ) -> None:
     """C-032, on the committed blob: the root flag comes **first**, then the verb.
 
@@ -1114,8 +1287,7 @@ def test_item15_dispatch_the_committed_blob_builds_the_project_wire_line(
     root = tmp_path / "project"
     root.mkdir()
     exe = _install_trampoline_slot(tmp_path / "bin", stem, str(root))
-    log = tmp_path / "argv.txt"
-    pin = _pin_recorder(tmp_path / "fake_ocx", log)
+    pin = _pin_recorder(recorder_exe, tmp_path / "fake_ocx")
 
     result = _dispatch(
         exe,
@@ -1128,19 +1300,21 @@ def test_item15_dispatch_the_committed_blob_builds_the_project_wire_line(
     assert result.returncode == EXIT_SUCCESS, (
         f"the pinned recorder must run; rc={result.returncode} stderr={result.stderr!r}"
     )
-    recorded = log.read_text(encoding="utf-8").strip()
-    # Ordered, not anchored: `append_quoted_arg` quotes only what needs it, so
-    # what is contractual is the token ORDER — root flag, root, verb, `--`,
-    # stem, then the user's argv verbatim — never a fixed quoting spelling.
-    assert re.search(
-        rf'--project\s+"?{re.escape(str(root))}"?\s+exec\s+--\s+"?{stem}"?\s+--flag\s+"value with space"',
-        recorded,
-    ), f"C-032's project wire line; got {recorded!r}"
+    # The argv is a list, so the contract is the token order: root flag, root, verb, `--`, stem, user argv.
+    assert _recorded(pin)["argv"] == [
+        "--project",
+        str(root),
+        "exec",
+        "--",
+        stem,
+        "--flag",
+        "value with space",
+    ], "C-032's project wire line"
 
 
 @windows_only
 def test_item15_dispatch_the_committed_blob_builds_the_global_wire_line(
-    tmp_path: Path,
+    tmp_path: Path, recorder_exe: Path
 ) -> None:
     """C-032's global arm: ``--global`` carries **no value token**.
 
@@ -1155,28 +1329,22 @@ def test_item15_dispatch_the_committed_blob_builds_the_global_wire_line(
     """
     stem = "gtool"
     exe = _install_trampoline_slot(tmp_path / "bin", stem, "global")
-    log = tmp_path / "argv.txt"
-    pin = _pin_recorder(tmp_path / "fake_ocx", log)
+    pin = _pin_recorder(recorder_exe, tmp_path / "fake_ocx")
 
     result = _dispatch(exe, "--version", env={**os.environ, "OCX_BINARY_PIN": str(pin)}, cwd=tmp_path)
 
     assert result.returncode == EXIT_SUCCESS, (
         f"the pinned recorder must run; rc={result.returncode} stderr={result.stderr!r}"
     )
-    recorded = log.read_text(encoding="utf-8").strip()
-    # `exec` follows `--global` directly: nothing — not even `""` — sits in the
-    # value slot. That adjacency is the whole assertion.
-    assert re.search(rf'--global\s+exec\s+--\s+"?{stem}"?\s+--version', recorded), (
-        f"`--global` takes no value token; got {recorded!r}"
-    )
-    assert "global global" not in recorded and '--global ""' not in recorded, (
-        f"`--global` must emit no value token at all; got {recorded!r}"
+    # `exec` follows `--global` directly: nothing, not even an empty string, sits in the value slot.
+    assert _recorded(pin)["argv"] == ["--global", "exec", "--", stem, "--version"], (
+        "`--global` takes no value token"
     )
 
 
 @windows_only
 def test_item38_the_committed_blob_strips_ocx_global_and_ocx_project_before_the_spawn(
-    tmp_path: Path,
+    tmp_path: Path, recorder_exe: Path
 ) -> None:
     """Item 38 / C-033 on Windows: the shim deletes both tier selectors.
 
@@ -1199,9 +1367,9 @@ def test_item38_the_committed_blob_strips_ocx_global_and_ocx_project_before_the_
 
     RED: delete the two ``SetEnvironmentVariableW`` calls in
     ``crates/ocx_shim/src/main.rs``, or narrow ``core::strips_tier_selectors``
-    away from the ``.exec`` sidecar. Neither can be run against the *committed*
+    away from the ``toolchain`` record. Neither can be run against the *committed*
     blob without re-cutting it, so the RED is shown instead by
-    :func:`test_v20_a_shimref_sidecar_does_not_strip_the_tier_selectors`: the
+    :func:`test_v20_a_deferred_record_does_not_strip_the_tier_selectors`: the
     same blob, the same recorder, the same assertions, over the sidecar
     ``strips_tier_selectors`` answers ``false`` for — which is byte-for-byte
     the output a shim with those two calls deleted would produce here.
@@ -1210,8 +1378,7 @@ def test_item38_the_committed_blob_strips_ocx_global_and_ocx_project_before_the_
     root = tmp_path / "project"
     root.mkdir()
     exe = _install_trampoline_slot(tmp_path / "bin", stem, str(root))
-    log = tmp_path / "argv.txt"
-    pin = _pin_recorder(tmp_path / "fake_ocx", log, echo_env=True)
+    pin = _pin_recorder(recorder_exe, tmp_path / "fake_ocx")
 
     result = _dispatch(
         exe,
@@ -1227,28 +1394,22 @@ def test_item38_the_committed_blob_strips_ocx_global_and_ocx_project_before_the_
     assert result.returncode == EXIT_SUCCESS, (
         f"the pinned recorder must run; rc={result.returncode} stderr={result.stderr!r}"
     )
-    recorded = log.read_text(encoding="utf-8")
-    assert "OCX_BINARY_PIN=" in recorded, (
-        f"the SET OCX_ dump must have run and must show a defined OCX_* name, "
-        f"or the two absences below prove nothing; got {recorded!r}"
+    seen = _recorded(pin)["env"]
+    assert "OCX_BINARY_PIN" in seen, (
+        f"the recorder's environment dump must show a live OCX_* name, or the two absences below prove nothing; got {seen!r}"
     )
-    assert "OCX_GLOBAL=" not in recorded, (
-        f"OCX_GLOBAL must be deleted, not emptied, from the child's block; got {recorded!r}"
-    )
-    assert "OCX_PROJECT=" not in recorded, (
-        f"OCX_PROJECT must be deleted, not emptied, from the child's block; got {recorded!r}"
-    )
-    assert "leaked" not in recorded, (
-        f"an exported selector must not reach the child; got {recorded!r}"
-    )
+    assert "OCX_GLOBAL" not in seen, f"OCX_GLOBAL must be deleted, not emptied; got {seen!r}"
+    assert "OCX_PROJECT" not in seen, f"OCX_PROJECT must be deleted, not emptied; got {seen!r}"
 
 
 @windows_only
-def test_v20_a_shimref_sidecar_does_not_strip_the_tier_selectors(tmp_path: Path) -> None:
+def test_v20_a_deferred_record_does_not_strip_the_tier_selectors(
+    tmp_path: Path, recorder_exe: Path
+) -> None:
     """RUL-14 / D-V20 on the committed blob — and the RED for the case above.
 
-    ``core::strips_tier_selectors`` is true for ``.exec`` and **only** for
-    ``.exec``: the two positional grammars bake no tier selector, so they have
+    The launcher removes the tier selectors for the ``toolchain`` kind and **only**
+    for it: the ``package`` and ``deferred`` kinds bake no tier selector, so they have
     nothing to shadow, and deleting there would change what ``launcher shim``
     resolves for a caller who deliberately exported a tier.
 
@@ -1267,9 +1428,8 @@ def test_v20_a_shimref_sidecar_does_not_strip_the_tier_selectors(tmp_path: Path)
     """
     stem = "deferred"
     identifier = "example.test/pkg@sha256:" + "0" * 64
-    exe = _install_shimref_slot(tmp_path / "bin", stem, identifier)
-    log = tmp_path / "argv.txt"
-    pin = _pin_recorder(tmp_path / "fake_ocx", log, echo_env=True)
+    exe = _install_deferred_slot(tmp_path / "bin", stem, identifier)
+    pin = _pin_recorder(recorder_exe, tmp_path / "fake_ocx")
 
     result = _dispatch(
         exe,
@@ -1285,20 +1445,22 @@ def test_v20_a_shimref_sidecar_does_not_strip_the_tier_selectors(tmp_path: Path)
     assert result.returncode == EXIT_SUCCESS, (
         f"the pinned recorder must run; rc={result.returncode} stderr={result.stderr!r}"
     )
-    recorded = log.read_text(encoding="utf-8")
-    assert "launcher shim" in recorded, (
-        f"the dispatch must have taken the .shimref route, not another grammar; got {recorded!r}"
+    recorded = _recorded(pin)
+    assert recorded["argv"][:2] == ["launcher", "shim"], (
+        f"the dispatch must have taken the deferred record route; got {recorded['argv']!r}"
     )
-    assert "OCX_GLOBAL=leaked-global" in recorded, (
-        f"a .shimref dispatch must pass an exported OCX_GLOBAL through untouched; got {recorded!r}"
+    assert recorded["env"].get("OCX_GLOBAL") == "leaked-global", (
+        "a deferred dispatch must pass an exported OCX_GLOBAL through untouched"
     )
-    assert "OCX_PROJECT=C:\\leaked\\project" in recorded, (
-        f"a .shimref dispatch must pass an exported OCX_PROJECT through untouched; got {recorded!r}"
+    assert recorded["env"].get("OCX_PROJECT") == r"C:\leaked\project", (
+        "a deferred dispatch must pass an exported OCX_PROJECT through untouched"
     )
 
 
 @windows_only
-def test_v9_a_co_resident_ocx_exe_cannot_capture_a_trampoline_spawn(tmp_path: Path) -> None:
+def test_v9_a_co_resident_ocx_exe_cannot_capture_a_trampoline_spawn(
+    tmp_path: Path, recorder_exe: Path
+) -> None:
     """V-9: a trampoline spawns the **baked** ocx, never ``bin\\ocx.exe``.
 
     ``CreateProcessW`` with a NULL ``lpApplicationName`` begins its search at
@@ -1306,7 +1468,7 @@ def test_v9_a_co_resident_ocx_exe_cannot_capture_a_trampoline_spawn(tmp_path: Pa
     itself — before the working directory, the system directories or ``PATH``.
     A package claiming the name ``ocx`` is admitted by design (item 16 / ADR
     D-4 removed ``ShimNameShadowsOcx``), and ``ocx pull`` then renders
-    ``bin\\ocx.exe`` + ``bin\\ocx.exec`` beside every other trampoline. With no
+    ``bin\\ocx.exe`` + ``bin\\ocx.launch`` beside every other trampoline. With no
     baked program every one of them resolves the literal ``ocx`` to that
     co-resident sibling — unbounded re-entry, and PATH-independent, so C-010's
     ambient-``PATH`` exclusion and C-069's trampoline refusal (both inside a
@@ -1314,7 +1476,7 @@ def test_v9_a_co_resident_ocx_exe_cannot_capture_a_trampoline_spawn(tmp_path: Pa
 
     POSIX has had the narrowing from the start — ``unix_trampoline_body`` bakes
     ``__ocx_binary`` as an absolute path. This is its Windows half: the
-    ``.exec`` sidecar's second line, passed as an explicit
+    ``toolchain`` record's ``ocx`` key, passed as an explicit
     ``lpApplicationName`` so no search happens at all.
 
     The layout is the failing one verbatim: ``tcbin`` and ``ocx`` are both
@@ -1336,10 +1498,9 @@ def test_v9_a_co_resident_ocx_exe_cannot_capture_a_trampoline_spawn(tmp_path: Pa
     decoy_root = tmp_path / "decoy-project"
     decoy_root.mkdir()
 
-    baked_log = tmp_path / "baked-argv.txt"
-    decoy_log = tmp_path / "decoy-argv.txt"
-    baked = _pin_recorder(tmp_path / "real_ocx", baked_log)
-    decoy = _pin_recorder(tmp_path / "decoy_ocx", decoy_log)
+    baked = _pin_recorder(recorder_exe, tmp_path / "real_ocx")
+    decoy = _pin_recorder(recorder_exe, tmp_path / "decoy_ocx")
+    baked_log, decoy_log = baked.with_suffix(".log"), decoy.with_suffix(".log")
 
     bin_dir = tmp_path / "bin"
     exe = _install_trampoline_slot(bin_dir, "tcbin", str(root), baked_ocx=baked)
@@ -1359,14 +1520,15 @@ def test_v9_a_co_resident_ocx_exe_cannot_capture_a_trampoline_spawn(tmp_path: Pa
         "the co-resident bin\\ocx.exe captured the spawn — R-W12's self-resolution loop: "
         f"{decoy_log.read_text(encoding='utf-8')!r}"
     )
-    recorded = baked_log.read_text(encoding="utf-8").strip()
-    assert re.search(rf'--project\s+"?{re.escape(str(root))}"?\s+exec\s+--\s+"?tcbin"?\s+--version', recorded), (
-        f"and it is still C-032's wire line, unchanged by the second sidecar line; got {recorded!r}"
+    assert _recorded(baked)["argv"] == ["--project", str(root), "exec", "--", "tcbin", "--version"], (
+        "and it is still C-032's wire line, unchanged by the baked key"
     )
 
 
 @windows_only
-def test_v9_a_one_line_exec_sidecar_still_dispatches(tmp_path: Path) -> None:
+def test_v9_a_toolchain_record_without_ocx_still_dispatches(
+    tmp_path: Path, recorder_exe: Path
+) -> None:
     """The degraded arm stays valid: a sidecar with no baked line still runs.
 
     The positive control for the row above. Without it a reader could satisfy
@@ -1384,12 +1546,11 @@ def test_v9_a_one_line_exec_sidecar_still_dispatches(tmp_path: Path) -> None:
     root = tmp_path / "project"
     root.mkdir()
     exe = _install_trampoline_slot(tmp_path / "bin", "onlyline", str(root))
-    log = tmp_path / "argv.txt"
-    pin = _pin_recorder(tmp_path / "fake_ocx", log)
+    pin = _pin_recorder(recorder_exe, tmp_path / "fake_ocx")
 
     result = _dispatch(exe, env={**os.environ, "OCX_BINARY_PIN": str(pin)}, cwd=tmp_path)
 
     assert result.returncode == EXIT_SUCCESS, (
         f"a one-line sidecar is still the frozen grammar; rc={result.returncode} stderr={result.stderr!r}"
     )
-    assert log.is_file(), f"the pinned recorder must run; stderr={result.stderr!r}"
+    assert pin.with_suffix(".log").is_file(), f"the pinned recorder must run; stderr={result.stderr!r}"

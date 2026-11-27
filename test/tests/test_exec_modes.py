@@ -363,7 +363,7 @@ def test_entrypoint_mirror_consumer_default_skips_redundant_bin(
     """Entrypoint mirror with PATH=default-private: consumer access via synth/.
 
     Under `--mode=consumer`, raw `${installPath}/bin` is absent (PATH default
-    private filters it out); binary accessible via synth `entrypoints/`.
+    private filters it out); binary accessible via synth `launchers/<G>`.
     Under `--mode=self`, raw bin/ is present (recursion-safe launcher
     self-invocation). Validates the post-research-flip redundancy elimination.
     """
@@ -379,12 +379,12 @@ def test_entrypoint_mirror_consumer_default_skips_redundant_bin(
     consumer_path_values = [
         e["value"] for e in env_consumer.get("items", []) if e["key"] == "PATH"
     ]
-    has_synth_consumer = any("entrypoints" in v for v in consumer_path_values)
+    has_synth_consumer = any("launchers" in v for v in consumer_path_values)
     has_raw_bin_consumer = any(
         v.endswith(("/bin", "\\bin")) for v in consumer_path_values
     )
     assert has_synth_consumer, (
-        f"Consumer must have synth entrypoints/ in PATH; values: {consumer_path_values}"
+        f"Consumer must have synth launchers/<G> in PATH; values: {consumer_path_values}"
     )
     assert not has_raw_bin_consumer, (
         f"Consumer must NOT have raw bin/ in PATH (default-private hides it); "

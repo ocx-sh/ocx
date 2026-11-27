@@ -3,7 +3,7 @@
 """Acceptance tests for lazy package loading (issue #302).
 
 A tool whose `lazy-mode` resolves to `always` is **deferred**: it reaches
-`PATH` as a directory of generated launchers under `$OCX_HOME/shims/` and its
+`PATH` as a directory of generated launchers under `$OCX_HOME/deferred/` and its
 content materializes on the first invocation of one of its declared names.
 
 Two families live here, both from `adr_lazy_package_loading.md`:
@@ -20,8 +20,8 @@ Two techniques recur:
 - **Shell-free.** Where nothing has to actually run, the assertion reads
   `ocx --format json env` and compares a `PATH` entry against the shim `bin/`
   path derived from the store layout. No shell, no PATH resolution of ours.
-- **`OCX_BINARY_PIN` as the observation point.** A generated launcher execs
-  `"${OCX_BINARY_PIN:-ocx}" launcher shim …`. Pointing that variable at a
+- **`OCX_BINARY_PIN` as the observation point.** A deferred launcher starts
+  the pinned `ocx` (`ocx launcher shim …`) before any `PATH` search. Pointing that variable at a
   wrapper script makes every shim (and entry-point launcher) re-entry an
   observable, appended log line — which is how S-004 proves the shim was *not*
   entered a second time without measuring time.
@@ -46,11 +46,16 @@ import pytest
 
 from src import OcxRunner, PackageInfo
 from src.helpers import (
-    assert_shim_dir_absent,
-    assert_shim_dir_exists,
     make_package,
     make_package_with_entrypoints,
     write_ocx_toml,
+)
+from src.launcher_fixtures import (
+    DEPTH_VAR,
+    launcher_env,
+    run_launcher,
+    stub_calls,
+    write_stub_ocx,
 )
 from src.shell_eval import run_after_sourcing
 from src.terminal import requires_pty, run_on_a_terminal
@@ -77,6 +82,30 @@ PUBLIC_BIN_PATH = [
 # ---------------------------------------------------------------------------
 # Helpers (DAMP — descriptive and meaningful, co-located with the tests)
 # ---------------------------------------------------------------------------
+
+
+def _deferred_launcher_dirs(ocx: OcxRunner, repo: str) -> list[Path]:
+    """Every `$OCX_HOME/deferred/<G>/<reg>/<repo>/<alg>/<2>/<30>/l` directory of `repo` (C-106, § 4.3)."""
+    root = ocx.ocx_home / "deferred"
+    return sorted(path for path in root.glob(f"*/*/{repo}/*/*/*/l") if path.is_dir())
+
+
+def assert_shim_dir_exists(ocx: OcxRunner, repo: str, why: str) -> Path:
+    """Assert `repo` owns exactly one deferred launcher directory, and return it."""
+    found = _deferred_launcher_dirs(ocx, repo)
+    assert len(found) == 1, (
+        f"{why}: expected exactly one `deferred/<G>/…/l` for {repo} under "
+        f"{ocx.ocx_home / 'deferred'}; found {[str(p) for p in found]}"
+    )
+    return found[0]
+
+
+def assert_shim_dir_absent(ocx: OcxRunner, repo: str, why: str) -> None:
+    """Assert `repo` owns no deferred launcher directory."""
+    found = _deferred_launcher_dirs(ocx, repo)
+    assert found == [], (
+        f"{why}: {repo} must own no `deferred/…/l`; found {[str(p) for p in found]}"
+    )
 
 
 def _run(
@@ -291,7 +320,7 @@ def test_s001_lazy_mode_always_puts_a_shim_dir_on_path_with_no_content(
 
     assert _path_values(lazy)[0] == str(shim_bin), (
         f"S-001: the shim `bin/` must be the first PATH entry emitted (last to "
-        f"resolve, so the real bin/ and entrypoints/ shadow it once they exist); "
+        f"resolve, so the real bin/ and launchers shadow it once they exist); "
         f"got {_path_values(lazy)}"
     )
     assert not _is_materialized(ocx, project, pkg), (
@@ -640,6 +669,88 @@ def test_s004_a_second_invocation_of_the_same_name_does_not_re_enter_the_shim(
 
 
 # ---------------------------------------------------------------------------
+# C-106 / C-107 — the deferred launcher is a `deferred` record plus a native launcher
+# ---------------------------------------------------------------------------
+
+
+def test_deferred_launcher_is_published_with_a_deferred_record(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """C-106 / § 4.3: `deferred/<G>/…/l/NAME` sits beside `NAME.launch` of kind `deferred` naming the pinned identifier."""
+    pkg = make_package(
+        ocx,
+        unique_repo,
+        "1.0.0",
+        tmp_path,
+        bins=["hello"],
+        binaries=["hello"],
+        env=PUBLIC_BIN_PATH,
+    )
+    project = _lazy_project(ocx, tmp_path, _toolchain_lazy(pkg))
+    _env_json(ocx, project)
+    launcher_dir = assert_shim_dir_exists(
+        ocx, pkg.repo, "the compose deferred the tool"
+    )
+
+    record = json.loads((launcher_dir / "hello.launch").read_text(encoding="utf-8"))
+
+    assert record == {
+        "kind": "deferred",
+        "schema_version": 1,
+        "identifier": _pinned(ocx, project, pkg),
+    }
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the stub ocx is a /bin/sh script")
+def test_deferred_launcher_builds_the_frozen_argv_and_keeps_the_tier_selectors(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """V-L07 / C-107: `ocx launcher shim <identifier> -- NAME args…`, depth +1, OCX_GLOBAL and OCX_PROJECT untouched."""
+    pkg = make_package(
+        ocx,
+        unique_repo,
+        "1.0.0",
+        tmp_path,
+        bins=["hello"],
+        binaries=["hello"],
+        env=PUBLIC_BIN_PATH,
+    )
+    project = _lazy_project(ocx, tmp_path, _toolchain_lazy(pkg))
+    _env_json(ocx, project)
+    launcher_dir = assert_shim_dir_exists(
+        ocx, pkg.repo, "the compose deferred the tool"
+    )
+    stub, log = write_stub_ocx(tmp_path / "stub")
+
+    result = run_launcher(
+        launcher_dir / "hello",
+        "a",
+        "b c",
+        env=launcher_env(
+            ocx,
+            OCX_BINARY_PIN=str(stub),
+            OCX_GLOBAL="1",
+            OCX_PROJECT=str(project),
+            **{DEPTH_VAR: "2"},
+        ),
+    )
+
+    assert result.returncode == 0, result.stderr
+    (call,) = stub_calls(log)
+    assert call["argv"] == [
+        "launcher",
+        "shim",
+        _pinned(ocx, project, pkg),
+        "--",
+        "hello",
+        "a",
+        "b c",
+    ]
+    assert call["depth"] == "3"
+    assert (call["global"], call["project"]) == ("1", str(project))
+
+
+# ---------------------------------------------------------------------------
 # S-005 — `ocx env` twice, cold store then warm
 # ---------------------------------------------------------------------------
 
@@ -736,7 +847,7 @@ def test_s007_which_answers_all_four_policy_and_state_cells(
     | `--lazy-mode always` | materialized | the package root — content outranks a shim |
 
     `kind` is the discriminator, so each cell asserts it rather than
-    pattern-matching the path string: a `path` under `shims/` and a `kind` of
+    pattern-matching the path string: a `path` under `deferred/` and a `kind` of
     `package` would be a contradiction the string check alone would miss.
     """
     pkg = make_package(
@@ -896,11 +1007,8 @@ def test_s013_lazy_mode_always_defers_on_every_host(
 
     What is still host-specific is the *shape* of a slot, and that is what the
     Windows clause below pins: `write_windows_shim_slot` hardlinks `<name>.exe`
-    from the committed blob and writes a `<name>.shimref` sidecar beside the
-    extensionless `#!/bin/sh` body. Never `<name>.shim` — that extension names
-    an installed package's `entrypoints/` sidecar, and `materialize_lazy`'s
-    dispatch probes `shim` before `shimref`, so one stray `.shim` in a shim
-    tree's `bin/` would be read by the wrong reader.
+    from the committed blob and writes a `<name>.launch` record beside it. The
+    retired `.shim` and `.shimref` sidecars are never written.
     """
     pkg = make_package(
         ocx, unique_repo, "1.0.0", tmp_path, bins=["hello"], binaries=["hello"], env=PUBLIC_BIN_PATH
@@ -919,13 +1027,12 @@ def test_s013_lazy_mode_always_defers_on_every_host(
 
     if sys.platform == "win32":
         present = sorted(entry.name for entry in shim_bin.iterdir())
-        assert {"hello.exe", "hello.shimref"} <= set(present), (
-            f"S-013: the Windows slot is the shim `.exe` plus its `.shimref` sidecar; "
+        assert {"hello.exe", "hello.launch"} <= set(present), (
+            f"S-013: the Windows slot is the launcher `.exe` plus its `.launch` record; "
             f"{shim_bin} holds {present}"
         )
-        assert "hello.shim" not in present, (
-            f"S-013: `.shim` names an installed package's entrypoint sidecar, never a shim "
-            f"tree's — the dispatch probes it first and would read the wrong one; got {present}"
+        assert not {"hello.shim", "hello.shimref"} & set(present), (
+            f"S-013: the retired sidecars are never written; got {present}"
         )
 
 
