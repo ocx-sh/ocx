@@ -7,7 +7,7 @@ use clap::Parser;
 
 use crate::api;
 
-/// Remove unreferenced objects, stale temp directories and the launcher directories of other ocx builds.
+/// Remove unreferenced objects, stale temp directories and the launcher directories of other OCX builds.
 ///
 /// An object is unreferenced when its `refs/` directory is empty or absent, as
 /// after `ocx uninstall` without `--purge`. A temp directory is stale when no
