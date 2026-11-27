@@ -109,6 +109,15 @@ Recorded decisions, second run:
   wrapper written blind in the fix pass? Research and decision: delegated to a fix worker with the job log. Its
   fix is part of outer cycle 1.
 
+- **What counts as a gate inside a fix pass (2026-11-27).** Question: the Windows code of this pass (batch
+  wrapper, test fixes) was written on Linux and has never run. Is every red CI run on it a new outer cycle?
+  Research: I5 names two gates, the integration gate beside a review and the release gate. § Loop shape counts a
+  red gate's fix pass. A run inside an open fix pass, before the head goes to the delta review, is neither.
+  Decision: inside outer cycle 1 each repository gets at most one probe run for code that never ran on its
+  platform. rules_ocx used its probe (run 45983140296, red on Windows, fixed in the same pass). The next deep run
+  of each repository is the integration gate beside the delta review, and a red there opens outer cycle 2. The
+  owner may read this more strictly; the DONE block names it.
+
 ## Loop shape
 
 - Entry point: Run the /hex-architect skill on .agents/goals/bazel-rbe-rules-ocx.md.
