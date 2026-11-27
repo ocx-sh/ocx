@@ -9,9 +9,7 @@ use std::time::{Duration, SystemTime};
 
 use ocx_env_apply::windows_path::{SegmentViolation, check_segment};
 use ocx_oci::Digest;
-use ocx_oci::cas_path::{CAS_SHARD_PREFIX_LEN, CAS_SHARD_TOTAL_LEN};
 use ocx_util::error::FileError;
-use ocx_util::prelude::*;
 
 /// 1980-01-01T00:00:00Z: the mtime of every directory under `DIR`, the earliest a zip can store.
 const NORMALISED_MTIME_SECS: u64 = 315_532_800;
@@ -79,27 +77,6 @@ impl VendorLayout {
     /// `DIR/manifest.json`.
     pub fn manifest_file(&self) -> PathBuf {
         self.root.join("manifest.json")
-    }
-
-    /// `packages/<registry slug>/<algorithm>/<2 hex>/<30 hex>`.
-    pub fn legacy_relative_package_dir(registry: &str, digest: &Digest) -> String {
-        let (algorithm, hex) = digest.parts();
-        format!(
-            "packages/{}/{algorithm}/{}/{}",
-            registry.to_relaxed_slug(),
-            &hex[..CAS_SHARD_PREFIX_LEN],
-            &hex[CAS_SHARD_PREFIX_LEN..CAS_SHARD_TOTAL_LEN]
-        )
-    }
-
-    /// `<package_dir>/content`.
-    pub fn legacy_relative_content_dir(registry: &str, digest: &Digest) -> String {
-        format!("{}/content", Self::legacy_relative_package_dir(registry, digest))
-    }
-
-    /// `selections/<id>/shells/default/bin`.
-    pub fn legacy_relative_launcher_dir(selection: &str) -> String {
-        format!("selections/{selection}/shells/default/bin")
     }
 
     /// `l/<name>.launch`: the record beside a selection launcher.
@@ -540,38 +517,6 @@ mod tests {
         assert_eq!(
             VendorLayout::relative_entrypoint_record(&key, "npm"),
             "p/1f2e3d4c5b6a7988/e/npm.launch"
-        );
-    }
-
-    #[test]
-    fn package_dir_is_registry_algorithm_shard() {
-        assert_eq!(
-            VendorLayout::legacy_relative_package_dir("ocx.sh", &digest()),
-            "packages/ocx.sh/sha256/1f/2e3d4c5b6a79881f2e3d4c5b6a7988"
-        );
-    }
-
-    #[test]
-    fn package_dir_slugs_a_registry_with_a_port() {
-        assert_eq!(
-            VendorLayout::legacy_relative_package_dir("localhost:5000", &digest()),
-            "packages/localhost_5000/sha256/1f/2e3d4c5b6a79881f2e3d4c5b6a7988"
-        );
-    }
-
-    #[test]
-    fn content_dir_sits_under_package_dir() {
-        assert_eq!(
-            VendorLayout::legacy_relative_content_dir("ocx.sh", &digest()),
-            "packages/ocx.sh/sha256/1f/2e3d4c5b6a79881f2e3d4c5b6a7988/content"
-        );
-    }
-
-    #[test]
-    fn launcher_dir_is_the_default_shell_bin() {
-        assert_eq!(
-            VendorLayout::legacy_relative_launcher_dir("default"),
-            "selections/default/shells/default/bin"
         );
     }
 

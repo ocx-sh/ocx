@@ -178,6 +178,8 @@ async fn ensure_output_is_free(output: &Path) -> Result<(), VendorError> {
 #[derive(Debug)]
 struct Selection {
     closures: ClosureSet,
+    /// The vendored name of every package of the run, built once so every path writer agrees.
+    keys: BTreeMap<Digest, PackageKey>,
     /// The platforms on which every root has a leaf, computed before any leaf was chosen.
     available_platforms: Vec<String>,
 }
@@ -252,8 +254,10 @@ async fn select(manager: &PackageManager, request: &VendorRequest) -> Result<Sel
     };
     let closures = read_closures(manager, picked, &request.platform).await?;
     verify_selection(manager, &closures).await?;
+    let keys = package_keys_of(&closures.surface)?;
     Ok(Selection {
         closures,
+        keys,
         available_platforms,
     })
 }
@@ -445,8 +449,8 @@ async fn build_manifest(
     let roots = compose_roots_of(manager, closures).await?;
     check_declared_values(&roots, closures)?;
     let forbidden = host_paths(manager, &request.output);
-    let keys = package_keys_of(&closures.surface)?;
-    let selection_items = environment_items(manager, &roots, false, platform, &forbidden, &keys).await?;
+    let keys = &selection.keys;
+    let selection_items = environment_items(manager, &roots, false, platform, &forbidden, keys).await?;
 
     // Every package once, keyed by digest, which is also the order the manifest lists them in.
     let mut nodes: BTreeMap<String, &ClosureNode> = BTreeMap::new();
@@ -461,9 +465,9 @@ async fn build_manifest(
     let mut packages = Vec::with_capacity(nodes.len());
     let mut entrypoint_environments = Vec::new();
     for (digest, node) in &nodes {
-        let layout_digest = node.identifier.digest();
-        let package_dir = VendorLayout::legacy_relative_package_dir(node.identifier.registry(), &layout_digest);
-        let content_dir = VendorLayout::legacy_relative_content_dir(node.identifier.registry(), &layout_digest);
+        let key = key_of(keys, &node.identifier.digest())?;
+        let package_dir = VendorLayout::relative_package_dir(key);
+        let content_dir = VendorLayout::relative_content_dir(key);
 
         let mut dependencies: Vec<String> = node
             .dependencies
@@ -487,12 +491,10 @@ async fn build_manifest(
         if !names.is_empty() {
             let own = entrypoint_root(manager, &roots, node, platform).await?;
             let items =
-                environment_items(manager, std::slice::from_ref(&own), true, platform, &forbidden, &keys).await?;
+                environment_items(manager, std::slice::from_ref(&own), true, platform, &forbidden, keys).await?;
             for name in names {
-                let launcher_path = checked_path(
-                    format!("{package_dir}/entrypoints/{name}{}", exe_suffix(windows)),
-                    windows,
-                )?;
+                let launcher_path =
+                    checked_path(VendorLayout::relative_entrypoint_launcher(key, name, windows), windows)?;
                 let id = format!("entrypoint:{digest}:{name}");
                 entrypoints.push(EntryPoint {
                     name: name.to_owned(),
@@ -526,7 +528,6 @@ async fn build_manifest(
     }
     entrypoint_environments.sort_by(|a, b| a.id.cmp(&b.id));
 
-    let launcher_dir = VendorLayout::legacy_relative_launcher_dir(SELECTION_ID);
     let mut exposed = exposed_names(&closures.surface, NotEnumerablePolicy::Skip).map_err(crate::Error::from)?;
     // Windows and macOS default to case-folding filesystems: two names differing by case would share one launcher file.
     if folds_case(platform) {
@@ -550,7 +551,7 @@ async fn build_manifest(
         let (kind, target_path) = if is_entrypoint {
             (
                 ToolKind::Entrypoint,
-                format!("{}/entrypoints/{name}{}", package.package_dir, exe_suffix(windows)),
+                VendorLayout::relative_entrypoint_launcher(key_of(keys, &owner.tool.digest())?, name, windows),
             )
         } else {
             let directory = metadata_of(&roots, &owner.tool)
@@ -570,7 +571,7 @@ async fn build_manifest(
             environment: SELECTION_ENVIRONMENT.to_owned(),
             target_path: checked_path(target_path, windows)?,
             launcher_path: launchers
-                .then(|| checked_path(format!("{launcher_dir}/{name}{}", exe_suffix(windows)), windows))
+                .then(|| checked_path(VendorLayout::relative_launcher(name, windows), windows))
                 .transpose()?,
             record_path: None,
         });
@@ -612,7 +613,7 @@ async fn build_manifest(
                 .map(|root| root.pinned.digest().to_string())
                 .collect(),
             environment: SELECTION_ENVIRONMENT.to_owned(),
-            launcher_dir,
+            launcher_dir: VendorLayout::relative_launcher_dir().to_owned(),
         }],
         tools,
         index_lookups: None,
@@ -768,6 +769,13 @@ fn package_keys_of(surface: &[ClosureNode]) -> Result<BTreeMap<Digest, PackageKe
             "packages {} and {} share one vendored directory name",
             clash.first, clash.second
         ),
+    })
+}
+
+/// `digest`'s vendored name; every package of the surface has one.
+fn key_of<'a>(keys: &'a BTreeMap<Digest, PackageKey>, digest: &Digest) -> Result<&'a PackageKey, VendorError> {
+    keys.get(digest).ok_or_else(|| VendorError::PathUnrepresentable {
+        path: format!("package {digest} has no vendored directory name"),
     })
 }
 
@@ -948,8 +956,19 @@ async fn write_content(
         nodes.entry(node.identifier.digest().to_string()).or_insert(node);
     }
     let placed: Vec<PlacedPackage> = futures::stream::iter(nodes)
-        .map(|(digest, node)| place_package(manager, platform, &layout, groups.clone(), digest, node))
-        .buffer_unordered(PULL_CONCURRENCY)
+        .map(|(digest, node)| {
+            let key = key_of(&selection.keys, &node.identifier.digest())?;
+            Ok::<_, VendorError>(place_package(
+                manager,
+                platform,
+                &layout,
+                groups.clone(),
+                digest,
+                node,
+                key,
+            ))
+        })
+        .try_buffer_unordered(PULL_CONCURRENCY)
         .try_collect()
         .await?;
 
@@ -1023,6 +1042,7 @@ async fn place_package(
     groups: SetupGroups,
     digest: String,
     node: &ClosureNode,
+    key: &PackageKey,
 ) -> Result<PlacedPackage, VendorError> {
     let requested: PackageRef = node.identifier.clone().into();
     let pull_failed = |kind| {
@@ -1036,12 +1056,11 @@ async fn place_package(
         .await
         .map_err(&pull_failed)?;
     let pinned = resolved.pinned.clone();
-    let target = VendorTarget::new(layout, &node.identifier);
+    let target = VendorTarget::new(layout, key);
     let info = setup_vendored(manager, &pinned, resolved, platform.clone(), groups, &target, None)
         .await
         .map_err(&pull_failed)?;
-    let content_dir = VendorLayout::legacy_relative_content_dir(node.identifier.registry(), &node.identifier.digest());
-    let tree = list_tree(layout, &content_dir, is_windows(platform)).await?;
+    let tree = list_tree(layout, &VendorLayout::relative_content_dir(key), is_windows(platform)).await?;
     Ok(PlacedPackage {
         digest,
         tree,
@@ -1049,7 +1068,7 @@ async fn place_package(
     })
 }
 
-/// Each package's own launchers under `<package_dir>/entrypoints/`, started with the package's private environment.
+/// Each package's own launchers under `<package_dir>/e/`, started with the package's private environment.
 async fn write_entrypoint_launchers(
     layout: &VendorLayout,
     manifest: &VendorManifest,
@@ -1111,7 +1130,15 @@ async fn write_entrypoint_launchers(
                 ),
             );
         }
-        let dir = layout.resolve(&format!("{}/entrypoints", package.package_dir));
+        // Every launcher of a package sits in one directory, so the first one's parent is it.
+        let dir = package
+            .entrypoints
+            .first()
+            .and_then(|entry| entry.launcher_path.rsplit_once('/'))
+            .map(|(directory, _)| layout.resolve(directory))
+            .ok_or_else(|| VendorError::PathUnrepresentable {
+                path: format!("package {} lists no entry-point launcher", package.digest),
+            })?;
         crate::launcher::generate_direct(entries, &dir, blob, windows, &|name| {
             sidecars
                 .get(name)
@@ -1132,43 +1159,41 @@ async fn write_selection_launchers(
     blob: &[u8],
     windows: bool,
 ) -> Result<(), VendorError> {
-    // `manifest.tools` is the folded `exposed_names` answer, grouped by selection for the shared writer.
-    let mut by_selection: BTreeMap<&str, Vec<&Tool>> = BTreeMap::new();
-    for tool in manifest.tools.iter().filter(|tool| tool.launcher_path.is_some()) {
-        by_selection.entry(&tool.selection).or_default().push(tool);
+    // `manifest.tools` is the folded `exposed_names` answer; v1 has one selection, so one `l/`.
+    let tools: Vec<&Tool> = manifest
+        .tools
+        .iter()
+        .filter(|tool| tool.launcher_path.is_some())
+        .collect();
+    let mut sidecars: HashMap<&str, DirectRecord> = HashMap::new();
+    for tool in &tools {
+        let Some(launcher_path) = &tool.launcher_path else {
+            continue;
+        };
+        let environment = environment_of(manifest, &tool.environment)?;
+        sidecars.insert(
+            &tool.name,
+            sidecar_of(
+                &manifest.vendor_id,
+                launcher_path,
+                windows,
+                format!("{DIR_TOKEN}/{}", tool.target_path),
+                Vec::new(),
+                &environment.items,
+            ),
+        );
     }
-    for (selection, tools) in by_selection {
-        let mut sidecars: HashMap<&str, DirectRecord> = HashMap::new();
-        for tool in &tools {
-            let Some(launcher_path) = &tool.launcher_path else {
-                continue;
-            };
-            let environment = environment_of(manifest, &tool.environment)?;
-            sidecars.insert(
-                &tool.name,
-                sidecar_of(
-                    &manifest.vendor_id,
-                    launcher_path,
-                    windows,
-                    format!("{DIR_TOKEN}/{}", tool.target_path),
-                    Vec::new(),
-                    &environment.items,
-                ),
-            );
-        }
-        let names: Vec<&str> = tools.iter().map(|tool| tool.name.as_str()).collect();
-        let dir = layout.resolve(&VendorLayout::legacy_relative_launcher_dir(selection));
-        super::render_toolchain::render_direct_bin(&dir, &names, blob, windows, &|name| {
-            sidecars
-                .get(name)
-                .cloned()
-                .ok_or_else(|| VendorError::ValueUnrepresentable {
-                    reason: format!("the manifest lists no launcher for tool '{name}'"),
-                })
-        })
-        .await?;
-    }
-    Ok(())
+    let names: Vec<&str> = tools.iter().map(|tool| tool.name.as_str()).collect();
+    let dir = layout.resolve(VendorLayout::relative_launcher_dir());
+    super::render_toolchain::render_direct_bin(&dir, &names, blob, windows, &|name| {
+        sidecars
+            .get(name)
+            .cloned()
+            .ok_or_else(|| VendorError::ValueUnrepresentable {
+                reason: format!("the manifest lists no launcher for tool '{name}'"),
+            })
+    })
+    .await
 }
 
 fn environment_of<'a>(manifest: &'a VendorManifest, id: &str) -> Result<&'a Environment, VendorError> {
@@ -2239,6 +2264,45 @@ mod tests {
         (selection, manifest)
     }
 
+    fn closure_node(digest: &Digest) -> ClosureNode {
+        ClosureNode {
+            identifier: PinnedPackageRef::try_from(
+                PackageRef::new_registry(REGISTRY, "tool").clone_with_digest(digest.clone()),
+            )
+            .expect("pinned identifier"),
+            config_digest: digest.clone(),
+            effective_visibility: None,
+            binaries: None,
+            entrypoints: Vec::new(),
+            env: Vec::new(),
+            integrations: Vec::new(),
+            dependencies: Vec::new(),
+            is_root: true,
+        }
+    }
+
+    /// Two digests sharing their first 16 hex characters are refused as `vendor_path_unrepresentable`, naming both.
+    #[test]
+    fn two_packages_sharing_a_directory_name_are_unrepresentable_naming_both_digests() {
+        let first = Digest::Sha256(format!("{}{}", "ab".repeat(8), "0".repeat(48)));
+        let second = Digest::Sha256(format!("{}{}", "ab".repeat(8), "1".repeat(48)));
+
+        let error = package_keys_of(&[closure_node(&first), closure_node(&second)]).expect_err("a shared name");
+
+        let VendorError::PathUnrepresentable { path } = &error else {
+            panic!("{error:?}");
+        };
+        assert!(
+            path.contains(&first.to_string()) && path.contains(&second.to_string()),
+            "{path}"
+        );
+        assert_eq!(error.classify(), Some(ExitCode::DataError));
+    }
+
+    fn package_key(digest: &Digest) -> PackageKey {
+        VendorLayout::package_keys([digest]).expect("one key")[digest].clone()
+    }
+
     fn items(manifest: &VendorManifest, id: &str) -> Vec<(String, String)> {
         let environment = manifest.environments.iter().find(|e| e.id == id).expect("environment");
         environment
@@ -2263,20 +2327,39 @@ mod tests {
             .file_structure()
             .shims
             .shim_dir(&selection.closures.roots[0].pinned);
-        let home = manager.file_structure().root().to_str().expect("utf-8 home").to_owned();
+        // Each store directory the digest lane names becomes the vendored one `VendorLayout` names.
+        let swaps: Vec<(String, String)> = selection
+            .closures
+            .surface
+            .iter()
+            .flat_map(|node| {
+                let store = manager.file_structure().packages.path(&node.identifier);
+                let key = &selection.keys[&node.identifier.digest()];
+                [
+                    (store.join("content"), VendorLayout::relative_content_dir(key)),
+                    (store.join("entrypoints"), VendorLayout::relative_entrypoint_dir(key)),
+                ]
+            })
+            .map(|(store, vendored)| (store.to_string_lossy().into_owned(), format!("{DIR_TOKEN}/{vendored}")))
+            .collect();
         let expected: Vec<(String, String)> = manager
             .resolve_env(&roots, false, EnvScope::package_tier(), &linux_amd64())
             .await
             .expect("digest lane")
             .into_iter()
             .filter(|entry| entry.value != shim.bin().to_string_lossy())
-            // The digest lane spells host paths (`\` on Windows); the manifest stores `/` on every host.
-            .map(|entry| (entry.key, entry.value.replace(&home, DIR_TOKEN).replace('\\', "/")))
+            .map(|entry| {
+                let value = swaps
+                    .iter()
+                    .fold(entry.value, |value, (store, vendored)| value.replace(store, vendored));
+                // The digest lane spells host paths (`\` on Windows); the manifest stores `/` on every host.
+                (entry.key, value.replace('\\', "/"))
+            })
             .collect();
 
         let actual = items(&manifest, "selection:default");
         assert_eq!(actual, expected);
-        let package_dir = |digest: &Digest| VendorLayout::legacy_relative_content_dir(REGISTRY, digest);
+        let package_dir = |digest: &Digest| VendorLayout::relative_content_dir(&package_key(digest));
         assert_eq!(
             actual,
             [
@@ -2292,8 +2375,8 @@ mod tests {
                 (
                     "PATH".to_owned(),
                     format!(
-                        "{DIR_TOKEN}/{}/entrypoints",
-                        VendorLayout::legacy_relative_package_dir(REGISTRY, &root)
+                        "{DIR_TOKEN}/{}",
+                        VendorLayout::relative_entrypoint_dir(&package_key(&root))
                     )
                 ),
             ],
@@ -2339,9 +2422,16 @@ mod tests {
         );
         assert_eq!(tool.entrypoints.len(), 1);
         assert_eq!(tool.entrypoints[0].name, "hello");
+        let key = package_key(&Digest::try_from(root.as_str()).expect("digest"));
+        assert_eq!(tool.package_dir, VendorLayout::relative_package_dir(&key));
+        assert_eq!(tool.content_dir, VendorLayout::relative_content_dir(&key));
         assert_eq!(
             tool.entrypoints[0].launcher_path,
-            format!("{}/entrypoints/hello", tool.package_dir)
+            VendorLayout::relative_entrypoint_launcher(&key, "hello", false)
+        );
+        assert_eq!(
+            tool.entrypoints[0].launcher_path,
+            format!("{}/e/hello", tool.package_dir)
         );
         assert_eq!(tool.entrypoints[0].environment, format!("entrypoint:{root}:hello"));
 
@@ -2358,7 +2448,7 @@ mod tests {
             (selection.id.as_str(), selection.roots.as_slice()),
             ("default", [root.clone()].as_slice())
         );
-        assert_eq!(selection.launcher_dir, "selections/default/shells/default/bin");
+        assert_eq!(selection.launcher_dir, "l");
         assert!(selection.groups.is_empty() && selection.bindings.is_empty());
 
         let names: Vec<_> = manifest
@@ -2370,10 +2460,7 @@ mod tests {
         let cmake = &manifest.tools[0];
         assert_eq!(cmake.package, root);
         assert_eq!(cmake.target_path, format!("{}/bin/cmake", tool.content_dir));
-        assert_eq!(
-            cmake.launcher_path.as_deref(),
-            Some("selections/default/shells/default/bin/cmake")
-        );
+        assert_eq!(cmake.launcher_path.as_deref(), Some("l/cmake"));
         assert_eq!(manifest.tools[1].target_path, tool.entrypoints[0].launcher_path);
 
         assert_eq!(
@@ -2623,13 +2710,6 @@ mod tests {
         (dir, layout, manifest)
     }
 
-    /// The directory the composed environment names for `package`'s content, which is where a program the test stages must sit.
-    fn vendored_content_dir(package: &Package) -> String {
-        let digest = Digest::try_from(package.digest.as_str()).expect("a manifest digest");
-        let keys = VendorLayout::package_keys(std::slice::from_ref(&digest)).expect("one key");
-        VendorLayout::relative_content_dir(&keys[&digest])
-    }
-
     fn root_package(manifest: &VendorManifest) -> &Package {
         manifest
             .packages
@@ -2654,8 +2734,8 @@ mod tests {
             .find(|p| p.digest != package.digest)
             .expect("dependency");
         let files = [
-            format!("{}/bin/hello", vendored_content_dir(dependency)),
-            format!("{}/bin/hello", vendored_content_dir(package)),
+            format!("{}/bin/hello", dependency.content_dir),
+            format!("{}/bin/hello", package.content_dir),
         ];
         let (_dir, layout, manifest) = staged_tool(&files).await;
         let declared: Entrypoints =
@@ -2673,7 +2753,7 @@ mod tests {
         assert_eq!(sidecar.vendor_id, manifest.vendor_id);
         assert_eq!(
             sidecar.program,
-            format!("{DIR_TOKEN}/{}/bin/hello", vendored_content_dir(package)),
+            format!("{DIR_TOKEN}/{}/bin/hello", package.content_dir),
             "the package's own PATH entry is applied last, so it is searched first"
         );
         assert_eq!(
@@ -2706,7 +2786,7 @@ mod tests {
         let files = {
             let (_dir, _, manifest) = staged_tool(&[]).await;
             let package = root_package(&manifest);
-            vec![format!("{}/bin/hello", vendored_content_dir(package))]
+            vec![format!("{}/bin/hello", package.content_dir)]
         };
         let (_dir, layout, manifest) = staged_tool(&files).await;
         let package = root_package(&manifest);
@@ -2728,7 +2808,7 @@ mod tests {
         let files = {
             let (_dir, _, manifest) = staged_tool(&[]).await;
             let package = root_package(&manifest);
-            vec![format!("{}/bin/hello", vendored_content_dir(package))]
+            vec![format!("{}/bin/hello", package.content_dir)]
         };
         let (_dir, layout, manifest) = staged_tool(&files).await;
         let package = root_package(&manifest);
@@ -2778,9 +2858,7 @@ mod tests {
             assert_eq!(sidecar.vendor_id, manifest.vendor_id);
             assert_eq!(sidecar.env.len(), manifest.environments[0].items.len());
         }
-        let written = std::fs::read_dir(layout.resolve("selections/default/shells/default/bin"))
-            .expect("dir")
-            .count();
+        let written = std::fs::read_dir(layout.resolve("l")).expect("dir").count();
         assert_eq!(written, 2 * manifest.tools.len(), "a launcher and a sidecar per name");
     }
 
@@ -2796,7 +2874,7 @@ mod tests {
             .await
             .expect("nothing to write");
 
-        assert!(!layout.resolve("selections").exists());
+        assert!(!layout.resolve("l").exists());
     }
 
     #[test]

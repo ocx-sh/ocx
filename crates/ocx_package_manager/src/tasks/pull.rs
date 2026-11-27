@@ -450,14 +450,15 @@ pub async fn setup_owned(
 #[derive(Debug, Clone)]
 pub(crate) struct VendorTarget {
     package_dir: std::path::PathBuf,
+    content_dir: std::path::PathBuf,
 }
 
 impl VendorTarget {
-    /// `pinned`'s package directory under `layout`.
-    pub(crate) fn new(layout: &file_structure::VendorLayout, pinned: &ocx_oci::PinnedPackageRef) -> Self {
-        let relative = file_structure::VendorLayout::legacy_relative_package_dir(pinned.registry(), &pinned.digest());
+    /// The package directory `key` names under `layout`, and its content directory.
+    pub(crate) fn new(layout: &file_structure::VendorLayout, key: &file_structure::PackageKey) -> Self {
         Self {
-            package_dir: layout.resolve(&relative),
+            package_dir: layout.resolve(&file_structure::VendorLayout::relative_package_dir(key)),
+            content_dir: layout.resolve(&file_structure::VendorLayout::relative_content_dir(key)),
         }
     }
 
@@ -465,8 +466,8 @@ impl VendorTarget {
         &self.package_dir
     }
 
-    pub(crate) fn content_dir(&self) -> std::path::PathBuf {
-        self.package_dir.join("content")
+    pub(crate) fn content_dir(&self) -> &std::path::Path {
+        &self.content_dir
     }
 }
 
@@ -517,7 +518,7 @@ pub(crate) async fn setup_vendored(
         &layer_digests,
         &manifest,
         &metadata,
-        &target.content_dir(),
+        target.content_dir(),
         ocx_store::hardlink::LinkMode::Copy,
     )
     .await?;
@@ -3512,7 +3513,7 @@ mod tests {
             leaf_origin: ocx_index::BlobOrigin::Home,
         };
         let layout = ocx_store::file_structure::VendorLayout::new(out);
-        let target = super::VendorTarget::new(&layout, &pinned);
+        let target = super::VendorTarget::new(&layout, &plain_key());
         let outcome = super::setup_vendored(
             &manager,
             &pinned,
@@ -3526,7 +3527,13 @@ mod tests {
         (manager, target, outcome)
     }
 
-    /// The package directory holds `content/` alone: no store bookkeeping, nothing a GC would follow.
+    /// The vendored name of the fixture package.
+    fn plain_key() -> ocx_store::file_structure::PackageKey {
+        let digest = plain_pinned().digest();
+        ocx_store::file_structure::VendorLayout::package_keys([&digest]).expect("one key")[&digest].clone()
+    }
+
+    /// The package directory holds `c/` alone: no store bookkeeping, nothing a GC would follow.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_vendored_package_holds_only_its_content() {
         let (home, out) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
@@ -3539,7 +3546,7 @@ mod tests {
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
         names.sort();
-        assert_eq!(names, ["content"]);
+        assert_eq!(names, ["c"]);
         assert_eq!(info.dir().root(), target.package_dir());
         assert_eq!(
             std::fs::read(target.content_dir().join("share/readme.txt")).unwrap(),
@@ -3575,8 +3582,7 @@ mod tests {
         outcome.expect("the package vendors");
 
         let layout = ocx_store::file_structure::VendorLayout::new(out.path());
-        let content =
-            ocx_store::file_structure::VendorLayout::legacy_relative_content_dir(LOGICAL, &plain_pinned().digest());
+        let content = ocx_store::file_structure::VendorLayout::relative_content_dir(&plain_key());
         let tree = crate::tasks::vendor::list_tree(&layout, &content, false)
             .await
             .expect("the tree lists");
