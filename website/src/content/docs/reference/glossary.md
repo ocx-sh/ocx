@@ -62,7 +62,7 @@ See [ocx package: consuming](/docs/reference/command-line/package-consuming/#pac
 
 ### launcher {#launcher}
 
-A generated executable that starts one entry point through `ocx launcher exec`, with the package root baked in; a native `.exe` on Windows.
+A generated native executable that starts a program as the record `NAME.launch` beside it directs; the record's `kind` says which kind of program.
 
 See [Launcher forwarding](/docs/explanation/launcher-forwarding/#launcher-embedding).
 
@@ -80,7 +80,7 @@ See [Deferred packages](/docs/explanation/deferred-packages/#deferred-tools-mate
 
 ### native launcher {#native-launcher}
 
-The Windows `.exe` form of a launcher, the one executable every Windows caller can start.
+The compiled program every launcher is on every OS, one shared blob copied under each name, with its record `NAME.launch` beside it.
 
 See [Entry points](/docs/explanation/entry-points/#windows).
 
@@ -140,7 +140,7 @@ See [Dependencies](/docs/explanation/dependencies/#manifest-pins).
 
 ### shim {#shim}
 
-A placeholder executable written for a deferred package; its first run downloads the package, then starts the real binary.
+The launcher of a deferred package (record kind `deferred`); its first run downloads the package, then starts the real binary.
 
 See [Deferred packages](/docs/explanation/deferred-packages/#deferred-tools-compose).
 
