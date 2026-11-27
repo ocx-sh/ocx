@@ -617,7 +617,7 @@ async fn render_bin(
             !record
         })
         .collect();
-    let names = with_stamped_names(names, request, previous);
+    let names = with_stamped_names(names, request, previous, case_insensitive);
 
     // Before any write: a record the launcher would refuse is never written.
     let ocx_binary = trampoline_ocx_binary(file_structure).await;
@@ -784,6 +784,7 @@ fn with_stamped_names(
     names: Vec<String>,
     request: &RenderRequest<'_>,
     previous: Option<&RenderStampV2>,
+    case_insensitive: bool,
 ) -> Vec<String> {
     let Some(stamp) = previous.filter(|stamp| {
         !request.unrendered.is_empty() && stamp.home == request.home.root() && &stamp.scope == request.scope
@@ -797,6 +798,10 @@ fn with_stamped_names(
         } else {
             entry
         };
+        // A computed spelling wins its case twin: two twins in one directory collide on a folding filesystem.
+        if case_insensitive && union.iter().any(|name| name.eq_ignore_ascii_case(tool)) {
+            continue;
+        }
         union.insert(tool.to_owned());
     }
     union.into_iter().collect()
@@ -3201,6 +3206,54 @@ mod tests {
             "a new directory is published"
         );
         assert_eq!(tree.bin_entries(), expected_bin_entries(&["cmake", "ctest"]));
+    }
+
+    /// A stamped case twin of a computed name joins a partial render only on a case-sensitive home.
+    ///
+    /// RED: drop the case-insensitive skip in `with_stamped_names`.
+    #[test]
+    fn a_stamped_case_twin_does_not_join_a_partial_render_on_a_folding_home() {
+        let home = ToolchainHome::new("/home/u/.ocx/toolchain");
+        let scope = RenderStampScope::Global;
+        let lock = lock_of(Vec::new());
+        let groups = groups_of(&[DEFAULT_GROUP]);
+        let platform = platform();
+        let unrendered = vec!["ns/other".to_string()];
+        let request = RenderRequest {
+            home: &home,
+            scope: &scope,
+            lock: &lock,
+            surface: &[],
+            groups: &groups,
+            pinned: false,
+            platform: &platform,
+            dry_run: false,
+            unrendered: &unrendered,
+        };
+        let stamped = |name: &str| {
+            let entry = BinEntryStamp {
+                size: 1,
+                file_id: None,
+                content_hash: "h".into(),
+            };
+            (name.to_owned(), entry)
+        };
+        let stamp = RenderStampV2::new(
+            home.root().to_path_buf(),
+            scope.clone(),
+            "default-0000000000000000".into(),
+            String::new(),
+            String::new(),
+            String::new(),
+            [stamped("CMake"), stamped("ninja")].into_iter().collect(),
+            BTreeMap::new(),
+        );
+        let computed = vec!["cmake".to_owned()];
+
+        let folded = with_stamped_names(computed.clone(), &request, Some(&stamp), true);
+        assert_eq!(folded, ["cmake", "ninja"]);
+        let sensitive = with_stamped_names(computed, &request, Some(&stamp), false);
+        assert_eq!(sensitive, ["CMake", "cmake", "ninja"]);
     }
 
     /// C-044, case 14 — an entry that left the lock loses its link and its
