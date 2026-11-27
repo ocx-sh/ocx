@@ -37,11 +37,10 @@ destination symlink-safety check bypasses `io::Error::other` so an
 ancestor-symlink refusal classifies as `UsageError` (64) and not the flat
 `IoError` (74). Collapsing it back to a bare `FileError` silently re-forces 74.
 
-## The two `__` features are not interchangeable
+## `__test_scaffolding`
 
-`__testing` is the ordinary seam feature, forwarded by `ocx`'s own `__testing`
-and therefore **present in the acceptance binary**. It gates no seam of its own and
-forwards `ocx_env`'s.
+This crate has no `__testing` feature: it gates no seam of its own, and the
+`__OCX_TESTING_*` seams live in `ocx_env`.
 
 `__test_scaffolding` is **not** forwarded by anything that ships. It exists so
 `ocx_lib`'s own unit tests can reach a seam a bare `#[cfg(test)]` cannot cross a

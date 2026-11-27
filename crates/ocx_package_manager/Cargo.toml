@@ -9,7 +9,7 @@ publish = false
 [features]
 # The seam feature, forwarded the way every other crate forwards it: test-only
 # surface that must never reach the release binary.
-__testing = ["ocx_env/__testing", "ocx_index/__testing", "ocx_package/__testing", "ocx_shell/__testing", "ocx_store/__testing"]
+__testing = ["ocx_env/__testing", "ocx_index/__testing", "ocx_package/__testing", "ocx_shell/__testing"]
 
 [dependencies]
 # Every workspace edge below is a row of `scripts/crate_map.toml`'s
@@ -90,7 +90,7 @@ ocx_package = { workspace = true, features = ["__testing"] }
 # `__test_scaffolding` for `BlobStore::write_call_count`, the singleflight
 # instrument `tasks::pull_local`'s coalescing test reads. Same non-forwarded
 # seam as `ocx_config`'s, for the same reason.
-ocx_store = { workspace = true, features = ["__testing", "__test_scaffolding"] }
+ocx_store = { workspace = true, features = ["__test_scaffolding"] }
 ocx_util = { workspace = true, features = ["__testing"] }
 # The FIFO helpers and the `archive.tar.xz` fixture path `managed_config`'s
 # publish tests and `tasks::pull_local` drive. Dev-only by construction
