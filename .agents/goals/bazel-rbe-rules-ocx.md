@@ -8,14 +8,25 @@ Source: .agents/discussions/bazel-rbe-rules-ocx.md · Written: 2026-11-26 by /he
   that run `test/tests/test_vendor.py` and `test/tests/test_package_vendor.py`, the six native legs of
   `.github/workflows/launcher-blobs.yml`, and the rules_ocx jobs `test`, `rig-buildbarn` and `rig-nativelink`, with
   rules_ocx pinned to the dev build of the final ocx head. The five criteria are listed under § Context, "First run".
-- [ ] "Short vendored layout (issue 785)" — evidence: the commit, PR comment or
+- [x] "Short vendored layout (issue 785)" — evidence: the commit, PR comment or
   artifact that satisfies it.
+  Met: `crates/ocx_store/src/file_structure/vendor_layout.rs` and `crates/ocx_package_manager/src/tasks/vendor.rs` on this
+  branch, manifest schema version 2 (commit 4ab1b607). Red and green by mutation for V-L50, V-L51, V-L53 and V-L56 are in
+  `.claude/artifacts/plan_vendor_rules_ocx.md` § "Run 2 — red-proof log", with the runs in
+  `.claude/artifacts/evidence/vendor_rules_ocx/run2/PF.md`, `PFA.md`, `VF.md` and `VA.md`. Scope of those runs: the named
+  test files and unit tests on Linux. In rules_ocx the manifest tests of job `test` pass at 83477a4.
 - [ ] "One launcher and one record file everywhere" — evidence: the commit, PR comment or
   artifact that satisfies it.
 - [ ] "Atomic launcher publish and refresh (issue 679)" — evidence: the commit, PR comment or
   artifact that satisfies it.
-- [ ] "Runfiles manifest fallback" — evidence: the commit, PR comment or
+- [x] "Runfiles manifest fallback" — evidence: the commit, PR comment or
   artifact that satisfies it, with the Windows CI job that starts a vendored tool without `--enable_runfiles`.
+  Met: launcher root search over runfiles manifests (fix-pass R1D, evidence
+  `.claude/artifacts/evidence/vendor_rules_ocx/run2/R1D.md`); rules_ocx commit c4c73f0 adds the test. Windows job
+  `deep (windows-latest)` of rules_ocx run 45989881945 at 83477a4: row `deep:windows-runfiles` ran
+  `test --noenable_runfiles //:manifest_runfiles_test //:host_test`, both PASSED. The same row passed in run 45985484572
+  at 4eb3f15. The job itself ended red on another row (`deep:windows-update-target`, one expectation), which is not this
+  criterion. The two non-ASCII path rows print FAIL as probes and do not gate (decided, Bazel client limit).
 - [ ] "rules_ocx package locking (its issue 37)" — evidence: the commit, PR comment or
   artifact that satisfies it.
 - [ ] "Red and green shown for every Verification check" — evidence: the commit, PR comment or
