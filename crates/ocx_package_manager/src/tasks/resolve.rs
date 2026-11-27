@@ -6350,7 +6350,9 @@ mod phase4_spec_tests {
             .await
             .unwrap();
 
-        let launchers = store.package_dir(&dep).entrypoints();
+        let launchers = store
+            .package_dir(&dep)
+            .launchers(&ocx_store::launcher_generation::LauncherGeneration::host().expect("host launcher blob"));
         assert!(
             entries
                 .iter()
@@ -6582,7 +6584,9 @@ mod phase4_spec_tests {
                 usize::from(reaches),
                 "{case}: entries {entries:?}"
             );
-            let launchers = store.package_dir(&secret).entrypoints();
+            let launchers = store
+                .package_dir(&secret)
+                .launchers(&ocx_store::launcher_generation::LauncherGeneration::host().expect("host launcher blob"));
             assert_eq!(
                 entries
                     .iter()

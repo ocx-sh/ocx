@@ -29,6 +29,7 @@ use ocx_store::{
     file_structure::ToolchainHome, file_structure::VendorLayout,
 };
 
+use super::launcher::{EntryPointDir, entry_point_dir, first_use};
 use super::tasks::common;
 use super::tasks::common::ClosureNode;
 use super::tasks::patch_discovery::PatchDiscoveryMode;
@@ -300,7 +301,18 @@ async fn compose_gated(
         let done_by_index = visible_entries.iter().map(|(_, _, done)| *done);
         for ((meta, dep_resolved, dep_id), done) in loaded.into_iter().flatten().zip(done_by_index) {
             // Digest lane: a dependency is not a lock entry, so no link names it.
-            let dep_pkg = paths.install_path_for(&store.package_dir(&dep_id), &dep_id.digest(), PathLane::Digest)?;
+            let dep_dir = store.package_dir(&dep_id);
+            let dep_launchers = launcher_choice(
+                &dep_dir,
+                meta.entrypoints(),
+                !paths.is_vendor()
+                    && root.deferred().is_none()
+                    && carrier_crosses_on(Entrypoints::IMPLICIT_VISIBILITY, false, axes),
+            )
+            .await;
+            let dep_pkg = paths
+                .install_path_for(&dep_dir, &dep_id.digest(), PathLane::Digest)?
+                .with_entry_points(dep_launchers);
             let dep_content = dep_pkg.content();
 
             if carrier_crosses_on(Binaries::IMPLICIT_VISIBILITY, false, axes)
@@ -374,7 +386,18 @@ async fn compose_gated(
         let root_dep_contexts = build_dep_context_map(root.metadata(), root.resolved(), store, paths)?;
 
         // Following lane: an explicit root is a lock entry, so a trusted link may name it.
-        let root_pkg = paths.install_path_for(root.dir(), &root.identifier().digest(), PathLane::Following)?;
+        let root_launchers = launcher_choice(
+            root.dir(),
+            root.metadata().entrypoints(),
+            !graft
+                && !paths.is_vendor()
+                && root.deferred().is_none()
+                && carrier_crosses_on(Entrypoints::IMPLICIT_VISIBILITY, true, axes),
+        )
+        .await;
+        let root_pkg = paths
+            .install_path_for(root.dir(), &root.identifier().digest(), PathLane::Following)?
+            .with_entry_points(root_launchers);
         let root_content = root_pkg.content();
 
         // An earlier reach on the interface axis already collected these.
@@ -759,7 +782,15 @@ fn record_repo_identifier(
     seen.push(id.clone());
 }
 
-/// Construct the synthetic `PATH ⊳ <entrypoints dir>` entry for a package.
+/// Which entry-point directory of `package` to compose, read-only; `Launchers` without I/O when none is emitted.
+async fn launcher_choice(package: &PackageDir, entries: Option<&Entrypoints>, emitted: bool) -> EntryPointDir {
+    match entries {
+        Some(entries) if emitted && !entries.is_empty() => entry_point_dir(package, entries).await,
+        _ => EntryPointDir::Launchers,
+    }
+}
+
+/// Construct the synthetic `PATH ⊳ <entry-point dir>` entry for a package.
 fn synth_entrypoints_path_for(entrypoints: &Path) -> Entry {
     Entry {
         key: "PATH".to_string(),
@@ -808,6 +839,9 @@ struct VendorLane {
 pub(crate) struct InstallPaths {
     content: PathBuf,
     entrypoints: PathBuf,
+
+    /// The package directory (or the link naming it) a home composition roots at; `None` in the vendor lane.
+    home_root: Option<PathBuf>,
 }
 
 impl InstallPaths {
@@ -815,7 +849,16 @@ impl InstallPaths {
         Self {
             content: package.content(),
             entrypoints: package.entrypoints(),
+            home_root: Some(package.root().to_path_buf()),
         }
+    }
+
+    /// Names `choice` as the entry-point directory, under the same root as `content`; the vendor lane keeps its own.
+    fn with_entry_points(mut self, choice: EntryPointDir) -> Self {
+        if let Some(root) = &self.home_root {
+            self.entrypoints = choice.of(&PackageDir::with_root(root.clone()));
+        }
+        self
     }
 
     pub(crate) fn content(&self) -> &Path {
@@ -993,6 +1036,7 @@ impl VendorLane {
         Ok(InstallPaths {
             content: PathBuf::from(format!("{token}/{}", VendorLayout::relative_content_dir(key))),
             entrypoints: PathBuf::from(format!("{token}/{}", VendorLayout::relative_entrypoint_dir(key))),
+            home_root: None,
         })
     }
 }
@@ -1248,12 +1292,69 @@ impl PackageManager {
             }
         }
 
+        let roots: Vec<Arc<InstallInfo>> = slots.into_iter().flatten().collect();
+        self.first_use_launchers(&roots).await?;
+
         Ok(ComposeRoots {
-            roots: slots.into_iter().flatten().collect(),
+            roots,
             advisories,
             omitted,
             pulled,
         })
+    }
+
+    /// First use of every package of `roots`' closures whose entry points are admitted on `PATH`, so the composer
+    /// emits a directory that exists. Over-approximates a root under `--self`, which composes none: pull wrote it too.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::FindFailed`](super::error::Error::FindFailed) when a package directory vanished, else the failed write
+    /// or the refusal with no older `entrypoints/` to fall back to.
+    async fn first_use_launchers(&self, roots: &[Arc<InstallInfo>]) -> Result<(), super::error::Error> {
+        let file_structure = self.file_structure();
+        let store = &file_structure.packages;
+        let mut done: HashSet<PathBuf> = HashSet::new();
+        for root in roots.iter().filter(|root| root.deferred().is_none()) {
+            let mut members: Vec<(ocx_oci::PinnedPackageRef, PackageDir, metadata::Metadata)> = Vec::new();
+            members.push((root.identifier().clone(), root.dir().clone(), root.metadata().clone()));
+            for dependency in root
+                .resolved()
+                .dependencies
+                .iter()
+                .filter(|d| d.visibility.has_interface())
+            {
+                let (metadata, _) = common::load_object_data(store, &store.content(&dependency.identifier)).await?;
+                members.push((
+                    dependency.identifier.clone(),
+                    store.package_dir(&dependency.identifier),
+                    metadata,
+                ));
+            }
+            for (identifier, package, metadata) in members {
+                let Some(entries) = metadata.entrypoints().filter(|entries| !entries.is_empty()) else {
+                    continue;
+                };
+                if !done.insert(package.root().to_path_buf()) {
+                    continue;
+                }
+                match first_use(file_structure, &package, entries).await {
+                    Ok(_) => {}
+                    Err(super::error::Error::InternalFile(path, error))
+                        if error.kind() == std::io::ErrorKind::NotFound && path == package.launchers_root() =>
+                    {
+                        return Err(super::error::Error::FindFailed(vec![super::error::PackageError::new(
+                            identifier.as_identifier().clone(),
+                            PackageErrorKind::NotInstalled(Box::new(crate::error::NotInstalled {
+                                identifier: identifier.as_identifier().clone(),
+                                digest: identifier.digest(),
+                            })),
+                        )]));
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Probe the local package store for one eager request.
@@ -1560,6 +1661,10 @@ mod tests {
         )
     }
 
+    fn host_generation() -> ocx_store::launcher_generation::LauncherGeneration {
+        ocx_store::launcher_generation::LauncherGeneration::host().expect("host launcher blob")
+    }
+
     fn make_store(root: &std::path::Path) -> PackageStore {
         let fs = FileStructure::with_root(root.to_path_buf());
         fs.packages.clone()
@@ -1718,7 +1823,7 @@ mod tests {
         let synth_path_emitted = |out: &super::ComposeOutput| {
             out.entries
                 .iter()
-                .any(|e| e.key == "PATH" && e.value.contains("entrypoints"))
+                .any(|e| e.key == "PATH" && e.value.contains("launchers"))
         };
 
         let consumer = compose(
@@ -2075,17 +2180,80 @@ mod tests {
         let out = compose(&[root], &store, false, &crate::composer::ComposePaths::digest_only())
             .await
             .unwrap();
-        // Synth-PATH for root's entrypoints/ present in default exec.
+        // Synth-PATH for root's launchers/<G> present in default exec.
         let path_entries: Vec<_> = out
             .entries
             .iter()
-            .filter(|e| e.key == "PATH" && e.value.contains("entrypoints"))
+            .filter(|e| e.key == "PATH" && e.value.contains("launchers"))
             .collect();
         assert_eq!(
             path_entries.len(),
             1,
-            "default exec must emit one synth-PATH for root entrypoints/"
+            "default exec must emit one synth-PATH for root launchers/<G>"
         );
+    }
+
+    /// The synthetic `PATH` entry of a root is the host generation's `launchers/<G>`, never `entrypoints`.
+    #[tokio::test]
+    async fn compose_emits_launchers_generation_directory_not_entrypoints() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = make_store(dir.path());
+        let generation = ocx_store::launcher_generation::LauncherGeneration::host().expect("host launcher blob");
+        let root = Arc::new(make_install_info_with_ep(
+            dir.path(),
+            "root",
+            'r',
+            ResolvedPackage::new(),
+            "cmake",
+        ));
+        let expected = root.dir().launchers(&generation).to_string_lossy().into_owned();
+
+        let out = compose(&[root], &store, false, &crate::composer::ComposePaths::digest_only())
+            .await
+            .unwrap();
+
+        let path_values: Vec<&str> = out
+            .entries
+            .iter()
+            .filter(|e| e.key == "PATH")
+            .map(|e| e.value.as_str())
+            .collect();
+        assert_eq!(path_values, [expected.as_str()]);
+    }
+
+    /// With no `launchers/<G>` and a complete older `entrypoints/`, the older directory is composed.
+    #[tokio::test]
+    async fn compose_falls_back_to_a_complete_older_entrypoints_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = make_store(dir.path());
+        let root = Arc::new(make_install_info_with_ep(
+            dir.path(),
+            "root",
+            'r',
+            ResolvedPackage::new(),
+            "cmake",
+        ));
+        std::fs::create_dir_all(root.dir().entrypoints()).unwrap();
+        std::fs::write(
+            root.dir()
+                .entrypoints()
+                .join(if cfg!(windows) { "cmake.exe" } else { "cmake" }),
+            b"x",
+        )
+        .unwrap();
+        let expected = root.dir().entrypoints().to_string_lossy().into_owned();
+
+        let out = compose(&[root], &store, false, &crate::composer::ComposePaths::digest_only())
+            .await
+            .unwrap();
+
+        let path_values: Vec<&str> = out
+            .entries
+            .iter()
+            .filter(|e| e.key == "PATH")
+            .map(|e| e.value.as_str())
+            .collect();
+        assert_eq!(path_values, [expected.as_str()]);
     }
 
     /// --self: root with entrypoints does NOT emit synth-PATH.
@@ -2161,7 +2329,7 @@ mod tests {
         let path_entries: Vec<_> = out
             .entries
             .iter()
-            .filter(|e| e.key == "PATH" && e.value.contains("entrypoints"))
+            .filter(|e| e.key == "PATH" && e.value.contains("launchers"))
             .collect();
         assert_eq!(
             path_entries.len(),
@@ -6083,11 +6251,11 @@ mod tests {
         assert_eq!(
             resolved_order,
             vec![
-                root.dir().entrypoints().to_string_lossy().into_owned(),
+                root.dir().launchers(&host_generation()).to_string_lossy().into_owned(),
                 declared_bin(&root.dir().content()),
                 shim.bin().to_string_lossy().into_owned(),
             ],
-            "resolved PATH for a deferred root must be entrypoints/ > bin/ > shims/ (C-012)"
+            "resolved PATH for a deferred root must be launchers/<G> > bin/ > shims/ (C-012)"
         );
     }
 
@@ -8090,7 +8258,10 @@ mod wp15_following_lane_spec_tests {
         // substitution, so its separator is the template's own `/`; the
         // synthetic entry is a `join`, so its separator is the host's.
         let expected_carrier = format!("{}/bin", link.content().display());
-        let expected_entrypoints = link.entrypoints().to_string_lossy().into_owned();
+        let expected_entrypoints = link
+            .launchers(&ocx_store::launcher_generation::LauncherGeneration::host().expect("host launcher blob"))
+            .to_string_lossy()
+            .into_owned();
 
         assert!(
             path_values.contains(&expected_carrier),

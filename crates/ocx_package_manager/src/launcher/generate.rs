@@ -6,9 +6,9 @@
 use std::path::{Path, PathBuf};
 
 use ocx_package::metadata::entrypoint::Entrypoints;
-use ocx_store::file_structure::FileStructure;
+use ocx_store::file_structure::{FileStructure, PackageDir};
 use ocx_store::launcher_generation::LauncherGeneration;
-use ocx_util::fs::{Published, publish_dir};
+use ocx_util::fs::{Published, Retired, publish_dir, retire_dir, symlink};
 
 use super::body::utf8_baked_path;
 use super::direct::write_direct_launcher_for;
@@ -54,10 +54,30 @@ pub(super) async fn generate_for(
     tokio::fs::create_dir_all(dest)
         .await
         .map_err(|e| crate::error::file_error(dest, e))?;
-    for (name, _entry) in entries.iter() {
+    for (index, (name, _entry)) in entries.iter().enumerate() {
+        if fault_before(index) {
+            return Err(crate::error::file_error(dest, std::io::Error::other("injected fault")));
+        }
         write_launcher(dest, name.as_str(), blob, &record, windows).await?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    /// Fails [`generate_for`] before the launcher at this index, so a test sees a fault part-way through a directory.
+    static FAULT_AFTER: usize;
+}
+
+/// Test seam: whether a fault is injected before the launcher at `index`; never true outside tests.
+fn fault_before(index: usize) -> bool {
+    #[cfg(test)]
+    return FAULT_AFTER.try_with(|after| *after == index).unwrap_or(false);
+    #[cfg(not(test))]
+    {
+        let _ = index;
+        false
+    }
 }
 
 /// Whether `dir` is a complete launcher directory for `entries`: a real directory (`lstat`, no link) holding, per
@@ -83,6 +103,158 @@ pub(crate) async fn launchers_complete(dir: &Path, entries: &Entrypoints) -> boo
     true
 }
 
+/// The launcher generation of this host, hashed once; `None` on a host with no launcher blob.
+fn host_generation() -> Option<&'static LauncherGeneration> {
+    static HOST: std::sync::OnceLock<Option<LauncherGeneration>> = std::sync::OnceLock::new();
+    HOST.get_or_init(LauncherGeneration::host).as_ref()
+}
+
+/// The directory of a package's entry-point launchers that a composition puts on `PATH`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EntryPointDir {
+    /// `launchers/<G>`, this build's.
+    Launchers,
+    /// `entrypoints/`, written by an older release; never written by this one.
+    Legacy,
+}
+
+impl EntryPointDir {
+    /// The directory under `package`.
+    pub(crate) fn of(self, package: &PackageDir) -> PathBuf {
+        match (self, host_generation()) {
+            (Self::Launchers, Some(generation)) => package.launchers(generation),
+            _ => package.entrypoints(),
+        }
+    }
+}
+
+/// Which directory of `package` to compose, read-only: a complete `launchers/<G>`, else a complete older
+/// `entrypoints/`, else `launchers/<G>` (which [`first_use`] was meant to publish).
+pub(crate) async fn entry_point_dir(package: &PackageDir, entries: &Entrypoints) -> EntryPointDir {
+    let Some(generation) = host_generation() else {
+        return EntryPointDir::Legacy;
+    };
+    if launchers_complete(&package.launchers(generation), entries).await {
+        EntryPointDir::Launchers
+    } else if legacy_complete(&package.entrypoints(), entries).await {
+        EntryPointDir::Legacy
+    } else {
+        EntryPointDir::Launchers
+    }
+}
+
+/// Whether an older release's `dir` holds a launcher for every name that gets one.
+async fn legacy_complete(dir: &Path, entries: &Entrypoints) -> bool {
+    for (name, _entry) in entries.iter().filter(|(name, _)| !is_record_name(name.as_str())) {
+        let launcher = if cfg!(windows) {
+            format!("{}.exe", name.as_str())
+        } else {
+            name.as_str().to_owned()
+        };
+        if !tokio::fs::symlink_metadata(dir.join(launcher))
+            .await
+            .is_ok_and(|m| m.is_file())
+        {
+            return false;
+        }
+    }
+    true
+}
+
+/// First use of a package whose entry points go on `PATH`: leaves `launchers/<G>` complete and says what to
+/// compose. A read-only or foreign-owned home composes a complete older `entrypoints/` instead, with one warning.
+///
+/// # Errors
+///
+/// A failed write, or a refusal with no complete `entrypoints/` to fall back to. A missing package directory is
+/// [`crate::Error::InternalFile`] naming `<package>/launchers` with `NotFound`.
+pub(crate) async fn first_use(
+    fs: &FileStructure,
+    package: &PackageDir,
+    entries: &Entrypoints,
+) -> Result<EntryPointDir, crate::Error> {
+    let generation = host_generation().ok_or_else(|| {
+        crate::error::file_error(package.root(), std::io::Error::other("no launcher blob for this host"))
+    })?;
+    let target = package.launchers(generation);
+    if launchers_complete(&target, entries).await {
+        return Ok(EntryPointDir::Launchers);
+    }
+    match publish_after_retiring(fs, package, generation, &target, entries).await {
+        Ok(()) => Ok(EntryPointDir::Launchers),
+        Err(crate::Error::InternalFile(path, error)) if refused(&error) => {
+            if legacy_complete(&package.entrypoints(), entries).await {
+                log::warn!(
+                    "Cannot write launchers under '{}' ({error}); using the entry points an older ocx wrote",
+                    package.root().display()
+                );
+                Ok(EntryPointDir::Legacy)
+            } else {
+                Err(crate::Error::InternalFile(path, error))
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Whether an I/O error is a refusal the older `entrypoints/` can stand in for.
+fn refused(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem
+    )
+}
+
+/// Moves an incomplete or linked `target` away, then publishes a fresh one.
+async fn publish_after_retiring(
+    fs: &FileStructure,
+    package: &PackageDir,
+    generation: &LauncherGeneration,
+    target: &Path,
+    entries: &Entrypoints,
+) -> Result<(), crate::Error> {
+    match tokio::fs::symlink_metadata(target).await {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(crate::error::file_error(target, error)),
+        Ok(_) => {
+            log::warn!("Replacing the incomplete launcher directory '{}'", target.display());
+            remove_entry(target).await?;
+        }
+    }
+    publish_package_launchers(fs, package.root(), generation, entries).await?;
+    Ok(())
+}
+
+/// Retires a real directory; removes a link or file (never following it) that `retire_dir` leaves alone.
+async fn remove_entry(target: &Path) -> Result<(), crate::Error> {
+    let owned = target.to_path_buf();
+    let removed = tokio::task::spawn_blocking(move || -> std::io::Result<bool> {
+        if symlink::is_link(&owned) {
+            symlink::remove(&owned).map_err(|error| error.cause)?;
+            return Ok(true);
+        }
+        if std::fs::symlink_metadata(&owned)?.is_dir() {
+            return Ok(false);
+        }
+        std::fs::remove_file(&owned)?;
+        Ok(true)
+    })
+    .await
+    .map_err(|error| crate::error::file_error(target, std::io::Error::other(error)))?
+    .map_err(|error| crate::error::file_error(target, error))?;
+    if removed {
+        return Ok(());
+    }
+    match retire_dir(target).await {
+        Ok(Retired::Removed) => Ok(()),
+        Ok(Retired::LeftForLater) => Err(crate::error::file_error(
+            target,
+            std::io::Error::new(std::io::ErrorKind::PermissionDenied, "in use or protected, not retired"),
+        )),
+        Err(error) => Err(crate::error::file_error(target, error)),
+    }
+}
+
 /// Publishes `<package_dir>/launchers/<generation>` for `entries`, built complete in a locked scratch directory and
 /// moved in with one rename; a published directory is never edited. `package_dir` is the final package directory and
 /// is never created here.
@@ -91,7 +263,6 @@ pub(crate) async fn launchers_complete(dir: &Path, entries: &Entrypoints) -> boo
 ///
 /// A failed write, a host without a launcher blob, a missing `package_dir`, or a directory that won the race and is
 /// not complete.
-#[cfg_attr(not(test), expect(dead_code, reason = "compose_roots calls it in the next step"))]
 pub(crate) async fn publish_package_launchers(
     fs: &FileStructure,
     package_dir: &Path,
@@ -588,6 +759,202 @@ mod tests {
 
         assert!(result.is_err());
         assert!(!pkg_dir.exists());
+    }
+
+    fn host_generation() -> LauncherGeneration {
+        LauncherGeneration::host().expect("the test host has a launcher blob")
+    }
+
+    /// A home with an installed package directory, plus the entries of its package.
+    fn home_with_package(tmp: &std::path::Path) -> (FileStructure, ocx_store::file_structure::PackageDir) {
+        let package = tmp.join("pkg");
+        std::fs::create_dir_all(&package).unwrap();
+        (
+            FileStructure::with_root(tmp.join("home")),
+            ocx_store::file_structure::PackageDir::with_root(package),
+        )
+    }
+
+    /// V-L21: a fault after the first launcher is written leaves no `launchers/<G>`; a retry yields a complete one.
+    #[tokio::test]
+    async fn a_fault_after_the_first_launcher_leaves_no_directory_and_a_retry_completes_it() {
+        let tmp = tempdir().unwrap();
+        let (fs, package) = home_with_package(tmp.path());
+        let generation = host_generation();
+        let entries = entries_for(&["alpha", "beta"]);
+
+        let faulted = super::FAULT_AFTER
+            .scope(
+                1,
+                super::publish_package_launchers(&fs, package.root(), &generation, &entries),
+            )
+            .await;
+
+        assert!(faulted.is_err());
+        assert!(
+            !package.launchers(&generation).exists(),
+            "no half-written directory is published"
+        );
+        let retried = super::publish_package_launchers(&fs, package.root(), &generation, &entries)
+            .await
+            .unwrap();
+        assert_eq!(retried, Published::New);
+        assert!(super::launchers_complete(&package.launchers(&generation), &entries).await);
+    }
+
+    /// V-L22: two concurrent first uses both succeed, one publishing and one finding the winner, on one complete directory.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn two_concurrent_first_uses_converge_on_one_complete_directory() {
+        let tmp = tempdir().unwrap();
+        let (fs, package) = home_with_package(tmp.path());
+        let generation = host_generation();
+        let entries = entries_for(&["alpha", "beta"]);
+
+        let (first, second) = tokio::join!(
+            super::publish_package_launchers(&fs, package.root(), &generation, &entries),
+            super::publish_package_launchers(&fs, package.root(), &generation, &entries),
+        );
+
+        let mut outcomes = vec![first.unwrap(), second.unwrap()];
+        outcomes.sort_by_key(|published| *published == Published::AlreadyThere);
+        assert_eq!(outcomes, [Published::New, Published::AlreadyThere]);
+        assert!(super::launchers_complete(&package.launchers(&generation), &entries).await);
+        assert_eq!(listing(&package.launchers_root()), [generation.as_str()]);
+
+        let (a, b) = tokio::join!(
+            super::first_use(&fs, &package, &entries),
+            super::first_use(&fs, &package, &entries)
+        );
+        assert_eq!(
+            (a.unwrap(), b.unwrap()),
+            (super::EntryPointDir::Launchers, super::EntryPointDir::Launchers)
+        );
+    }
+
+    /// V-L23: a directory missing one record is retired and republished whole.
+    #[tokio::test]
+    async fn first_use_republishes_a_directory_missing_a_record() {
+        let tmp = tempdir().unwrap();
+        let (fs, package) = home_with_package(tmp.path());
+        let generation = host_generation();
+        let entries = entries_for(&["alpha", "beta"]);
+        let dir = package.launchers(&generation);
+        super::generate(package.root(), &entries, &dir).await.unwrap();
+        std::fs::remove_file(dir.join("beta.launch")).unwrap();
+
+        let chosen = super::first_use(&fs, &package, &entries).await.unwrap();
+
+        assert_eq!(chosen, super::EntryPointDir::Launchers);
+        assert!(super::launchers_complete(&dir, &entries).await);
+    }
+
+    /// V-L23: a symlink at `launchers/<G>` is removed, never followed, and a real directory published in its place.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn first_use_replaces_a_symlinked_directory_and_leaves_its_target_alone() {
+        let tmp = tempdir().unwrap();
+        let (fs, package) = home_with_package(tmp.path());
+        let generation = host_generation();
+        let entries = entries_for(&["alpha"]);
+        let elsewhere = tmp.path().join("elsewhere");
+        super::generate(package.root(), &entries, &elsewhere).await.unwrap();
+        let before = snapshot(&elsewhere);
+        std::fs::create_dir_all(package.launchers_root()).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, package.launchers(&generation)).unwrap();
+
+        let chosen = super::first_use(&fs, &package, &entries).await.unwrap();
+
+        assert_eq!(chosen, super::EntryPointDir::Launchers);
+        let dir = package.launchers(&generation);
+        assert!(!std::fs::symlink_metadata(&dir).unwrap().file_type().is_symlink());
+        assert!(super::launchers_complete(&dir, &entries).await);
+        assert_eq!(snapshot(&elsewhere), before, "the link target is untouched");
+    }
+
+    /// V-L24: a package directory removed before first use is not recreated by `launchers/`.
+    #[tokio::test]
+    async fn first_use_of_a_removed_package_fails_and_creates_nothing() {
+        let tmp = tempdir().unwrap();
+        let fs = FileStructure::with_root(tmp.path().join("home"));
+        let package = ocx_store::file_structure::PackageDir::with_root(tmp.path().join("gone"));
+
+        let error = super::first_use(&fs, &package, &entries_for(&["alpha"]))
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(&error, crate::Error::InternalFile(path, cause)
+                if *path == package.launchers_root() && cause.kind() == std::io::ErrorKind::NotFound),
+            "{error:?}"
+        );
+        assert!(!package.root().exists());
+    }
+
+    /// Whether the test runs as root, which no permission bit refuses.
+    #[cfg(unix)]
+    fn running_as_root() -> bool {
+        // SAFETY: `geteuid` takes no arguments, touches no memory, and always succeeds.
+        unsafe { libc::geteuid() == 0 }
+    }
+
+    #[cfg(unix)]
+    fn set_mode(path: &std::path::Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    /// V-L25: a read-only package directory composes a complete older `entrypoints/`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_read_only_package_directory_falls_back_to_a_complete_older_entrypoints() {
+        if running_as_root() {
+            return;
+        }
+        let tmp = tempdir().unwrap();
+        let (fs, package) = home_with_package(tmp.path());
+        let entries = entries_for(&["alpha", "beta"]);
+        std::fs::create_dir_all(package.entrypoints()).unwrap();
+        for name in ["alpha", "beta"] {
+            std::fs::write(package.entrypoints().join(name), b"#!/bin/sh\n").unwrap();
+        }
+        set_mode(package.root(), 0o555);
+
+        let chosen = super::first_use(&fs, &package, &entries).await;
+        let read_back = super::entry_point_dir(&package, &entries).await;
+        set_mode(package.root(), 0o755);
+
+        assert_eq!(chosen.unwrap(), super::EntryPointDir::Legacy);
+        assert_eq!(read_back, super::EntryPointDir::Legacy);
+        assert!(!package.launchers_root().exists());
+        assert_eq!(
+            listing(&package.entrypoints()),
+            ["alpha", "beta"],
+            "entrypoints/ is never written"
+        );
+    }
+
+    /// V-L25: with no complete older `entrypoints/`, the refusal names the path with a permission cause.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_read_only_package_directory_without_entrypoints_fails_naming_the_path() {
+        if running_as_root() {
+            return;
+        }
+        let tmp = tempdir().unwrap();
+        let (fs, package) = home_with_package(tmp.path());
+        let entries = entries_for(&["alpha", "beta"]);
+        std::fs::create_dir_all(package.entrypoints()).unwrap();
+        std::fs::write(package.entrypoints().join("alpha"), b"#!/bin/sh\n").unwrap();
+        set_mode(package.root(), 0o555);
+
+        let error = super::first_use(&fs, &package, &entries).await.unwrap_err();
+        set_mode(package.root(), 0o755);
+
+        assert!(
+            matches!(&error, crate::Error::InternalFile(path, cause)
+                if *path == package.launchers_root() && cause.kind() == std::io::ErrorKind::PermissionDenied),
+            "{error:?}"
+        );
     }
 
     /// An incomplete directory is not complete; neither is a link, nor a directory short one record.
