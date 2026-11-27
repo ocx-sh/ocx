@@ -351,6 +351,15 @@ fn environment_runfiles_roots(started: &str, context: &LookupContext<'_>, fs: &d
     entry_roots(&directory, context.windows, fs)
 }
 
+/// `<root>/<self>.launch`.
+fn candidate_record_path(root: &str, self_path: &str, windows: bool) -> String {
+    format!(
+        "{}/{self_path}.{}",
+        root.trim_end_matches(separators(windows)),
+        RECORD_EXTENSION
+    )
+}
+
 /// The record at `<root>/<self>.launch`, read under the same bounds as the one beside the started path.
 fn candidate_record(
     root: &str,
@@ -358,11 +367,7 @@ fn candidate_record(
     windows: bool,
     fs: &dyn LookupFs,
 ) -> Result<Option<Vec<u8>>, ShimError> {
-    let path = format!(
-        "{}/{self_path}.{}",
-        root.trim_end_matches(separators(windows)),
-        RECORD_EXTENSION
-    );
+    let path = candidate_record_path(root, self_path, windows);
     fs.read_sidecar(&path).map_err(|err| {
         refuse(format!(
             "cannot read launch record {path}: {err}; check that the file is readable"
@@ -715,7 +720,10 @@ pub(super) fn locate_with(
             _ => environment_runfiles_roots(started, context, fs),
         };
         for candidate in roots {
-            if accepts(&candidate, &sidecar.self_path, &raw, windows, fs)? {
+            // Candidate (a) names the file `raw` was just read from, so only its path is compared.
+            let is_own_file =
+                stage == 0 && candidate_record_path(&candidate, &sidecar.self_path, windows) == record_path;
+            if is_own_file || accepts(&candidate, &sidecar.self_path, &raw, windows, fs)? {
                 return bind_root(sidecar, &candidate, context);
             }
             rejected.push(candidate);
@@ -792,7 +800,7 @@ fn build_env(
         KeyFold::Exact => key.to_owned(),
         KeyFold::AsciiCaseInsensitive => key.to_ascii_uppercase(),
     };
-    // Folded key to the spelling it was first seen under and its value.
+    // Folded key to the last inherited spelling of it and that spelling's value.
     let mut env: BTreeMap<OsString, (OsString, OsString)> = BTreeMap::new();
     for (key, value) in inherited {
         env.insert(folded(&key), (key, value));
@@ -1631,6 +1639,8 @@ mod tests {
         /// Started paths that `stat` as the image (a symlink to it).
         #[cfg(unix)]
         links: HashSet<String>,
+        /// Every path `read_sidecar` was asked for, in order.
+        record_reads: std::cell::RefCell<Vec<String>>,
         /// Every path `read_lines` was asked for, in order.
         line_reads: std::cell::RefCell<Vec<String>>,
         /// How many times the lookup asked whether a started path is the running image.
@@ -1655,6 +1665,7 @@ mod tests {
             Ok(self.image.clone().unwrap_or_else(|| NO_IMAGE.to_string()))
         }
         fn read_sidecar(&self, path: &str) -> Result<Option<Vec<u8>>, ReadError> {
+            self.record_reads.borrow_mut().push(path.to_string());
             if self.unreadable.contains(path) {
                 return Err(ReadError::NotRegular);
             }
@@ -1717,6 +1728,46 @@ mod tests {
         let located = direct(locate(&started, &unix(None), &fs).unwrap());
         assert_eq!(located.root, "/vendor");
         assert_eq!(located.sidecar.vendor_id, VENDOR_A);
+    }
+
+    /// The record beside the started path is read once: candidate (a) names that same file, so reading it again
+    /// would compare the bytes with themselves.
+    #[test]
+    fn the_record_beside_the_started_path_is_not_read_again_for_the_own_root() {
+        let started = format!("/vendor/{SELF_PATH}");
+        let fs = FakeFs::default().with_file(&format!("{started}.launch"), &sidecar_json(VENDOR_A, SELF_PATH));
+        assert_eq!(direct(locate(&started, &unix(None), &fs).unwrap()).root, "/vendor");
+        let reads = fs.record_reads.borrow();
+        assert_eq!(
+            reads
+                .iter()
+                .filter(|path| **path == format!("{started}.launch"))
+                .count(),
+            1,
+            "{reads:?}"
+        );
+    }
+
+    /// Control: a root other than the started path's own still compares the record it holds.
+    #[test]
+    fn a_record_under_another_root_is_still_read_and_compared() {
+        let started = "/out/bin/tool";
+        let bytes = sidecar_json(VENDOR_A, SELF_PATH);
+        let fs = FakeFs::default()
+            .with_file("/out/bin/tool.launch", &bytes)
+            .with_dir("/out/bin/tool.runfiles", &["tree"])
+            .with_file(&format!("/out/bin/tool.runfiles/tree/{SELF_PATH}.launch"), &bytes);
+        assert_eq!(
+            direct(locate(started, &unix(None), &fs).unwrap()).root,
+            "/out/bin/tool.runfiles/tree"
+        );
+        assert!(
+            fs.record_reads
+                .borrow()
+                .contains(&format!("/out/bin/tool.runfiles/tree/{SELF_PATH}.launch")),
+            "{:?}",
+            fs.record_reads.borrow()
+        );
     }
 
     // ── the launcher reads only NAME.launch ─────────────────────────
