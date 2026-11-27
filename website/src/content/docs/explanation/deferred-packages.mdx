@@ -77,7 +77,7 @@ The launcher starts the hidden `ocx launcher shim` subcommand. The subcommand re
 
 First it checks that the package declares that name. The check reads the package metadata the home already holds, offline, and downloads nothing. A name the package does not declare never triggers a download.
 
-If the metadata is missing from the home, the launcher refuses and names `ocx install <id>` as the remedy. `ocx clean` keeps what a deferred tool needs for its first use, so a clean does not cause this.
+If the metadata is missing from the home, the launcher refuses, names the package with its pinned digest, and downloads nothing. `ocx clean` keeps what a deferred tool needs for its first use, so a clean does not cause this.
 
 Then the subcommand runs the ordinary pull, which is the same three-layer fetch, extract, and assemble pipeline an eager install uses. It then resolves the requested name on the freshly materialized package's own `PATH` and executes it.
 

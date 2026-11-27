@@ -26,8 +26,8 @@ impl PackageManager {
     /// # Errors
     ///
     /// [`Error::FindFailed`] when the metadata is not readable locally (a blob removed by hand): the refusal
-    /// names the manifest digest and the `ocx install` remedy instead of guessing a claim set. `ocx clean` keeps
-    /// every blob this read needs while the deferred tree stands.
+    /// names the pinned digest instead of guessing a claim set. `ocx clean` keeps every blob this read needs
+    /// while the deferred tree stands.
     pub async fn claimed_shim_names(
         &self,
         package: &ocx_oci::PinnedPackageRef,
