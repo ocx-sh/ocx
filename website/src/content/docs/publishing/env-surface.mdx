@@ -125,7 +125,7 @@ ocx package env --self ghcr.io/acme/mytool:1.0.0
 The first command prints a table with `Key`, `Type` and `Value` columns that lists the `public` and `interface` entries. A package that marks `PATH` and `JAVA_HOME` as `"public"` shows both keys there. The second lists the `public` and `private` entries the package's own launchers see.
 
 :::tip[Packages with entry points]
-If your package declares [`entrypoints`][authoring-entry-points], OCX prepends each installed package's `entrypoints/` directory to PATH at exec time. Consumers see it as `<symlink-root>/current/entrypoints`. The `${self.installPath}/bin` entry can then be `"private"`, so the launcher is the only consumer interface.
+If your package declares [`entrypoints`][authoring-entry-points], OCX prepends each installed package's launcher directory, `launchers/<generation>/`, to PATH at exec time. The `${self.installPath}/bin` entry can then be `"private"`, so the launcher is the only consumer interface.
 :::
 
 ## See also \{#see-also\}

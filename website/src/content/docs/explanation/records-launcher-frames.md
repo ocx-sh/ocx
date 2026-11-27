@@ -70,9 +70,9 @@ On a host with a fail-closed policy, run a preview command with the policy relax
 
 The shim frame is therefore the only place a deferred package's content is downloaded. Its first invocation produces two records, for a different reason than the entry point split.
 
-The join key is the same manifest digest used everywhere else. Unlike an `ocx launcher exec` frame with no forwarded name, a shim's generated launcher carries [the pinned identifier it was built for][deferred-materialize] as an argument. `ocx launcher shim` reads that identifier directly, so it needs no parent to know its own logical name.
+The join key is the same manifest digest used everywhere else. Unlike an `ocx launcher exec` frame with no forwarded name, a shim's launcher record carries [the pinned identifier it was built for][deferred-materialize] as an argument. `ocx launcher shim` reads that identifier directly, so it needs no parent to know its own logical name.
 
-A later invocation of the same binary resolves straight to its real `entrypoints/`, which outranks the shim on `PATH`. It produces exactly one record, the same shape as any package that was never deferred.
+A later invocation of the same binary resolves straight to its real `launchers/<generation>/` directory, which outranks the shim on `PATH`. It produces exactly one record, the same shape as any package that was never deferred.
 
 ## Patch companions in the record {#patch}
 

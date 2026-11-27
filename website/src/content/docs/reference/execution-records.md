@@ -248,7 +248,7 @@ The sink is always a directory. OCX writes one self-named file per record into i
 - Authenticity: a record is not signed and the sink is not authenticated. On a shared sink a collector should reject a record whose owning uid disagrees with `process.user.id` and treat `process.user.name` as display only
 - Symlink pin: the configured sink is resolved to its real location once per invocation and re-checked before every write. A sink that no longer resolves to itself refuses the write with the configured failure posture. The posture is a warning by default or exit `78` under `required = true`, classified as a configuration fault
 - Limits of the pin: it compares a canonical path and not directory identity. It is not shared across the outer and inner frame of an entry point invocation. It is an integrity control and not a security boundary
-- Paths: records contain absolute paths, including the invoking user's home directory (`process.executable` and the package `content/` and `entrypoints/` paths), so size sink permissions and retention accordingly
+- Paths: records contain absolute paths, including the invoking user's home directory (`process.executable` and the package `content/` and `launchers/` paths), so size sink permissions and retention accordingly
 
 See [What the sink guarantees][execution-records-explanation-sink].
 

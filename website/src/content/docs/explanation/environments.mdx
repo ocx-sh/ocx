@@ -50,7 +50,7 @@ Selects the **private surface**: only `private` and `public` entries are emitted
 `private` entries are visible in this mode. That is intentional. A package's own launcher needs the internal paths (compilers, runtimes, shared libraries) that the publisher deliberately kept off the consumer surface.
 
 :::tip[The private surface is automatic for launchers]
-The `ocx launcher exec` subcommand — used by every generated launcher script — forces the private surface internally. You do not need to pass `--self` to `ocx package exec` yourself; rely on the default interface surface for direct invocations.
+The `ocx launcher exec` subcommand — used by every generated launcher — forces the private surface internally. You do not need to pass `--self` to `ocx package exec` yourself; rely on the default interface surface for direct invocations.
 :::
 
 ### Visibility Truth Table \{#truth-table\}
@@ -73,7 +73,7 @@ The `ocx launcher exec` subcommand — used by every generated launcher script �
 | [`ocx package test`][cmd-package-test] | off | Maintainer preview of an unpublished package |
 | [`ocx package deps`][cmd-deps] | off | Show dependency tree with visibility annotations |
 
-`--self` is package vocabulary and exists only on the `ocx package` commands. The project commands ([`ocx exec`][cmd-run], [`ocx env`][cmd-env]) do not accept it. The private surface leaves a package's own `entrypoints/` off `PATH`, and a project toolchain is a consumer of every package it declares. The flag would compose a strictly worse toolchain rather than a fuller one.
+`--self` is package vocabulary and exists only on the `ocx package` commands. The project commands ([`ocx exec`][cmd-run], [`ocx env`][cmd-env]) do not accept it. The private surface leaves a package's own launcher directory off `PATH`, and a project toolchain is a consumer of every package it declares. The flag would compose a strictly worse toolchain rather than a fuller one.
 
 ## Composition Order \{#composition-order\}
 
@@ -292,7 +292,7 @@ No error is raised when two packages set the same constant key. The later packag
 
 ## Launchers and Forwarding \{#launchers-forwarding\}
 
-A generated launcher re-enters `ocx` with the package root baked in at install time. A running `ocx` also forwards its resolution-affecting settings to every `ocx` it spawns. [Launcher forwarding][launcher-forwarding] covers both.
+A generated launcher re-enters `ocx` with the package root stored in its record. A running `ocx` also forwards its resolution-affecting settings to every `ocx` it spawns. [Launcher forwarding][launcher-forwarding] covers both.
 
 ## Closure Surfaces \{#closure-surfaces\}
 
@@ -307,7 +307,7 @@ Visibility decides what a consumer inherits, and `--self` decides what a package
 The two surfaces overlap by design:
 
 - A `public` dependency reaches both axes and appears in both surfaces. A dependency reached only through a `private` edge appears in `private` only, and an `interface`-only dependency in `interface` only.
-- Entry points carry an implicit `interface` visibility. A launcher exists so a consumer can invoke the package, while the package's own runtime bypasses its launchers and calls `bin/` directly. The reference's own entry points therefore appear under `interface` only, and `ocx package env --self` never puts its `entrypoints/` on `PATH`. A dependency's entry points cross the edge like any interface-side carrier. They appear on whichever surfaces admit the dependency, because they are how this package invokes that dependency.
+- Entry points carry an implicit `interface` visibility. A launcher exists so a consumer can invoke the package, while the package's own runtime bypasses its launchers and calls `bin/` directly. The reference's own entry points therefore appear under `interface` only, and `ocx package env --self` never puts its launcher directory on `PATH`. A dependency's entry points cross the edge like any interface-side carrier. They appear on whichever surfaces admit the dependency, because they are how this package invokes that dependency.
 - Binaries carry an implicit `public` visibility, since raw executables serve consumers and the package's own launchers alike. The reference's own binaries, like its `public` env vars, appear in both surfaces.
 - Env crossing is asymmetric, matching the composer. The reference's own vars cross on the surface's axis: `interface` and `public` vars on `interface`, `private` and `public` vars on `private`. A dependency contributes only its interface-side vars on either surface. A dependency's own `private` var is that dependency's internal detail and never crosses the edge.
 

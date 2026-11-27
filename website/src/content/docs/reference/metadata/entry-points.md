@@ -7,11 +7,11 @@ The `entrypoints` and `binaries` fields of [`metadata.json`](./index.md#format) 
 
 ## Entry Points {#entry-points}
 
-The `entrypoints` object declares named launchers that [`ocx package install`][cmd-package-install] generates into an `entrypoints/` directory inside the package directory. Each launcher is a `.sh` script on Unix, or a native `<name>.exe` shim plus a one-line `<name>.shim` sidecar on Windows.
+The `entrypoints` object declares named launchers that [`ocx package install`][cmd-package-install] writes into a `launchers/<generation>/` directory inside the package directory. Each launcher is one native program, `<name>` (`<name>.exe` on Windows), with a record `<name>.launch` beside it.
 
-- Each launcher re-enters through [`ocx launcher exec`][cmd-launcher-exec] with the package root baked in, and resolves its dispatch command against the composed `PATH` of the package's [`env`](./env.md#env) block.
+- Each launcher re-enters through [`ocx launcher exec`][cmd-launcher-exec] with the package root in its record, and resolves its dispatch command against the composed `PATH` of the package's [`env`](./env.md#env) block.
 - The dispatch command is the entry point's own name unless the optional `command` field sets another.
-- A package with no entry points produces no `entrypoints/` directory.
+- A package with no entry points produces no `launchers/` directory.
 
 See [Entry points][in-depth-entry-points] for how launchers are generated, reached and reported.
 
@@ -21,7 +21,7 @@ See [Entry points][in-depth-entry-points] for how launchers are generated, reach
 
 | Position | Type | Required | Description |
 |---|---|---|---|
-| Key | string | Yes | The invocable name: the launcher script filename and the command users invoke. Must match `^[a-z0-9][a-z0-9_-]*$` and be at most 64 bytes. |
+| Key | string | Yes | The invocable name: the launcher file name and the command users invoke. Must match `^[a-z0-9][a-z0-9_-]*$` and be at most 64 bytes. |
 | Value | object | Yes | Per-entry fields. `{}` is the common case: the invocable name is the dispatched command. |
 | `command` | string | No | Dispatch target resolved on the composed `PATH` when it differs from the invocable name. Same slug rule and 64-byte limit as the key. Not interpolated, so it must be a plain slug and not a path. |
 | `args` | array of strings | No | Fixed leading arguments prepended before user-supplied arguments at dispatch. Each element is one argv token with no shell word-splitting. `${self.installPath}` and its alias `${installPath}` (with the `:native` / `:posix` modifier) are interpolated per element; `${deps.*}` and `${self.env.*}` are rejected at publish time with `DisallowedToken`. Omitted and `[]` are wire-identical. |
@@ -49,7 +49,7 @@ The optional `binaries` array lists bare executable names the package exposes on
 
 - Claim: the array is a publisher-declared claim that OCX does not verify against the package content
 - Launchers: a generated entry-point launcher name never appears in it
-- Same name in both: `binaries` and `entrypoints` may both name `acme-tool`, because `entrypoints/` is prepended ahead of `bin/` on the composed `PATH` and so the launcher, not the raw binary, resolves
+- Same name in both: `binaries` and `entrypoints` may both name `acme-tool`, because the launcher directory is prepended ahead of `bin/` on the composed `PATH`. The launcher, not the raw binary, resolves
 
 ```json
 {

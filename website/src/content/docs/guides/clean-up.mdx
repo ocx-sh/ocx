@@ -17,6 +17,8 @@ Toolchain commands only drop references too. [`ocx remove`][cmd-remove], [`ocx u
 
 [`ocx clean`][cmd-clean] sweeps the whole store in one pass. It removes every package that has no live install symlink and no [forward-ref][in-depth-storage-gc] from a dependent package. Layers and blobs that become unreachable go with them.
 
+The sweep also retires launcher directories that a newer launcher generation superseded. These are `launchers/<generation>/` inside a package, the matching `deferred/<generation>/` subtrees, and older render directories under `<home>/toolchain/shells/`. Each retired directory is reported as kind `launchers`. A directory of the current generation stays, and so does a render directory the render marker names.
+
 Projects that share one `OCX_HOME` also share the store. `ocx clean` keeps every package referenced by any registered project's `ocx.lock`, not just the active one. A project is registered whenever `ocx add`, `ocx remove`, `ocx lock`, `ocx update` or `ocx upgrade` writes its lock file. Browse `$OCX_HOME/projects/` to see which projects are registered.
 
 Deleting a project's directory makes its packages collectable at the next clean, with no warning. Pass `--force` to bypass the project registry. Live install symlinks are always honoured.
@@ -47,13 +49,13 @@ object                              /home/alice/.ocx/packages/.../
 temp                                /home/alice/.ocx/temp/abc.../
 ```
 
-A blank cell means the entry is unreferenced and will be collected. A filled cell names the project directories that hold the package. `temp` entries are never governed by the project ledger and never show a value. A live run prints only `Type | Path`, because held entries are never collected.
+A blank cell means the entry is unreferenced and will be collected. A filled cell names the project directories that hold the package. `temp` entries are never governed by the project ledger and never show a value. A `launchers` entry is a superseded launcher directory. `--dry-run` reports it and removes nothing. A live run prints only `Type | Path`, because held entries are never collected.
 
 ### Limits \{#cleanup-limits\}
 
 Do not run `clean` while other OCX commands run. A concurrent install may reference an object that `clean` is about to remove, and the install then fails.
 
-The rendered toolchain tree under `<home>/toolchain/` sits outside the reference graph. It is derived state that `ocx pull` rewrites, so `clean` never walks it. The packages its links point at stay live through the project's own lock.
+The rendered toolchain tree under `<home>/toolchain/` sits outside the reference graph. It is derived state that `ocx pull` rewrites, so `clean` never walks its links. Only render directories under `shells/` that a newer render superseded are retired. The packages its links point at stay live through the project's own lock.
 
 The consent sweep runs on every `ocx clean`, including `--dry-run` and `--force`. A stamp is removed only when its recorded project directory is confirmed absent. A dangling symlink where the directory used to be still counts as present. An unreadable, malformed or unrecognised-version stamp is retained. A run whose object-store picture is already untrustworthy retains everything, consent stamps included.
 
