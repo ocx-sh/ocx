@@ -29,13 +29,19 @@ impl LauncherGeneration {
     }
 
     /// `of(shim::host_blob()?, ocx_env_apply::launch::SCHEMA_VERSION, HOME_LAUNCHER_REVISION)`; `None` on a host with no blob.
+    ///
+    /// Hashed once per process: the blob is up to 640 KiB and every deferred-tool start asks.
     pub fn host() -> Option<Self> {
-        let blob = crate::shim::host_blob()?;
-        Some(Self::of(
-            blob,
-            ocx_env_apply::launch::SCHEMA_VERSION,
-            HOME_LAUNCHER_REVISION,
-        ))
+        static HOST: std::sync::OnceLock<Option<LauncherGeneration>> = std::sync::OnceLock::new();
+        HOST.get_or_init(|| {
+            let blob = crate::shim::host_blob()?;
+            Some(Self::of(
+                blob,
+                ocx_env_apply::launch::SCHEMA_VERSION,
+                HOME_LAUNCHER_REVISION,
+            ))
+        })
+        .clone()
     }
 
     /// Reads a generation back from a directory name; `None` unless it is exactly 16 lowercase hex characters.
