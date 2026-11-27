@@ -4,8 +4,8 @@
 //! Pure shim logic, split from the Win32 calls in [`crate::run`] so the Linux CI host can unit-test it.
 
 use super::ShimError;
-use super::direct::{fold, is_fully_qualified, refuse, separators};
-use ocx_env_apply::launch::{LaunchRecord, ToolchainTier, is_batch_target, record_path_for};
+use super::direct::{fold, refuse, separators};
+use ocx_env_apply::launch::{LaunchRecord, ToolchainTier, is_batch_target, is_fully_qualified, record_path_for};
 use std::ffi::{OsStr, OsString};
 
 /// Derives the entrypoint stem: the module path's file name with exactly one trailing `.exe` stripped

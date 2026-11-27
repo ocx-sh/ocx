@@ -308,9 +308,15 @@ fn check_header(kind: LaunchKind, expected: LaunchKind, schema_version: u32) -> 
     Ok(())
 }
 
-/// An absolute path field outside `direct`: absolute on any host, no CR or LF, no [`VENDOR_DIR_TOKEN`].
-fn check_absolute_path(field: &str, path: &str) -> Result<(), RecordError> {
-    if !is_absolute_any_host(path) {
+/// An absolute path field outside `direct`: no CR or LF, no [`VENDOR_DIR_TOKEN`]; absolute on any host, and for a
+/// Windows launcher fully qualified, because a path without a drive or share follows the caller's current drive.
+fn check_absolute_path(field: &str, path: &str, windows: bool) -> Result<(), RecordError> {
+    let absolute = if windows {
+        is_fully_qualified(path, true)
+    } else {
+        is_absolute_any_host(path)
+    };
+    if !absolute {
         return Err(RecordError::NotAbsolute(path.to_owned()));
     }
     if path.contains(['\r', '\n']) {
@@ -333,6 +339,21 @@ pub fn is_absolute_any_host(path: &str) -> bool {
     path.starts_with("\\\\")
         || path.starts_with('/')
         || (bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && matches!(bytes[2], b'\\' | b'/'))
+}
+
+/// Whether `path` names one file whatever the working directory: on Windows a drive letter and a separator, or two
+/// separators; a lone `\x` or `/x` reads on the current drive (CWE-427). On Unix a leading `/`.
+#[must_use]
+pub fn is_fully_qualified(path: &str, windows: bool) -> bool {
+    if !windows {
+        return path.starts_with('/');
+    }
+    let separator = |byte: u8| matches!(byte, b'/' | b'\\');
+    match path.as_bytes() {
+        [first, second, ..] if separator(*first) && separator(*second) => true,
+        [drive, b':', third, ..] => drive.is_ascii_alphabetic() && separator(*third),
+        _ => false,
+    }
 }
 
 /// Structural admissibility of a pinned identifier, deliberately not an OCI reference parser: printable ASCII, no
@@ -391,9 +412,9 @@ impl PackageRecord {
     /// # Errors
     ///
     /// The [`RecordError`] of the first rule broken.
-    pub fn validate(&self, _windows: bool) -> Result<(), RecordError> {
+    pub fn validate(&self, windows: bool) -> Result<(), RecordError> {
         check_header(self.kind, LaunchKind::Package, self.schema_version)?;
-        check_absolute_path("package_root", &self.package_root)
+        check_absolute_path("package_root", &self.package_root, windows)
     }
 }
 
@@ -419,15 +440,15 @@ impl ToolchainRecord {
     /// # Errors
     ///
     /// The [`RecordError`] of the first rule broken.
-    pub fn validate(&self, _windows: bool) -> Result<(), RecordError> {
+    pub fn validate(&self, windows: bool) -> Result<(), RecordError> {
         check_header(self.kind, LaunchKind::Toolchain, self.schema_version)?;
         match (self.tier, self.project_root.as_deref()) {
-            (ToolchainTier::Project, Some(root)) => check_absolute_path("project_root", root)?,
+            (ToolchainTier::Project, Some(root)) => check_absolute_path("project_root", root, windows)?,
             (ToolchainTier::Project, None) | (ToolchainTier::Global, Some(_)) => return Err(RecordError::TierMismatch),
             (ToolchainTier::Global, None) => {}
         }
         if let Some(ocx) = self.ocx.as_deref() {
-            check_absolute_path("ocx", ocx)?;
+            check_absolute_path("ocx", ocx, windows)?;
             if is_batch_target(ocx) {
                 return Err(RecordError::Malformed("ocx is a batch file".to_owned()));
             }
@@ -1058,5 +1079,33 @@ mod tests {
             };
             assert_eq!(record.validate(false).is_ok(), absolute, "{root}");
         }
+    }
+
+    /// On Windows a path with no drive or share (`\p`, `/p`) names a file on the current drive, so every absolute path
+    /// field of every home kind refuses it; the forms that name one drive or share stay.
+    #[test]
+    fn a_windows_record_refuses_a_path_on_the_current_drive() {
+        for (path, qualified) in [
+            ("C:\\p", true),
+            ("C:/p", true),
+            ("\\\\server\\share", true),
+            ("//server/share", true),
+            ("\\p", false),
+            ("/p", false),
+            ("C:p", false),
+            ("p", false),
+        ] {
+            let package = format!(r#"{{"kind":"package","schema_version":1,"package_root":{path:?}}}"#);
+            let project =
+                format!(r#"{{"kind":"toolchain","schema_version":1,"tier":"project","project_root":{path:?}}}"#);
+            let ocx = format!(r#"{{"kind":"toolchain","schema_version":1,"tier":"global","ocx":{path:?}}}"#);
+            for (field, text) in [("package_root", package), ("project_root", project), ("ocx", ocx)] {
+                let decoded = LaunchRecord::decode(text.as_bytes(), true);
+                assert_eq!(decoded.is_ok(), qualified, "{field} {path}: {decoded:?}");
+            }
+        }
+        // The same text on a Unix host is judged by the shared rule: a leading `/` is absolute.
+        let rooted = r#"{"kind":"package","schema_version":1,"package_root":"/p"}"#;
+        assert!(LaunchRecord::decode(rooted.as_bytes(), false).is_ok());
     }
 }

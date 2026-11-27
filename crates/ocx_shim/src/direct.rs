@@ -10,7 +10,7 @@ use super::ShimError;
 use super::core;
 use ocx_env_apply::launch::{
     DirectRecord, EnvRecord, LaunchRecord, MAX_RECORD_BYTES, RECORD_EXTENSION, VENDOR_DIR_TOKEN, is_absolute_any_host,
-    record_path_for,
+    is_fully_qualified, record_path_for,
 };
 use ocx_env_apply::{ApplyKind, KeyFold, apply_one};
 use std::collections::{BTreeMap, BTreeSet};
@@ -256,21 +256,6 @@ pub(super) fn is_absolute(path: &str, windows: bool) -> bool {
         is_absolute_any_host(path)
     } else {
         path.starts_with('/')
-    }
-}
-
-/// Whether `path` names one file whatever the working directory: on Windows a drive letter and separator, or a
-/// `\\` prefix; [`is_absolute`] also takes a driveless `\x`, which Windows reads on the current drive (CWE-427).
-pub(super) fn is_fully_qualified(path: &str, windows: bool) -> bool {
-    if !windows {
-        return path.starts_with('/');
-    }
-    let bytes = path.as_bytes();
-    let separator = |byte: u8| matches!(byte, b'/' | b'\\');
-    match bytes {
-        [first, second, ..] if separator(*first) && separator(*second) => true,
-        [drive, b':', third, ..] => drive.is_ascii_alphabetic() && separator(*third),
-        _ => false,
     }
 }
 
