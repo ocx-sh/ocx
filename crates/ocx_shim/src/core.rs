@@ -172,8 +172,9 @@ pub(super) fn environment_value<'a>(
 /// The child environment of a home launch: `inherited`, minus the tier selectors when `home` bakes the only one, and
 /// with [`LAUNCHER_DEPTH_VAR`] one higher.
 ///
-/// A depth that is absent or not a number counts as 0. A depth at [`MAX_LAUNCHER_DEPTH`] or more is a loop: two
-/// launchers whose resolved programs start each other would otherwise run until the machine gives out.
+/// A depth that is absent or not a number counts as 0; digits past the `u32` range count as the limit. A depth at
+/// [`MAX_LAUNCHER_DEPTH`] or more is a loop: two launchers whose resolved programs start each other would otherwise
+/// run until the machine gives out.
 pub(super) fn home_environment(
     inherited: Vec<(OsString, OsString)>,
     home: &HomeLaunch,
@@ -181,8 +182,11 @@ pub(super) fn home_environment(
 ) -> Result<Vec<(OsString, OsString)>, ShimError> {
     let depth = environment_value(&inherited, LAUNCHER_DEPTH_VAR, windows)
         .and_then(OsStr::to_str)
-        .and_then(|text| text.parse::<u32>().ok())
-        .unwrap_or(0);
+        .map_or(0, |text| match text.parse::<u32>() {
+            Ok(depth) => depth,
+            Err(error) if *error.kind() == std::num::IntErrorKind::PosOverflow => MAX_LAUNCHER_DEPTH,
+            Err(_) => 0,
+        });
     if depth >= MAX_LAUNCHER_DEPTH {
         return Err(refuse(format!(
             "launcher loop: {LAUNCHER_DEPTH_VAR} is {depth}, the limit is {MAX_LAUNCHER_DEPTH}; two launchers start each other"
@@ -580,7 +584,7 @@ mod tests {
 
     #[test]
     fn vl07_an_unparsable_depth_counts_as_zero() {
-        for text in ["", "x", "-1", "1.5", "99999999999999999999"] {
+        for text in ["", "x", "-1", "1.5"] {
             let child =
                 home_environment(environment(&[(LAUNCHER_DEPTH_VAR, text)]), &package(), false).expect("starts");
             assert_eq!(
@@ -784,6 +788,16 @@ mod tests {
                     error.stderr_message()
                 );
             }
+        }
+    }
+
+    /// A count too large for the counter is still 32 or more.
+    #[test]
+    fn vl14_a_depth_past_the_counter_range_is_a_launcher_loop() {
+        for depth in ["4294967296", "99999999999999999999"] {
+            let error = home_environment(environment(&[(LAUNCHER_DEPTH_VAR, depth)]), &package(), false)
+                .expect_err("a huge depth is a loop");
+            assert!(error.stderr_message().contains("launcher loop"), "{depth}");
         }
     }
 
