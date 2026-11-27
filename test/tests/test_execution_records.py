@@ -718,7 +718,7 @@ def test_entrypoint_invocation_emits_two_records_joined_on_digest(
     """Executing an entrypoint records twice: the launcher, then the leaf binary.
 
     ADR option L1. The outer frame resolves the generated launcher under
-    ``entrypoints/`` and owns the logical identity; the inner ``launcher exec``
+    ``launchers/<G>/`` and owns the logical identity; the inner ``launcher exec``
     re-entry resolves the real binary under ``content/``. They are complementary
     halves and join on the package's content digest, which both carry.
     """
@@ -752,8 +752,8 @@ def test_entrypoint_invocation_emits_two_records_joined_on_digest(
     outer = next(r for r in records if r["executable"]["sh.ocx.kind"] == "launcher")
     inner = next(r for r in records if r["executable"]["sh.ocx.kind"] == "binary")
 
-    assert "/entrypoints/" in outer["process"]["executable"].replace("\\", "/"), (
-        "the outer frame resolves the generated launcher under entrypoints/; "
+    assert "/launchers/" in outer["process"]["executable"].replace("\\", "/"), (
+        "the outer frame resolves the generated launcher under launchers/<G>/; "
         f"got {outer['process']['executable']}"
     )
     assert "/content/" in inner["process"]["executable"].replace("\\", "/"), (

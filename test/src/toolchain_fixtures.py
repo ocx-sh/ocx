@@ -717,7 +717,7 @@ class ToolchainProject:
 
     @property
     def default_trampoline(self) -> Path:
-        """``<home>/shells/default/bin/<binary name>`` — keyed on the exposed
+        """``<home>/shells/<active shell>/bin/<binary name>`` — keyed on the exposed
         name, never the ``[tools]`` key, and named by the **physical**
         spelling, not through ``active``. ``<name>.exe`` on Windows."""
         return shell_bin(self.home) / trampoline_name(self.default_binary)
