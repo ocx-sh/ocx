@@ -1176,7 +1176,7 @@
       "launcher",
       "launchers"
     ],
-    "definition": "A generated native executable that starts a program from the record `NAME.launch` beside it; the record's `kind` says whether it starts a package entry point, a deferred tool, a toolchain tool or a vendored program.",
+    "definition": "A generated native executable that starts a program as the record `NAME.launch` beside it directs; the record's `kind` says which kind of program.",
     "learnMore": "explanation/launcher-forwarding/#launcher-embedding",
     "category": "ocx",
     "avoid": [
