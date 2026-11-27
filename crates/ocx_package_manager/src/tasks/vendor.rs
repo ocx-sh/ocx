@@ -141,6 +141,8 @@ impl PackageManager {
             write_content(self, &request, &selection, &mut manifest, staged.path()).await?;
             VendorContent::Present
         };
+        // After the last index read; `None` without `--index`.
+        manifest.index_lookups = self.index_lookups();
         let written_size = publish(&request.output, staged, &manifest).await?;
         Ok(VendorOutcome {
             manifest_path: VendorLayout::new(&request.output).manifest_file(),
@@ -375,6 +377,8 @@ async fn read_closures(
 ///
 /// Sequential: a closure is a handful of packages and the first refusal must be the same one on every run.
 async fn verify_selection(manager: &PackageManager, closures: &ClosureSet) -> Result<(), VendorError> {
+    // `--index DIR` is a read-only input: a vendor run never grows it.
+    let manager = &manager.read_only_view();
     let mut verified: Vec<(PinnedPackageRef, bool)> = Vec::new();
     for root in &closures.roots {
         for node in closures.nodes(root) {
@@ -1024,7 +1028,7 @@ async fn write_content(
         }
     }
     manifest.content = Content::Present;
-    ensure_binary_targets_exist(&layout, &manifest.tools).await?;
+    ensure_binary_targets_exist(&layout, &manifest.tools, &manifest.packages).await?;
 
     // No blob for the platform means no launcher and no sidecar; the manifest then lists no `launcher_path`.
     if let Some(blob) = ocx_store::shim::blob_for(platform) {
@@ -1053,17 +1057,26 @@ async fn write_content(
 /// Refuses a binary whose manifest `target_path` is not a regular file of the staged tree.
 ///
 /// The path is derived from metadata alone, so `--manifest-only` and a full run emit the same one; this is
-/// where a full run proves it.
-async fn ensure_binary_targets_exist(layout: &VendorLayout, tools: &[Tool]) -> Result<(), VendorError> {
+/// where a full run proves it. The claim is the publisher's, so the message names the package that made it.
+async fn ensure_binary_targets_exist(
+    layout: &VendorLayout,
+    tools: &[Tool],
+    packages: &[Package],
+) -> Result<(), VendorError> {
     for tool in tools.iter().filter(|tool| tool.kind == ToolKind::Binary) {
         let is_file = tokio::fs::metadata(layout.resolve(&tool.target_path))
             .await
             .is_ok_and(|metadata| metadata.is_file());
         if !is_file {
+            let owner = packages
+                .iter()
+                .find(|package| package.digest == tool.package)
+                .map_or(tool.package.as_str(), |package| package.identifier.as_str());
             return Err(VendorError::PathUnrepresentable {
                 path: format!(
-                    "binary `{}` is expected at {}, which the package content does not hold as a file; \
-                     a package whose program is a batch file or lives outside its first PATH directory must expose it as an entry point",
+                    "{owner}: its `binaries` claim lists `{}`, a program the content does not hold (expected at {}); \
+                     the publisher must correct the claim, or expose a batch file or a program outside the first PATH \
+                     directory as an entry point",
                     tool.name, tool.target_path
                 ),
             });
@@ -1082,6 +1095,8 @@ async fn place_package(
     node: &ClosureNode,
     key: &PackageKey,
 ) -> Result<PlacedPackage, VendorError> {
+    // `--index DIR` is a read-only input: a vendor run never grows it.
+    let manager = &manager.read_only_view();
     let requested: PackageRef = node.identifier.clone().into();
     let pull_failed = |kind| {
         VendorError::Package(crate::Error::InstallFailed(vec![PackageError::new(
@@ -1664,7 +1679,7 @@ mod tests {
         std::fs::write(layout.resolve("pkg/content/bin/present"), b"x").expect("file");
 
         let windows = binary_tool("pkg/content/bin/hello.exe", ToolKind::Binary);
-        let error = ensure_binary_targets_exist(&layout, &[windows])
+        let error = ensure_binary_targets_exist(&layout, &[windows], &[])
             .await
             .expect_err("only hello.cmd exists");
         assert!(matches!(error, VendorError::PathUnrepresentable { .. }), "{error:?}");
@@ -1677,12 +1692,12 @@ mod tests {
         );
 
         let unix = binary_tool("pkg/content/bin/hello", ToolKind::Binary);
-        assert!(ensure_binary_targets_exist(&layout, &[unix]).await.is_err());
+        assert!(ensure_binary_targets_exist(&layout, &[unix], &[]).await.is_err());
 
         let mut present = binary_tool("pkg/content/bin/present", ToolKind::Binary);
         present.name = "present".to_owned();
         let entrypoint = binary_tool("pkg/content/bin/hello.exe", ToolKind::Entrypoint);
-        ensure_binary_targets_exist(&layout, &[present, entrypoint])
+        ensure_binary_targets_exist(&layout, &[present, entrypoint], &[])
             .await
             .expect("control: a present file passes and an entry point is skipped");
     }
@@ -1698,11 +1713,11 @@ mod tests {
             .expect("the cmake binary");
         let (_dir, layout, _) = staged_tool(std::slice::from_ref(&binary.target_path)).await;
 
-        ensure_binary_targets_exist(&layout, &manifest.tools)
+        ensure_binary_targets_exist(&layout, &manifest.tools, &manifest.packages)
             .await
             .expect("a file at the manifest-only path passes");
         let (_dir, layout, _) = staged_tool(&[]).await;
-        let error = ensure_binary_targets_exist(&layout, &manifest.tools)
+        let error = ensure_binary_targets_exist(&layout, &manifest.tools, &manifest.packages)
             .await
             .expect_err("no file at that path");
         assert!(matches!(error, VendorError::PathUnrepresentable { .. }), "{error:?}");
@@ -3099,5 +3114,158 @@ mod tests {
         assert!(folds_case(&platform("windows/amd64")));
         assert!(folds_case(&platform("darwin/arm64")));
         assert!(!folds_case(&platform("linux/amd64")));
+    }
+
+    // ── A vendor run writes nothing into the index directory ─────────────────
+
+    /// Every file under `root` with its bytes; an absent `root` is empty.
+    fn snapshot(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+        let mut files = BTreeMap::new();
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(dir) = pending.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else {
+                    let bytes = std::fs::read(&path).expect("file");
+                    files.insert(path, bytes);
+                }
+            }
+        }
+        files
+    }
+
+    /// Placing a digest-addressed package over a seeded, writable index leaves the index directory as it was
+    /// (C-119): resolving an image index through a writable chain persists a dispatch object, so this fails
+    /// when `place_package` resolves with the manager it was given.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn placing_a_package_writes_nothing_into_the_index_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path().join("home");
+        let (source, leaf) = register_leaf(FakeManifestSource::default(), serde_json::json!([]));
+        let document = index_document(&leaf, &[("linux", "amd64")]);
+        let index_digest = Algorithm::Sha256.hash(document.as_bytes());
+        let source = source
+            .with("1.0", document.as_bytes())
+            .with(&index_digest.to_string(), document.as_bytes());
+        let manager = manager_over(&home, source);
+        let store = ocx_index::IndexStore::machine_local(&FileStructure::with_root(home));
+        std::fs::create_dir_all(store.root()).expect("index directory");
+        std::fs::write(store.root().join("seed.json"), b"{}").expect("seed");
+        let before = snapshot(store.root());
+        let layout = VendorLayout::new(dir.path().join("out"));
+
+        // The fake registry serves no layers, so the pull ends in an error; the resolve it follows has run.
+        let result = place_package(
+            &manager,
+            &linux_amd64(),
+            &layout,
+            SetupGroups::new(),
+            index_digest.to_string(),
+            &closure_node(&index_digest),
+            &package_key(&index_digest),
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "the fake registry serves no layers: {:?}",
+            result.map(|_| ())
+        );
+        let after = snapshot(store.root());
+        assert_eq!(
+            after.keys().collect::<Vec<_>>(),
+            before.keys().collect::<Vec<_>>(),
+            "no file was added to the index directory"
+        );
+        assert_eq!(after, before, "the index directory is byte-identical");
+    }
+
+    /// The refusal names the package with its tag, the claim, the program and who must act (C-121).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_declared_binary_the_content_lacks_names_the_package_and_the_claim() {
+        let (_dir, layout, manifest) = staged_tool(&[]).await;
+        let binary = manifest
+            .tools
+            .iter()
+            .find(|tool| tool.kind == ToolKind::Binary)
+            .expect("the cmake binary");
+        let package = manifest
+            .packages
+            .iter()
+            .find(|package| package.digest == binary.package)
+            .expect("the owner");
+
+        let error = ensure_binary_targets_exist(&layout, &manifest.tools, &manifest.packages)
+            .await
+            .expect_err("no file at that path");
+
+        assert!(matches!(error, VendorError::PathUnrepresentable { .. }), "{error:?}");
+        let message = error.to_string();
+        for fragment in [
+            package.identifier.as_str(),
+            "tool:1.0",
+            "`binaries`",
+            "`cmake`",
+            "does not hold",
+            "publisher",
+        ] {
+            assert!(message.contains(fragment), "{fragment:?} missing from: {message}");
+        }
+    }
+
+    /// `--index` lists the paths resolution read, once and sorted; without it the field is absent.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_manifest_lists_index_lookups_only_with_a_recorder() {
+        let (source, _, _) = registered_tool();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let fs = FileStructure::with_root(dir.path().join("home"));
+        let recorder = ocx_index::LookupRecorder::new();
+        recorder.record("b.example/catalog.json", false);
+        recorder.record("a.example/catalog.json", true);
+        recorder.record("b.example/catalog.json", false);
+        let store = ocx_index::IndexStore::machine_local(&fs).with_lookup_recorder(recorder);
+        let index = Index::from_chained_with_content_store(
+            LocalIndex::new(LocalConfig {
+                index_store: store.clone(),
+            }),
+            vec![Index::from_impl(source)],
+            ChainMode::Default,
+            fs.blobs.clone(),
+        );
+        let manager = PackageManager::new(fs, index, None, REGISTRY).with_index(store);
+        let mut request = packages_request(vec![package("tool", "1.0")], linux_amd64());
+        request.output = dir.path().join("out");
+
+        let outcome = manager.vendor(request).await.expect("the manifest-only run");
+
+        let written: VendorManifest =
+            serde_json::from_slice(&std::fs::read(&outcome.manifest_path).expect("manifest")).expect("decodes");
+        let lookups = written.index_lookups.expect("the field is present with a recorder");
+        assert_eq!(
+            Some(lookups.clone()),
+            manager.index_lookups(),
+            "as the manager reports them"
+        );
+        let paths: Vec<&str> = lookups.iter().map(|lookup| lookup.path.as_str()).collect();
+        assert!(
+            paths.windows(2).all(|pair| pair[0] < pair[1]),
+            "sorted, each once: {paths:?}"
+        );
+        assert!(
+            paths.contains(&"a.example/catalog.json") && paths.contains(&"b.example/catalog.json"),
+            "{paths:?}"
+        );
+
+        let (source, _, _) = registered_tool();
+        let plain_dir = tempfile::tempdir().expect("tempdir");
+        let plain = manager_over(&plain_dir.path().join("home"), source);
+        let mut request = packages_request(vec![package("tool", "1.0")], linux_amd64());
+        request.output = plain_dir.path().join("out");
+        let outcome = plain.vendor(request).await.expect("the manifest-only run");
+        let text = std::fs::read_to_string(&outcome.manifest_path).expect("manifest");
+        assert!(!text.contains("index_lookups"), "absent without --index");
     }
 }
