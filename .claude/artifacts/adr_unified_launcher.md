@@ -724,6 +724,8 @@ Only `ocx clean` retires a superseded generation or render directory; first use 
 
 Limits, stated: a process paused between its start and its record read across a retirement of its directory exits 78 when it resumes; a live shell that hashed a retired path (bash `hash`) fails until it re-resolves; a second `ocx` build with another generation sharing the home sees its directories retired by the first one's clean and recreates them on its next first use. A retirement that Windows refuses leaves the directory whole for a later clean (`Retired::LeftForLater`).
 
+The generation sweep (`retire_other_generations`, `crates/ocx_package_manager/src/tasks/clean.rs`) takes no lock; only the `shells/` sweep takes the home's `toolchain-render` lock. A first use or a publish by another build can race with it. The retired directories are superseded, so no launcher of this build reads them. A first use that finds an incomplete directory rebuilds it (§ 6.2 step 2). The limit is tolerated.
+
 **The deferred staging fix.** `stage_shim_dir` uses `tempfile::TempDir::new_in(temp root)` with no lock (`prepare_lazy.rs:108-122`), so `ocx clean` sees an orphan (`temp_store.rs:159-161`). Staging moves to `fs.temp.scratch`, whose lock file exists before the directory. An older `ocx clean` honours the same lock, because `stale_entries` predates this record.
 
 ## 13. Platform details (item 9)

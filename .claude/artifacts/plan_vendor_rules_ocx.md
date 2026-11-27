@@ -935,9 +935,10 @@ continue the first run's C-001…C-032 and C-RO-01…C-RO-17, which stay in forc
   project homes on one `PATH` do not loop (65) [V-L39, V-L40].
 - **C-136** `ocx_setup::run` phase 1.6: when `$OCX_HOME/ocx.lock` exists, render the global home; a failure warns, never fails setup;
   after `ocx self update` to a build with a new blob, `active` names a new directory [V-L42].
-- **C-137** `ocx clean` retires non-current `launchers/<G'>`, `deferred/<G'>`, and every `shells/default-<16 hex>`, `.staging-*`,
-  `.gc-*` that is neither the stamp's `shell_dir` nor `previous_shell_dir`, under the home's `toolchain-render` lock, reported as
-  `launchers`; `--dry-run` only reports; a Windows refusal leaves the directory whole [V-L30, V-L41, V-L32].
+- **C-137** `ocx clean` retires non-current `launchers/<G'>` and `deferred/<G'>` without a lock, and every `shells/default-<16 hex>`,
+  `.staging-*`, `.gc-*` that is neither the stamp's `shell_dir` nor `previous_shell_dir`, under the home's `toolchain-render` lock
+  (that sweep only; `retire_other_generations` takes none), reported as `launchers`; `--dry-run` only reports; a Windows refusal
+  leaves the directory whole [V-L30, V-L41, V-L32] (amended after delta review round 2).
 - **C-138** On Windows the `active` switch has no window without `active`: the two `junction_proof_*` tests pass in `junction-proof`
   (variant A); if they fail, TR builds variant B′ and a `cfg(windows)` unit asserts that the render calls `symlink::replace_atomic`, and
   the pull request states the exception (DP-41) [V-L31, V-L32].
@@ -982,7 +983,11 @@ continue the first run's C-001…C-032 and C-RO-01…C-RO-17, which stay in forc
 - **C-RO-30** The program runs per kind: `pinned` → E4, a dependency's file → E5, a write target outside the workspace → E12, `project`
   on a scratch copy with `ocx update --no-pull` (MR-14), `index` with `ocx index update`, an `ocx` failure → E6 and the loop goes on;
   then one nested `bazel --noblock_for_lock mod deps --lockfile_mode=update --repo_env=RULES_OCX_UPDATE=<names>` (E7, E11); a
-  missing `bazel` → E8; Windows ARGS with `& | < > ^ %` or `"` → E13; exit code by § The `update` targets step 4.
+  missing `bazel` → E8; Windows ARGS with `& | < > ^ %` or `"` → E13 (exit 64); for `@rules_ocx//:update` on Windows any character
+  outside `A-Za-z0-9 . _ : / @ + -` and the space between names → E13, so `,` `;` `=` and a tab are refused; on a Windows write path
+  every component below the workspace root, the target file included, is tested for a link, and the first one is refused with its own
+  text (exit 78, the E12 slot; a link above the workspace root is not checked); the `sh` form accepts `,` and `=`; exit code by § The
+  `update` targets step 4 (amended after delta review round 2).
 - **C-RO-31** Each hub BUILD has `alias(name = "update")`; `@rules_ocx//:update` exists; a tool named `update` is refused by
   `hub_content_error`.
 - **C-RO-25** `ocx.lock` is published by a unique temporary file and a rename; a symlinked `ocx.lock` → E14 (§ Publishing).
