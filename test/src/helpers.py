@@ -686,6 +686,11 @@ def _scans_a_directory(env: list[dict]) -> bool:
     )
 
 
+def _writes_windows_binary(plat: str, host: str = sys.platform) -> bool:
+    """A Windows host writes a batch/exe leaf only for a Windows target; a wasm or Unix leaf keeps its name."""
+    return host == "win32" and plat.startswith("windows/")
+
+
 def make_package(
     ocx: OcxRunner,
     repo: str,
@@ -811,10 +816,10 @@ def make_package(
         bin_body = (bin_scripts or {}).get(name)
         executable = (bin_exec or {}).get(name, True)
         # A name already spelled `<name>.exe` keeps it: vendoring takes a Windows binary to be `<name>.exe`.
-        if sys.platform == "win32" and script.suffix != ".exe":
+        if _writes_windows_binary(plat) and script.suffix != ".exe":
             script = script.with_suffix(".bat")
             script.write_text(f"@echo {marker}\n")
-        elif sys.platform == "win32":
+        elif _writes_windows_binary(plat):
             script.write_text(f"@echo {marker}\n")
         elif bin_body is not None:
             script.write_text(bin_body)
