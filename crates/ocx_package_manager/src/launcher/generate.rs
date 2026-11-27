@@ -711,7 +711,7 @@ mod tests {
             &entries_for(&["cmake"]),
             &dest,
             host_blob(),
-            false,
+            cfg!(windows),
         )
         .await;
 
@@ -726,7 +726,7 @@ mod tests {
         let dest = tmp.path().join("pkg").join("launchers");
 
         super::generate_for(
-            &tmp.path().join("pkg"),
+            std::path::Path::new("/ocx/pkg"),
             &entries_for(&["cmake"]),
             &dest,
             host_blob(),
