@@ -1050,6 +1050,7 @@ async fn write_content(
         }
     }
     manifest.content = Content::Present;
+    mark_declared_binaries_executable(&manifest.tools, &mut manifest.packages);
     ensure_binary_targets_exist(&layout, &manifest.tools, &manifest.packages).await?;
 
     // No blob for the platform means no launcher and no sidecar; the manifest then lists no `launcher_path`.
@@ -1074,6 +1075,26 @@ async fn write_content(
         }
     }
     Ok(())
+}
+
+/// Marks each declared binary's file executable in the listed trees.
+///
+/// A host without Unix mode bits lists every file as not executable; the declaration is the host-independent
+/// fact, so the manifest for one platform reads the same whichever host wrote it.
+fn mark_declared_binaries_executable(tools: &[Tool], packages: &mut [Package]) {
+    let declared: BTreeSet<&str> = tools
+        .iter()
+        .filter(|tool| tool.kind == ToolKind::Binary)
+        .map(|tool| tool.target_path.as_str())
+        .collect();
+    for file in packages
+        .iter_mut()
+        .filter_map(|package| package.tree.as_mut())
+        .flat_map(|tree| tree.files.iter_mut())
+        .filter(|file| declared.contains(file.path.as_str()))
+    {
+        file.executable = true;
+    }
 }
 
 /// Refuses a binary whose manifest `target_path` is not a regular file of the staged tree.
@@ -1709,6 +1730,36 @@ mod tests {
             .expect_err("an escaping target");
 
         assert!(matches!(error, VendorError::PathUnrepresentable { .. }), "{error:?}");
+    }
+
+    /// A host with no mode bits lists a declared binary as not executable; the manifest says executable anyway.
+    #[test]
+    fn a_declared_binary_is_executable_whatever_the_host_mode_bits_say() {
+        let file = |path: &str| FileEntry {
+            path: path.to_owned(),
+            executable: false,
+        };
+        let mut packages = vec![Package {
+            identifier: "r/p@sha256:0".to_owned(),
+            digest: "sha256:0".to_owned(),
+            index_digest: None,
+            package_dir: "p/0".to_owned(),
+            content_dir: "p/0/c".to_owned(),
+            dependencies: Vec::new(),
+            names_declared: true,
+            entrypoints: Vec::new(),
+            tree: Some(Tree {
+                files: vec![file("p/0/c/bin/tool.exe"), file("p/0/c/share/readme")],
+                links: Vec::new(),
+                link_free_dirs: Vec::new(),
+            }),
+        }];
+        let tools = [binary_tool("p/0/c/bin/tool.exe", ToolKind::Binary)];
+
+        mark_declared_binaries_executable(&tools, &mut packages);
+
+        let files = &packages[0].tree.as_ref().expect("tree").files;
+        assert_eq!(files.iter().map(|f| f.executable).collect::<Vec<_>>(), [true, false]);
     }
 
     fn binary_tool(target_path: &str, kind: ToolKind) -> Tool {
