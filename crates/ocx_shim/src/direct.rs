@@ -87,7 +87,8 @@ pub(super) trait LookupFs {
 
 /// What the lookup needs beyond the started path.
 pub(super) struct LookupContext<'a> {
-    /// The working directory, used to make relative paths absolute.
+    /// The working directory, used to make relative paths absolute; empty when it cannot be read, which only kind
+    /// `direct` needs.
     pub cwd: &'a str,
     /// The launcher's own `RUNFILES_DIR`.
     pub runfiles_dir: Option<&'a str>,
@@ -607,7 +608,12 @@ pub(super) fn lookup_unix(
     fs: &dyn LookupFs,
 ) -> Result<Probed, ShimError> {
     locate_with(
-        || started_path_unix(argv0.ok_or(ShimError::SelfPathFailure)?, context.cwd, path_var, fs),
+        || {
+            if context.cwd.is_empty() {
+                return Err(ShimError::SelfPathFailure);
+            }
+            started_path_unix(argv0.ok_or(ShimError::SelfPathFailure)?, context.cwd, path_var, fs)
+        },
         context,
         fs,
     )
@@ -1206,6 +1212,14 @@ fn run_home(home: &core::HomeLaunch, image: &str, caller_args: Vec<OsString>) ->
     })
 }
 
+/// The working directory as a path string; empty when it is gone, unreadable or not Unicode.
+fn working_directory() -> String {
+    std::env::current_dir()
+        .ok()
+        .and_then(|dir| dir.into_os_string().into_string().ok())
+        .unwrap_or_default()
+}
+
 /// The `.launch` launcher on Unix: reads the record, finds the vendor root, builds the environment and argv, and
 /// `exec`s the tool.
 ///
@@ -1217,10 +1231,7 @@ pub(super) fn run() -> Result<i32, ShimError> {
 
     let mut arguments = std::env::args_os();
     let argv0 = arguments.next().and_then(|argument| argument.into_string().ok());
-    let cwd = std::env::current_dir()
-        .ok()
-        .and_then(|dir| dir.into_os_string().into_string().ok())
-        .ok_or(ShimError::SelfPathFailure)?;
+    let cwd = working_directory();
 
     let runfiles_dir = variable("RUNFILES_DIR");
     let manifest_file = variable("RUNFILES_MANIFEST_FILE");
@@ -1257,17 +1268,20 @@ pub(super) fn run_windows(started: &str) -> Result<i32, ShimError> {
     let runfiles_dir = std::env::var_os("RUNFILES_DIR").map(|value| value.to_string_lossy().into_owned());
     #[expect(clippy::disallowed_methods, reason = "no ocx_env edge: the shim's size budget")]
     let manifest_file = std::env::var_os("RUNFILES_MANIFEST_FILE").map(|value| value.to_string_lossy().into_owned());
-    let cwd = std::env::current_dir()
-        .ok()
-        .and_then(|dir| dir.into_os_string().into_string().ok())
-        .ok_or(ShimError::SelfPathFailure)?;
+    let cwd = working_directory();
     let context = LookupContext {
         cwd: &cwd,
         runfiles_dir: runfiles_dir.as_deref(),
         manifest_file: manifest_file.as_deref(),
         windows: true,
     };
-    let located = match locate_with(|| Ok(started.to_string()), &context, &RealFs)? {
+    let started_path = || {
+        if cwd.is_empty() {
+            return Err(ShimError::SelfPathFailure);
+        }
+        Ok(started.to_string())
+    };
+    let located = match locate_with(started_path, &context, &RealFs)? {
         Probed::Direct(located) => located,
         Probed::Home(found) => {
             let stem = core::derive_stem(OsStr::new(&found.image))?;
@@ -1881,6 +1895,27 @@ mod tests {
         assert_eq!(err.exit_code(), 74);
         let err = lookup_unix(None, &unix(None), Some("/nowhere"), &fs).unwrap_err();
         assert_eq!(err.exit_code(), 74);
+    }
+
+    /// No working directory: a home record still runs, and a direct record, which joins paths onto it, is a 74.
+    #[test]
+    #[cfg(unix)]
+    fn without_a_working_directory_only_a_direct_launcher_fails() {
+        let image = "/store/render/bin/cmake";
+        let no_cwd = LookupContext { cwd: "", ..unix(None) };
+        let home = FakeFs {
+            image: Some(image.to_string()),
+            ..FakeFs::default()
+        }
+        .with_file(
+            &format!("{image}.launch"),
+            br#"{"kind":"package","schema_version":1,"package_root":"/p"}"#,
+        );
+        assert_eq!(found(lookup_unix(Some(image), &no_cwd, None, &home)).image, image);
+        let started = format!("/vendor/{SELF_PATH}");
+        let direct_fs = FakeFs::default().with_file(&format!("{started}.launch"), &sidecar_json(VENDOR_A, SELF_PATH));
+        let err = lookup_unix(Some(&started), &no_cwd, None, &direct_fs).unwrap_err();
+        assert_eq!(err.exit_code(), 74, "{}", err.stderr_message());
     }
 
     #[test]

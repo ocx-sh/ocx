@@ -609,3 +609,40 @@ fn a_package_root_outside_ocx_home_exits_77() {
     );
     assert_eq!(output.status.code(), Some(77), "{}", stderr_of(&output));
 }
+
+/// A home launcher needs no working directory: one started from a deleted directory still starts `ocx`.
+#[test]
+fn a_home_launcher_starts_from_a_deleted_working_directory() {
+    let vendor = Vendor::new("home-deleted-cwd");
+    let ocx = vendor.probe_ocx("pin");
+    let launcher = vendor.home_launcher("tool", PACKAGE_RECORD);
+    let gone = vendor.base.join("gone");
+    // `ETXTBSY` from a sibling thread's fork makes the shell's `exec` fail with 126; see `run_launcher`.
+    let output = (0..100)
+        .map(|_| {
+            std::fs::create_dir_all(&gone).unwrap();
+            Command::new("/bin/sh")
+                .args(["-c", r#"cd "$1" && rmdir "$1" && exec "$2""#, "sh"])
+                .arg(&gone)
+                .arg(&launcher)
+                .env_clear()
+                .env("OCX_BINARY_PIN", &ocx)
+                .env("PATH", SYSTEM_PATH)
+                .output()
+                .unwrap()
+        })
+        .find(|output| output.status.code() != Some(126) && !stderr_of(output).contains("Text file busy"))
+        .expect("the launcher starts within 100 attempts");
+    assert!(output.status.success(), "{}", stderr_of(&output));
+    assert_eq!(
+        report(&output).0,
+        [
+            ocx.display().to_string().as_str(),
+            "launcher",
+            "exec",
+            "/o/packages/p",
+            "--",
+            "tool"
+        ]
+    );
+}
