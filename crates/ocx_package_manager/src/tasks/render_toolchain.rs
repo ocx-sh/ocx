@@ -218,12 +218,12 @@ impl PackageManager {
         let fault: Option<String> = None;
         let fault = fault.as_deref();
 
-        // Step 1: a dry run returns before the case-fold probe, whose write would move the home's mtime.
+        // A dry run returns before the case-fold probe, whose write would move the home's mtime.
         if request.dry_run {
             return render_with(file_structure, request, false, fault).await;
         }
 
-        // Step 2: the home root, before the probe and `.gitignore` (both write into it). The
+        // The home root, before the probe and `.gitignore` (both write into it). The
         // symlinked-ancestor guard runs first: a symlink above the root relocates everything below it.
         let (scope, root) = (request.scope.clone(), request.home.root().to_path_buf());
         match tokio::task::spawn_blocking(move || {
@@ -248,7 +248,7 @@ impl PackageManager {
             }
         }
 
-        // Step 3: `.gitignore`, best-effort — a repository-controlled tree may deny it.
+        // `.gitignore`, best-effort — a repository-controlled tree may deny it.
         let gitignore_home = ToolchainHome::new(request.home.root().to_path_buf());
         match tokio::task::spawn_blocking(move || gitignore_home.ensure_gitignore()).await {
             Ok(Ok(_written)) => {}
@@ -259,7 +259,7 @@ impl PackageManager {
             Err(join_error) => log::warn!("The toolchain ignore-file task failed: {join_error}"),
         }
 
-        // Step 4: one lock over the whole body, held until this call returns.
+        // One lock over the whole body, held until this call returns.
         let _render_lock = match render_lock_parameters(file_structure, &request).acquire().await {
             Ok(guard) => guard,
             Err(error) => {
@@ -271,7 +271,7 @@ impl PackageManager {
             }
         };
 
-        // Step 5: the probe, against the root step 2 just created.
+        // The probe, against the root created above.
         let case_insensitive = match filesystem_is_case_insensitive(request.home.root()).await {
             Ok(answer) => answer,
             Err(error) => {
@@ -283,7 +283,7 @@ impl PackageManager {
             }
         };
 
-        // Step 6: `shells/`, the parent of every staging and render directory. A failure only warns:
+        // `shells/`, the parent of every staging and render directory. A failure only warns:
         // the publish then skips, and returning would skip a read-only checkout's links too.
         let root = request.home.root().to_path_buf();
         match tokio::task::spawn_blocking(move || ensure_shell_tree(&ToolchainHome::new(root))).await {
@@ -715,7 +715,7 @@ async fn render_bin(
         }
     };
 
-    // § 6.4 step 6, the commit point.
+    // The commit point: `active` switches only after the directory is published.
     switch_active(home, &shell_dir).await;
 
     let bin = home.render_dir(&shell_dir).join(TRAMPOLINE_BIN_DIR);
@@ -856,7 +856,13 @@ pub(crate) fn directory_matches(directory: &Path, expected: &BTreeMap<String, Bi
         if !is_record_name(&entry.file_name().to_string_lossy()) && !is_executable(&metadata) {
             return false;
         }
-        // Size and content hash, never `file_id`: a restored tree has new inodes and the same bytes, and must still match.
+        // Equal size and a known, equal file identity is the cheap path: the prompt gate must not read every launcher.
+        let identity = BinEntryStamp::from_metadata(&path, &metadata, stamped.content_hash.clone());
+        if identity.file_id.is_some() && identity == *stamped {
+            seen += 1;
+            continue;
+        }
+        // Otherwise size and content hash, never `file_id`: a restored tree has new inodes and the same bytes, and must still match.
         let Some(found) = BinEntryStamp::of_file(&path, &metadata) else {
             return false;
         };
@@ -923,7 +929,7 @@ async fn stage_render_dir(
     Ok(staged)
 }
 
-/// Publish `staged` as `shells/default-<16 hex>` and return that name (§ 6.4 step 5); an occupied name is
+/// Publish `staged` as `shells/default-<16 hex>` and return that name (`adr_unified_launcher.md` § 6.4 step 5); an occupied name is
 /// retried under a fresh one.
 ///
 /// # Errors
@@ -3235,11 +3241,32 @@ mod tests {
             "inode churn alone keeps the match"
         );
 
-        let mut changed = stamp.bin_fingerprint.clone();
+        let mut changed = moved.clone();
         changed.values_mut().next().expect("one entry").content_hash = "0".repeat(64);
         assert!(
             !directory_matches(&directory, &changed),
-            "the control: a changed hash is a mismatch"
+            "the control: a changed hash with another file identity is a mismatch"
+        );
+    }
+
+    /// An entry whose size and file identity equal the stamp is accepted without reading its bytes: a wrong
+    /// recorded hash proves the hash was not consulted.
+    ///
+    /// RED: hash every entry in `directory_matches`.
+    #[tokio::test]
+    async fn a_render_directory_whose_stat_pair_matches_is_accepted_without_hashing() {
+        let tree = Tree::new();
+        render_names(&tree, &["cmake"]).await;
+        let stamp = tree.stamp().expect("the stamp exists");
+        let directory = tree.home.render_dir(&stamp.shell_dir);
+        let mut unhashed = stamp.bin_fingerprint.clone();
+        for entry in unhashed.values_mut() {
+            assert!(entry.file_id.is_some(), "the identity is known on this host");
+            entry.content_hash = "0".repeat(64);
+        }
+        assert!(
+            directory_matches(&directory, &unhashed),
+            "equal size and identity: the recorded hash is never read"
         );
     }
 
@@ -3747,7 +3774,7 @@ mod tests {
         );
     }
 
-    /// V-30 / RUL-33 — a symlink at `shells/` swapped in after step 2's guard is
+    /// V-30 / RUL-33 — a symlink at `shells/` swapped in after the home-root guard is
     /// refused **at the staging create**, never followed.
     ///
     /// The render lock acquisition blocks for an unbounded time after the guard;
@@ -6509,16 +6536,16 @@ mod tests {
     /// `links` was the one tree-own directory nothing ever created under a
     /// guard: it came into existence only as `create_dir_all(<root>/links/
     /// <group>)`'s side effect, so its only check was `ensure_home_root`'s at
-    /// step 2 — and the render lock's unbounded wait sits between that check and
+    /// the home-root guard — and the render lock's unbounded wait sits between that check and
     /// this write. A local writer that swaps `links` for a symlink inside that
     /// window sends the group create and the entry's `replace_atomic` into an
     /// attacker-chosen directory. `bin/` and `shells/` already re-judge at the
     /// moment of use; this is the third level joining them.
     ///
     /// **The plant stands in for that swap.** Through the public render entry,
-    /// step 2 refuses a pre-existing symlinked `links` and the whole render
+    /// the home-root guard refuses a pre-existing symlinked `links` and the whole render
     /// skips, so the write-side re-judgement is only reachable by calling the
-    /// write directly — which is precisely the post-step-2 state a concurrent
+    /// write directly — which is precisely the post-guard state a concurrent
     /// writer produces. The positive control is the whole rest of this module:
     /// every render row publishes through a real `links/`, so a guard that
     /// refused everything could not stay green here.
@@ -6833,7 +6860,7 @@ mod tests {
         let lock = lock_of(vec![tool]);
         let groups = groups_of(&[DEFAULT_GROUP]);
         let platform = platform();
-        // The **public** entry, so step 6 creates `shells/` and the staging
+        // The **public** entry, so the render creates `shells/` and the staging
         // directory under the code that chooses their modes.
         tree.render_unfaulted(RenderRequest {
             unrendered: &[],
@@ -7041,7 +7068,7 @@ mod tests {
     /// still renders, or the guard could refuse everything.
     ///
     /// RED: drop the `refuse_symlinked_project_path` call in
-    /// `render_toolchain`'s step 2.
+    /// `render_toolchain`'s home-root guard.
     #[cfg(unix)]
     #[tokio::test]
     async fn a_symlinked_component_above_the_home_root_skips_the_render() {
@@ -7448,7 +7475,7 @@ mod tests {
             read_dir_names(tree.home.root()),
             vec!["active".to_string(), "shells".to_string()],
             "…leaving exactly the tree's own depth-1 names this render produced — `.gitignore` is \
-             step 3's and `links/` appears once a group renders"
+             the ignore file's and `links/` appears once a group renders"
         );
     }
 
@@ -7786,7 +7813,7 @@ mod tests {
     /// read as a mismatch. The order is the whole guarantee, and it is driven
     /// through the fault seam because the finished tree cannot show it.
     ///
-    /// RED: switch `active` in step 6 — `active` is present, and dangling, at
+    /// RED: switch `active` after publishing — `active` is present, and dangling, at
     /// the abort.
     #[tokio::test]
     async fn an_interrupted_render_never_leaves_active_pointing_at_an_absent_shell() {
@@ -7831,7 +7858,7 @@ mod tests {
     }
 
     /// One render of one default-group tool, through the **public** entry, so
-    /// step 6 runs. Returns the report.
+    /// the `active` switch runs. Returns the report.
     async fn render_a_default_tool(tree: &Tree) -> RenderReport {
         let lock = lock_of(vec![locked_tool(
             "cmake",
@@ -8111,7 +8138,7 @@ mod tests {
         assert_eq!(stamp.previous_shell_dir, first);
     }
 
-    /// § 6.4 step 3 — the stamp's directory intact but `active` healed to `shells/default` by an
+    /// The stamp's directory intact but `active` healed to `shells/default` by an
     /// older ocx: the render re-switches to the stamped directory and publishes nothing.
     ///
     /// RED: publish whenever `active` does not name the stamped directory — a second directory.
