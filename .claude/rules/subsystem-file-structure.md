@@ -52,7 +52,7 @@ These modules sit outside `file_structure/` — consumed across subsystems.
 | Module | Purpose | Used by |
 |--------|---------|---------|
 | `ocx_util::fs::symlink` | Symlink create/update/remove/is_link; Windows junction aware | ReferenceManager, pull, assemble walker, archive extractor |
-| `ocx_util::fs::publish` | `publish_dir` (one rename of a staged directory; `New` or `AlreadyThere`), `retarget_link` (switch a link or Windows junction in place), `retire_dir` (rename aside, then remove; only `ocx clean` calls it) | launcher writers, toolchain render, `ocx clean` |
+| `ocx_util::fs::publish` | `publish_dir` (one rename of a staged directory; `New` or `AlreadyThere`), `retarget_link` (switch a link or Windows junction in place), `retire_dir` (rename aside, then remove; `ocx clean` alone retires a superseded generation or render directory; first use may replace an incomplete directory of the running generation) | launcher writers, toolchain render, `ocx clean` |
 | `hardlink.rs` | Hardlink create/update — THE ONE place `std::fs::hard_link` lives | assemble walker, codesign |
 | `ocx_util::fs::path` | Lexical path helpers: `lexical_normalize`, `escapes_root`, `validate_symlinks_in_dir` | symlink, archive extractor, assemble walker |
 
