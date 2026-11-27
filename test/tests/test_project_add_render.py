@@ -95,6 +95,9 @@ def test_add_renders_the_toolchain_home_on_a_whole_batch_no_op(
     assert link.is_symlink() or link.exists(), (
         f"the re-add must render the entry link {link}; stderr={warm.stderr!r}"
     )
+    # `active` did not exist before the render: the rendered directory is a new
+    # `shells/default-<hex>`, so the precondition's path names nothing real.
+    trampoline = shell_bin(home) / trampoline_name(binary)
     assert trampoline.exists(), (
         f"the re-add must render the trampoline {trampoline}; stderr={warm.stderr!r}"
     )

@@ -660,7 +660,10 @@ def test_remove_prunes_the_removed_tool_s_trampoline(
 
     result = _run(ocx, project, "remove", "wp8")
     assert result.returncode == EXIT_SUCCESS, result.stderr
-    assert not trampoline.exists(), (
+    # The removal publishes a new render directory and switches `active`; the old
+    # directory is never edited (`ocx clean` retires it), so the trampoline is
+    # judged in the directory `active` names now.
+    assert not (shell_bin(_toolchain_home(project)) / trampoline_name(binary)).exists(), (
         "S-008 — `ocx remove` must re-render, taking the tool's trampoline with it"
     )
 
