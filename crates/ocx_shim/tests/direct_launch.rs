@@ -291,6 +291,24 @@ fn a_launcher_without_its_sidecar_exits_78_naming_the_path() {
     assert!(stderr_of(&output).contains("tool.launch"), "{}", stderr_of(&output));
 }
 
+/// V-L08 end to end: a launcher beside only a sidecar of an older kind never reads it.
+#[test]
+fn a_launcher_beside_only_an_old_sidecar_exits_78_naming_the_record() {
+    for extension in ["shim", "shimref", "exec", "direct"] {
+        let vendor = Vendor::new("old-sidecar");
+        vendor.install("[]", "[]", "[]");
+        std::fs::remove_file(vendor.root().join(format!("{SELF_PATH}.launch"))).unwrap();
+        vendor.write(&format!("{SELF_PATH}.{extension}"), b"/some/root\n", 0o644);
+        let output = vendor.run(&[], &[]);
+        assert_eq!(output.status.code(), Some(78), ".{extension}: {}", stderr_of(&output));
+        assert!(
+            stderr_of(&output).contains("tool.launch"),
+            ".{extension}: {}",
+            stderr_of(&output)
+        );
+    }
+}
+
 #[test]
 fn a_program_without_the_execute_bit_exits_77() {
     let vendor = Vendor::new("not-executable");
@@ -371,5 +389,260 @@ fn v66_launcher_overhead_with_one_thousand_runfiles_entries() {
         "V-66: {ENTRIES} runfiles entries: probe alone {direct:?}, through the launcher {through_launcher:?}, \
          overhead {:?}",
         through_launcher.saturating_sub(direct)
+    );
+}
+
+// ── home kinds: the launcher starts `ocx` with the frozen argv ─────────────────────────────────
+
+const SYSTEM_PATH: &str = "/usr/bin:/bin";
+
+impl Vendor {
+    /// A launcher copy named `name` in `<base>/home` with the record `record_json` beside it; returns its path.
+    fn home_launcher(&self, name: &str, record_json: &str) -> PathBuf {
+        let launcher = self.base.join("home").join(name);
+        std::fs::create_dir_all(launcher.parent().unwrap()).unwrap();
+        std::fs::copy(LAUNCHER_BINARY, &launcher).unwrap();
+        std::fs::write(launcher.with_extension("launch"), record_json).unwrap();
+        launcher
+    }
+
+    /// A probe standing in for `ocx`, at `<base>/<directory>/ocx`; returns its path.
+    fn probe_ocx(&self, directory: &str) -> PathBuf {
+        let probe = self.base.join(directory).join("ocx");
+        std::fs::create_dir_all(probe.parent().unwrap()).unwrap();
+        std::fs::write(&probe, PROBE_SCRIPT).unwrap();
+        std::fs::set_permissions(&probe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        probe
+    }
+}
+
+const PACKAGE_RECORD: &str = r#"{"kind":"package","schema_version":1,"package_root":"/o/packages/p"}"#;
+const PROJECT_RECORD: &str = r#"{"kind":"toolchain","schema_version":1,"tier":"project","project_root":"/w/proj"}"#;
+const GLOBAL_RECORD: &str = r#"{"kind":"toolchain","schema_version":1,"tier":"global"}"#;
+const DEFERRED_RECORD: &str = r#"{"kind":"deferred","schema_version":1,"identifier":"ocx.sh/t:1@sha256:00"}"#;
+
+/// Each home kind starts the pinned `ocx` with the frozen tokens, depth 1, and the caller's arguments.
+#[test]
+fn a_home_launcher_starts_the_pinned_ocx_with_the_frozen_argv() {
+    for (record, tokens) in [
+        (
+            PACKAGE_RECORD,
+            ["launcher", "exec", "/o/packages/p", "--", "tool"].as_slice(),
+        ),
+        (
+            DEFERRED_RECORD,
+            ["launcher", "shim", "ocx.sh/t:1@sha256:00", "--", "tool"].as_slice(),
+        ),
+        (
+            PROJECT_RECORD,
+            ["--project", "/w/proj", "exec", "--", "tool"].as_slice(),
+        ),
+        (GLOBAL_RECORD, ["--global", "exec", "--", "tool"].as_slice()),
+    ] {
+        let vendor = Vendor::new("home-argv");
+        let ocx = vendor.probe_ocx("pin");
+        let launcher = vendor.home_launcher("tool", record);
+        let pin = ocx.display().to_string();
+        let output = run_launcher(
+            &launcher,
+            &["a b", ""],
+            &[("OCX_BINARY_PIN", &pin), ("PATH", SYSTEM_PATH)],
+        );
+        assert!(output.status.success(), "{record}: {}", stderr_of(&output));
+        let (args, env) = report(&output);
+        let mut expected: Vec<String> = vec![pin];
+        expected.extend(tokens.iter().map(ToString::to_string));
+        expected.extend(["a b".to_string(), String::new()]);
+        assert_eq!(args, expected, "{record}");
+        assert_eq!(
+            env.get("__OCX_LAUNCHER_DEPTH").map(String::as_str),
+            Some("1"),
+            "{record}"
+        );
+    }
+}
+
+/// Only the toolchain kind removes `OCX_GLOBAL` and `OCX_PROJECT` from the child.
+#[test]
+fn only_a_toolchain_launcher_removes_the_tier_selectors_from_the_child() {
+    for (record, kept) in [
+        (PACKAGE_RECORD, true),
+        (DEFERRED_RECORD, true),
+        (PROJECT_RECORD, false),
+        (GLOBAL_RECORD, false),
+    ] {
+        let vendor = Vendor::new("home-strip");
+        let ocx = vendor.probe_ocx("pin");
+        let launcher = vendor.home_launcher("tool", record);
+        let pin = ocx.display().to_string();
+        let output = run_launcher(
+            &launcher,
+            &[],
+            &[
+                ("OCX_BINARY_PIN", &pin),
+                ("OCX_GLOBAL", "1"),
+                ("OCX_PROJECT", "/p"),
+                ("PATH", SYSTEM_PATH),
+            ],
+        );
+        assert!(output.status.success(), "{record}: {}", stderr_of(&output));
+        let (_, env) = report(&output);
+        assert_eq!(env.contains_key("OCX_GLOBAL"), kept, "{record}");
+        assert_eq!(env.contains_key("OCX_PROJECT"), kept, "{record}");
+    }
+}
+
+/// An empty pin is unset, and a `PATH` that lists the launcher's own directory first
+/// still reaches the real `ocx`, even though the launcher's own directory holds an entry point named `ocx`.
+#[test]
+fn an_entry_point_named_ocx_starts_the_real_ocx_past_its_own_directory() {
+    let vendor = Vendor::new("home-path");
+    let real = vendor.probe_ocx("real");
+    let launcher = vendor.home_launcher("ocx", PACKAGE_RECORD);
+    let own_directory = launcher.parent().unwrap().display().to_string();
+    let path = format!(
+        "{own_directory}::relative/bin:{}:{SYSTEM_PATH}",
+        real.parent().unwrap().display()
+    );
+    let output = run_launcher(&launcher, &["--version"], &[("OCX_BINARY_PIN", ""), ("PATH", &path)]);
+    assert!(output.status.success(), "{}", stderr_of(&output));
+    let (args, env) = report(&output);
+    assert_eq!(
+        args,
+        [
+            real.display().to_string().as_str(),
+            "launcher",
+            "exec",
+            "/o/packages/p",
+            "--",
+            "ocx",
+            "--version"
+        ]
+    );
+    assert_eq!(
+        env.get("__OCX_LAUNCHER_DEPTH").map(String::as_str),
+        Some("1"),
+        "V-L13: the real ocx starts at depth 1"
+    );
+}
+
+/// A directory whose `ocx` is itself a launcher is skipped, and none left is a 78.
+#[test]
+fn a_path_with_only_other_launchers_exits_78() {
+    let vendor = Vendor::new("home-only-launchers");
+    let launcher = vendor.home_launcher("tool", PACKAGE_RECORD);
+    let other = vendor.base.join("other");
+    std::fs::create_dir_all(&other).unwrap();
+    std::fs::copy(LAUNCHER_BINARY, other.join("ocx")).unwrap();
+    std::fs::write(other.join("ocx.launch"), PACKAGE_RECORD).unwrap();
+    let path = format!("{}:{SYSTEM_PATH}", other.display());
+    let output = run_launcher(&launcher, &[], &[("PATH", &path)]);
+    assert_eq!(output.status.code(), Some(78), "{}", stderr_of(&output));
+    assert!(
+        stderr_of(&output).contains("no ocx found on PATH"),
+        "{}",
+        stderr_of(&output)
+    );
+}
+
+/// A relative pin is a 78 and starts nothing.
+#[test]
+fn a_relative_pin_exits_78() {
+    let vendor = Vendor::new("home-relative-pin");
+    let launcher = vendor.home_launcher("tool", PACKAGE_RECORD);
+    let output = run_launcher(&launcher, &[], &[("OCX_BINARY_PIN", "bin/ocx"), ("PATH", SYSTEM_PATH)]);
+    assert_eq!(output.status.code(), Some(78), "{}", stderr_of(&output));
+    assert!(stderr_of(&output).contains("absolute"), "{}", stderr_of(&output));
+}
+
+/// Depth 32 stops before the program starts; depth 31 still starts it.
+#[test]
+fn a_launcher_loop_stops_at_depth_32_with_78() {
+    let vendor = Vendor::new("home-loop");
+    let ocx = vendor.probe_ocx("pin");
+    let launcher = vendor.home_launcher("tool", PACKAGE_RECORD);
+    let pin = ocx.display().to_string();
+    let env = |depth: &'static str| {
+        [
+            ("OCX_BINARY_PIN", pin.clone()),
+            ("__OCX_LAUNCHER_DEPTH", depth.to_string()),
+            ("PATH", SYSTEM_PATH.to_string()),
+        ]
+    };
+    let run = |depth| {
+        let pairs = env(depth);
+        let refs: Vec<(&str, &str)> = pairs.iter().map(|(key, value)| (*key, value.as_str())).collect();
+        run_launcher(&launcher, &[], &refs)
+    };
+    let stopped = run("32");
+    assert_eq!(stopped.status.code(), Some(78), "{}", stderr_of(&stopped));
+    assert!(stderr_of(&stopped).contains("launcher loop"), "{}", stderr_of(&stopped));
+    assert!(stopped.stdout.is_empty(), "the program never ran");
+    let last = run("31");
+    assert!(last.status.success(), "{}", stderr_of(&last));
+    assert_eq!(
+        report(&last).1.get("__OCX_LAUNCHER_DEPTH").map(String::as_str),
+        Some("32")
+    );
+}
+
+/// The package containment check runs on Unix too: a root outside `OCX_HOME`'s allow-list is a 77.
+#[test]
+fn a_package_root_outside_ocx_home_exits_77() {
+    let vendor = Vendor::new("home-containment");
+    let ocx = vendor.probe_ocx("pin");
+    let ocx_home = vendor.base.join("ocx-home");
+    let outside = vendor.base.join("elsewhere");
+    std::fs::create_dir_all(&ocx_home).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    let record = format!(
+        r#"{{"kind":"package","schema_version":1,"package_root":"{}"}}"#,
+        outside.display()
+    );
+    let launcher = vendor.home_launcher("tool", &record);
+    let pin = ocx.display().to_string();
+    let home = ocx_home.display().to_string();
+    let output = run_launcher(
+        &launcher,
+        &[],
+        &[("OCX_BINARY_PIN", &pin), ("OCX_HOME", &home), ("PATH", SYSTEM_PATH)],
+    );
+    assert_eq!(output.status.code(), Some(77), "{}", stderr_of(&output));
+}
+
+/// A home launcher needs no working directory: one started from a deleted directory still starts `ocx`.
+#[test]
+fn a_home_launcher_starts_from_a_deleted_working_directory() {
+    let vendor = Vendor::new("home-deleted-cwd");
+    let ocx = vendor.probe_ocx("pin");
+    let launcher = vendor.home_launcher("tool", PACKAGE_RECORD);
+    let gone = vendor.base.join("gone");
+    // `ETXTBSY` from a sibling thread's fork makes the shell's `exec` fail with 126; see `run_launcher`.
+    let output = (0..100)
+        .map(|_| {
+            std::fs::create_dir_all(&gone).unwrap();
+            Command::new("/bin/sh")
+                .args(["-c", r#"cd "$1" && rmdir "$1" && exec "$2""#, "sh"])
+                .arg(&gone)
+                .arg(&launcher)
+                .env_clear()
+                .env("OCX_BINARY_PIN", &ocx)
+                .env("PATH", SYSTEM_PATH)
+                .output()
+                .unwrap()
+        })
+        .find(|output| output.status.code() != Some(126) && !stderr_of(output).contains("Text file busy"))
+        .expect("the launcher starts within 100 attempts");
+    assert!(output.status.success(), "{}", stderr_of(&output));
+    assert_eq!(
+        report(&output).0,
+        [
+            ocx.display().to_string().as_str(),
+            "launcher",
+            "exec",
+            "/o/packages/p",
+            "--",
+            "tool"
+        ]
     );
 }
