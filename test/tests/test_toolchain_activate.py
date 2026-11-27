@@ -1398,14 +1398,9 @@ def test_a_repointed_link_with_bin_untouched_is_healed_or_withheld(
     segments = _segments(result)
     healed = link_entries(home)[f"default/{project.default_key}"] == correct
     exposed = _real(shell_bin(home)) in segments
-    # Stated as the refusal rather than as a disjunction of outcomes. A review
-    # pass proposed collapsing this to `assert not exposed` on the premise that
-    # C-064 makes `healed` unreachable — measured, it is reachable and this row
-    # reds, so the premise is wrong and the docstring's "either outcome" is the
-    # contract. What is never allowed is the conjunction below.
-    #
-    # Not vacuous: `correct != other` and the byte-identical `shells/default-<hex>/bin`
-    # snapshot above prove the repoint really happened before the prompt ran.
+    # The refusal, not a disjunction of outcomes: `healed` is reachable (measured), so "either
+    # outcome" is the contract and only the conjunction below is forbidden. Not vacuous:
+    # `correct != other` and the `shells/default-<hex>/bin` snapshot prove the repoint happened.
     assert not (exposed and not healed), (
         "refused: `shells/default-<hex>/bin` is on PATH while `default/"
         f"{project.default_key}` still points at the other package; "
@@ -1458,15 +1453,11 @@ def test_a_branch_switch_at_the_same_path_never_dereferences_the_other_branch(
     )
     exposed = _real(shell_bin(checkout.home)) in segments
     healed = link_entries(checkout.home)[f"default/{checkout.key}"] != stale_target
-    # The link half is asserted separately from the run half **because the run
-    # half is defended twice**: a trampoline re-resolves `ocx.lock` at run time
-    # and bakes a digest root, so it names the checked-out branch even when the
-    # `<group>/<entry>` link still points at the branch that was pulled. Only
-    # the link assertion can tell "the prompt healed the tree" from "the
-    # trampoline happens not to consult it" — and the composing emitters *do*
-    # consult it.
-    # The refusal, not a disjunction of outcomes — see the sibling row above for
-    # why `healed` is reachable and a review pass's contrary premise was wrong.
+    # The link half is asserted apart from the run half because the run half is defended twice:
+    # a trampoline re-resolves `ocx.lock` and bakes a digest root, so it names the checked-out
+    # branch even while the link still points at the pulled one. Only the link assertion tells
+    # "the prompt healed the tree" from "the trampoline never consults it". The refusal, not a
+    # disjunction of outcomes: `healed` is reachable, as the sibling row above shows.
     assert not (exposed and not healed), (
         "refused: the trampoline directory is on PATH while the link still names "
         f"the branch that was pulled ({stale_target!r}); segments={segments}"

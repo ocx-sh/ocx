@@ -1,40 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 The OCX Authors
-"""Acceptance tests for the rendered toolchain tree.
+"""Acceptance tests for the rendered toolchain tree, traced to ``.claude/artifacts/adr_toolchain_activation.md``.
 
-Two halves, both traced to design record ``.claude/artifacts/adr_toolchain_activation.md``:
+Two halves: every composing emitter heals the groups it is about to emit, not just the default
+one; and the render / prune / stamp / config-refusal suite at the *tree* level. Where
+``test_toolchain_cli.py`` covers the CLI half of an item, the case here observes the tree: which
+artefacts survive, what the stamp records, whether two renders are byte-identical.
 
-* Every composing emitter heals the groups it is about to emit, not just the
-  default one.
-* The render / prune / stamp / config-refusal suite, at the *tree* level.
+Why ``ocx exec -g ci`` discriminates: the non-composing ``bin``-mode prompt path is narrowed to
+the default group, and that narrowing must not leak here. Without the per-group heal,
+``ocx exec -g ci`` composes through a stale ``ci/<entry>`` link after a branch switch and runs the
+previous package while the lock says otherwise. **RED for the two heal cases: narrow the heal back
+to the default group.** The unit half of the per-entry degrade lives in
+``crates/ocx_package_manager/src/composer.rs``; these cases prove the ``-g`` set reaches
+``ToolchainLinks::groups`` through the CLI.
 
-Where WP-8's ``test_toolchain_cli.py`` already covers the CLI half of an item
-(does ``pull`` render, does ``remove`` prune, does a skip roll the commit back),
-the case here observes the **tree**: which artefacts survive, what the stamp
-records, and whether two renders are byte-identical. It is not a second copy of
-the same assertion.
-
-Why ``ocx exec -g ci`` is the discriminating invocation
--------------------------------------------------------
-C-062 narrows the *non-composing* ``bin``-mode prompt path to the default
-group, and that narrowing must not leak here. Without C-070, ``ocx exec -g ci``
-in the following lane composes through a stale ``ci/<entry>`` link after a
-branch switch and runs the previous package while the lock says otherwise —
-S-006's stamp protection covers the default group only, so nothing else catches
-it. **RED for the two C-070 cases: narrow the heal back to the default group.**
-
-The unit half of C-067's per-entry degrade lives in
-``crates/ocx_package_manager/src/composer.rs``; these cases exist because
-nothing there can prove the ``-g`` set actually reaches ``ToolchainLinks::groups``
-through the CLI.
-
-Identity, not spelling
-----------------------
-``bin/<name>`` is keyed on the exposed **binary name**; ``<group>/<entry>`` on
-the ``[tools]`` **key**. ``src.toolchain_fixtures`` mints a distinct
-UUID-prefixed spelling for each namespace, so no assertion about one can be
-satisfied by the other — see
-:func:`~src.toolchain_fixtures.assert_key_and_binary_namespaces_stay_disjoint`.
+Identity, not spelling: ``bin/<name>`` is keyed on the exposed **binary name**, ``<group>/<entry>``
+on the ``[tools]`` **key**. ``src.toolchain_fixtures`` mints a distinct UUID-prefixed spelling for
+each, so no assertion about one can be satisfied by the other (see
+:func:`~src.toolchain_fixtures.assert_key_and_binary_namespaces_stay_disjoint`).
 """
 
 from __future__ import annotations
@@ -2602,13 +2586,10 @@ def test_a_home_restored_at_the_same_absolute_path_passes_the_gate(
     }
     assert ids_before, "the control: there are trampolines to churn"
 
-    # Stage the restore *while the original is still on disk*, then swap it in.
-    # Copying back after `rmtree` lets ext4 hand the just-freed inode straight
-    # back -- measured on both a developer host and the CI runner, the single
-    # trampoline came back on the identical inode number -- which reds the
-    # control below on a restore that did happen, and leaves the row asserting
-    # nothing. Staging first cannot reuse a live inode, and `os.replace` keeps
-    # the staged ones, so the churn this row needs is deterministic.
+    # Stage the restore while the original is still on disk, then swap it in. Copying back after
+    # `rmtree` lets ext4 hand the freed inode straight back (measured on a dev host and the CI
+    # runner), which reds the control below on a restore that did happen. Staging first cannot
+    # reuse a live inode and `os.replace` keeps the staged ones, so the churn is deterministic.
     home_staged = home.with_name(home.name + ".restored")
     state_staged = state.with_name(state.name + ".restored")
     # No retarget: the restored junctions must still name the original path.
@@ -2847,13 +2828,9 @@ def test_a_legacy_group_directory_at_the_home_root_is_reported_and_never_deleted
 # §C.5 — the `[active-only]` rows this package owns (WP-5)
 # ---------------------------------------------------------------------------
 #
-# Rows 21, 22, 26, 27, 28, 31 and 33 are WP-2's, at the unit layer. Row 29 is
-# **void**: it asserts a `RenderStamp` field C-079's own blockquote strikes
-# ("no new `RenderStamp` field, no wire-format change"), so its red — "derive
-# the field from config instead of `read_link`" — is unreachable against a field
-# that does not exist. Row 30 is the behaviour row 29 was meant to protect and
-# is sufficient. That leaves this package **four** runnable rows plus one
-# Windows-only label, not six.
+# Rows 21, 22, 26, 27, 28, 31 and 33 live at the unit layer. Row 29 is void: it asserts a
+# `RenderStamp` field the record strikes, so its red is unreachable; row 30 is the behaviour it
+# meant to protect. That leaves four runnable rows plus one Windows-only label.
 
 
 def test_an_escaping_active_link_is_repointed_and_nothing_is_written_through_it(

@@ -260,24 +260,11 @@ def test_version_json_reports_the_contract_versions(ocx: OcxRunner) -> None:
 
 
 # ---------------------------------------------------------------------------
-# URI-1 — End-to-end self-update install path via `__OCX_TESTING_SELF_IMAGE` seam
-#
-# Two versions of a stand-in "ocx" package are published to the loopback
-# registry and the canonical `ocx.sh/ocx/cli` identifier is redirected onto
-# them through the private seam, so the whole update runs against real OCI
-# content with the older version pre-installed.
-#
-# `ocx self update` pulls **without selecting** and then re-executes the newly
-# pulled binary as `ocx self setup <tag>@<digest> --handoff`; that child's
-# first phase performs the select and its later phases write every setup
-# surface with the new version's own code. The 0.0.2 stand-in is therefore not
-# a passive trap script — it records what it was handed (see `_stand_in_ocx`)
-# and then either re-execs the real ocx so the whole setup runs, or refuses.
-# The recorded receipt is what tells "the child did the work" apart from "the
-# parent did it", which no observable on the finished machine can.
-#
-# The tests are Linux/macOS only — the seam exists on every platform but the
-# stand-in binary is a POSIX shell script (Windows requires a .bat shim).
+# URI-1 — end-to-end self-update through the `__OCX_TESTING_SELF_IMAGE` seam: two stand-in "ocx"
+# versions on the loopback registry, the older one pre-installed. `ocx self update` pulls without
+# selecting and re-executes the new binary as `ocx self setup <tag>@<digest> --handoff`; the 0.0.2
+# stand-in records what it was handed (`_stand_in_ocx`), and only that receipt tells the child's
+# work from the parent's. POSIX only: the stand-in is a shell script.
 # ---------------------------------------------------------------------------
 
 

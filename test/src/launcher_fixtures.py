@@ -2,16 +2,11 @@
 # Copyright 2026 The OCX Authors
 """Fixtures for starting a home launcher against a stub ``ocx``.
 
-A home launcher (``package``, ``deferred`` or ``toolchain`` kind) builds a
-frozen argv for ``ocx`` and replaces itself with it. The stub here is the
-``ocx`` it starts: it prints nothing, appends one JSON line per start to a log
-(argv, ``__OCX_LAUNCHER_DEPTH``, ``OCX_GLOBAL``, ``OCX_PROJECT``) and exits 0,
-so a test asserts the argv and environment the launcher built without running
-a real ``ocx``.
-
-POSIX only (``write_stub_ocx``): the stub is a ``/bin/sh`` script that execs the test interpreter.
-Windows cannot use it because a batch file is refused by the launcher; ``build_recorder``
-compiles a native ``.exe`` with the same job there.
+A home launcher (``package``, ``deferred`` or ``toolchain`` kind) builds a frozen argv for
+``ocx`` and replaces itself with it. The stub is that ``ocx``: it prints nothing, appends one
+JSON line per start to a log (argv, ``__OCX_LAUNCHER_DEPTH``, ``OCX_GLOBAL``, ``OCX_PROJECT``)
+and exits 0. POSIX only (``write_stub_ocx``: a ``/bin/sh`` script); Windows refuses a batch
+file, so ``build_recorder`` compiles a native ``.exe`` there.
 """
 
 from __future__ import annotations
