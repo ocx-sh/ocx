@@ -13,6 +13,7 @@ use ocx_env_apply::launch::{
     is_fully_qualified, record_path_for,
 };
 use ocx_env_apply::{ApplyKind, KeyFold, apply_one};
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
@@ -377,8 +378,8 @@ fn accepts(root: &str, self_path: &str, raw: &[u8], windows: bool, fs: &dyn Look
 /// `line` split into its manifest key and target, both unescaped; `None` when it holds no space.
 ///
 /// A line starting with a space is escaped (Bazel 7.4.0 and later): the key reads `\s`, `\n` and `\b`, the target
-/// `\n` and `\b`, and any other `\x` stays two characters. An unescaped line keeps its backslashes.
-fn split_manifest_line(line: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
+/// `\n` and `\b`, and any other `\x` stays two characters. An unescaped line keeps its backslashes and is borrowed.
+fn split_manifest_line(line: &[u8]) -> Option<(Cow<'_, [u8]>, Cow<'_, [u8]>)> {
     fn unescape(text: &[u8], key: bool) -> Vec<u8> {
         let mut out = Vec::with_capacity(text.len());
         let mut bytes = text.iter().copied();
@@ -405,40 +406,51 @@ fn split_manifest_line(line: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
     let space = body.iter().position(|&byte| byte == b' ')?;
     let (key, target) = (&body[..space], &body[space + 1..]);
     Some(if escaped {
-        (unescape(key, true), unescape(target, false))
+        (Cow::Owned(unescape(key, true)), Cow::Owned(unescape(target, false)))
     } else {
-        (key.to_vec(), target.to_vec())
+        (Cow::Borrowed(key), Cow::Borrowed(target))
     })
 }
 
-/// The root a manifest `target` names for `<self>.launch`, or `None` when the key and target do not both end with it.
+/// The root a manifest `target` names for `<self>.launch`, or `None` when the key and target do not both end with
+/// `suffix` (`/<self>.launch`). Only a match allocates.
 ///
 /// On Windows both ends are compared ASCII case-insensitively and the target's `\` reads as `/`.
-fn manifest_root_bytes(key: &[u8], target: &[u8], self_path: &str, windows: bool) -> Option<Vec<u8>> {
-    let suffix = format!("/{self_path}.{RECORD_EXTENSION}");
-    let suffix = suffix.as_bytes();
+fn manifest_root_bytes(key: &[u8], target: &[u8], suffix: &[u8], windows: bool) -> Option<Vec<u8>> {
     let ends_with = |text: &[u8]| {
-        text.len() >= suffix.len() && {
-            let tail = &text[text.len() - suffix.len()..];
-            if windows {
-                tail.eq_ignore_ascii_case(suffix)
-            } else {
-                tail == suffix
-            }
-        }
+        text.len() >= suffix.len()
+            && text[text.len() - suffix.len()..]
+                .iter()
+                .zip(suffix)
+                .all(|(&byte, &wanted)| {
+                    if windows {
+                        let byte = if byte == b'\\' { b'/' } else { byte };
+                        byte.eq_ignore_ascii_case(&wanted)
+                    } else {
+                        byte == wanted
+                    }
+                })
     };
-    let target = if windows {
-        target
-            .iter()
+    // The key is compared as written: a `\` in it never reads as `/`.
+    let key_ends_with = |text: &[u8]| {
+        text.len() >= suffix.len()
+            && if windows {
+                text[text.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
+            } else {
+                text.ends_with(suffix)
+            }
+    };
+    if !key_ends_with(key) || !ends_with(target) {
+        return None;
+    }
+    let root = &target[..target.len() - suffix.len()];
+    Some(if windows {
+        root.iter()
             .map(|&byte| if byte == b'\\' { b'/' } else { byte })
             .collect()
     } else {
-        target.to_vec()
-    };
-    if !ends_with(key) || !ends_with(&target) {
-        return None;
-    }
-    Some(target[..target.len() - suffix.len()].to_vec())
+        root.to_vec()
+    })
 }
 
 /// Whether the manifest `target` is the started path (ASCII case and separators folded on Windows).
@@ -470,18 +482,21 @@ fn checked_manifest_root(root: &[u8], windows: bool) -> Result<String, String> {
     }
 }
 
-/// Distinct roots in first-seen order, at most [`MAX_MANIFEST_CANDIDATES`].
+/// Distinct roots in the order they were first pushed, at most [`MAX_MANIFEST_CANDIDATES`].
 #[derive(Default)]
 struct RootSet {
     seen: BTreeSet<Vec<u8>>,
-    roots: Vec<Vec<u8>>,
+    count: usize,
 }
 
 impl RootSet {
-    fn push(&mut self, root: Vec<u8>) {
-        if self.roots.len() < MAX_MANIFEST_CANDIDATES && self.seen.insert(root.clone()) {
-            self.roots.push(root);
+    /// Whether `root` is new and within the cap, so the caller examines it.
+    fn push(&mut self, root: &[u8]) -> bool {
+        if self.count < MAX_MANIFEST_CANDIDATES && self.seen.insert(root.to_vec()) {
+            self.count += 1;
+            return true;
         }
+        false
     }
 }
 
@@ -500,7 +515,8 @@ fn scan_manifest(
         Ok(None) => return Ok(Vec::new()),
         Err(err) => return Err(manifest_refusal(path, err)),
     };
-    let mut found = RootSet::default();
+    let suffix = format!("/{self_path}.{RECORD_EXTENSION}");
+    let mut found: Vec<Vec<u8>> = Vec::new();
     let mut lists = !needs_listing;
     for line in lines {
         let line = line.map_err(|err| manifest_refusal(path, err))?;
@@ -518,11 +534,14 @@ fn scan_manifest(
             continue;
         }
         lists = lists || lists_started_path(&target, started, windows);
-        if let Some(root) = manifest_root_bytes(&key, &target, self_path, windows) {
+        if found.len() < MAX_MANIFEST_CANDIDATES
+            && let Some(root) = manifest_root_bytes(&key, &target, suffix.as_bytes(), windows)
+            && !found.contains(&root)
+        {
             found.push(root);
         }
     }
-    Ok(if lists { found.roots } else { Vec::new() })
+    Ok(if lists { found } else { Vec::new() })
 }
 
 /// The refusal for a manifest that cannot be read within its bounds.
@@ -534,37 +553,28 @@ fn manifest_refusal(path: &str, err: ReadError) -> ShimError {
     })
 }
 
-/// Candidate (d): the roots the runfiles manifests name, for a launcher reached with no runfiles tree.
+/// The runfiles manifests candidate (d) reads, in order, each with whether it must list the started path:
+/// `<started>.runfiles/MANIFEST`, `<started>.runfiles_manifest`, then `$RUNFILES_MANIFEST_FILE`.
 ///
-/// Sources in order: `<started>.runfiles/MANIFEST`, `<started>.runfiles_manifest`, then `$RUNFILES_MANIFEST_FILE` only
-/// when it lists the started path. `Err` entries are roots rejected on their shape.
-fn manifest_roots(
-    started: &str,
-    self_path: &str,
-    context: &LookupContext<'_>,
-    fs: &dyn LookupFs,
-) -> Result<Vec<Result<String, String>>, ShimError> {
+/// A path that resolves to one already named is dropped, so a file that two names reach is read once.
+fn manifest_sources(started: &str, context: &LookupContext<'_>) -> Vec<(String, bool)> {
     let windows = context.windows;
-    let beside = [
-        format!("{started}.runfiles/MANIFEST"),
-        format!("{started}.runfiles_manifest"),
-    ];
-    let mut roots = RootSet::default();
-    for path in &beside {
-        for root in scan_manifest(path, false, started, self_path, windows, fs)? {
-            roots.push(root);
+    let mut sources: Vec<(String, bool)> = Vec::new();
+    let named = [
+        (format!("{started}.runfiles/MANIFEST"), false),
+        (format!("{started}.runfiles_manifest"), false),
+    ]
+    .into_iter()
+    .chain(context.manifest_file.map(|path| (path.to_string(), true)));
+    let mut resolved: Vec<String> = Vec::new();
+    for (path, needs_listing) in named {
+        let key = fold(&absolutize(&path, context.cwd, windows), windows);
+        if !resolved.contains(&key) {
+            resolved.push(key);
+            sources.push((path, needs_listing));
         }
     }
-    if let Some(path) = context.manifest_file {
-        for root in scan_manifest(path, true, started, self_path, windows, fs)? {
-            roots.push(root);
-        }
-    }
-    Ok(roots
-        .roots
-        .iter()
-        .map(|root| checked_manifest_root(root, windows))
-        .collect())
+    sources
 }
 
 /// The started path on Unix: `argv[0]` joined onto the working directory, or the first `PATH` hit for a bare name.
@@ -712,22 +722,29 @@ pub(super) fn locate_with(
         }
     }
 
-    // The manifest is read last: only a tree holds declared links, and a remote action has no usable manifest.
+    // The manifest is read last: only a tree holds declared links, and a remote action has no usable manifest. A
+    // manifest is read only when no root of an earlier one was accepted.
     let mut record_bytes = 0u64;
-    for candidate in manifest_roots(started, &sidecar.self_path, context, fs)? {
-        let root = match candidate {
-            Ok(root) if record_bytes < MAX_CANDIDATE_RECORD_BYTES => root,
-            Ok(root) | Err(root) => {
-                rejected.push(root);
+    let mut roots = RootSet::default();
+    for (path, needs_listing) in manifest_sources(started, context) {
+        for root in scan_manifest(&path, needs_listing, started, &sidecar.self_path, windows, fs)? {
+            if !roots.push(&root) {
                 continue;
             }
-        };
-        let found = candidate_record(&root, &sidecar.self_path, windows, fs)?;
-        record_bytes += found.as_ref().map_or(0, |bytes| bytes.len() as u64);
-        if found.is_some_and(|bytes| bytes == raw) {
-            return bind_root(sidecar, &root, context);
+            let root = match checked_manifest_root(&root, windows) {
+                Ok(root) if record_bytes < MAX_CANDIDATE_RECORD_BYTES => root,
+                Ok(root) | Err(root) => {
+                    rejected.push(root);
+                    continue;
+                }
+            };
+            let found = candidate_record(&root, &sidecar.self_path, windows, fs)?;
+            record_bytes += found.as_ref().map_or(0, |bytes| bytes.len() as u64);
+            if found.is_some_and(|bytes| bytes == raw) {
+                return bind_root(sidecar, &root, context);
+            }
+            rejected.push(root);
         }
-        rejected.push(root);
     }
 
     let named: Vec<&str> = rejected.iter().take(NAMED_CANDIDATES).map(String::as_str).collect();
@@ -1614,6 +1631,8 @@ mod tests {
         /// Started paths that `stat` as the image (a symlink to it).
         #[cfg(unix)]
         links: HashSet<String>,
+        /// Every path `read_lines` was asked for, in order.
+        line_reads: std::cell::RefCell<Vec<String>>,
         /// How many times the lookup asked whether a started path is the running image.
         #[cfg(unix)]
         identity_checks: std::cell::Cell<usize>,
@@ -1642,6 +1661,7 @@ mod tests {
             Ok(self.files.get(path).cloned())
         }
         fn read_lines(&self, path: &str, max_bytes: u64, max_line: usize) -> Result<Option<LineStream>, ReadError> {
+            self.line_reads.borrow_mut().push(path.to_string());
             if self.unreadable.contains(path) {
                 return Err(ReadError::NotRegular);
             }
@@ -2982,7 +3002,7 @@ mod tests {
     fn vl43_an_escaped_key_reads_backslash_s_as_a_space() {
         // The lookup only suffix-checks a key, so the key's `\s` shows at the splitter alone.
         assert_eq!(
-            split_manifest_line(b" a\\sb/x t"),
+            split_manifest_line(b" a\\sb/x t").map(|(key, target)| (key.into_owned(), target.into_owned())),
             Some((b"a b/x".to_vec(), b"t".to_vec()))
         );
     }
@@ -3181,6 +3201,43 @@ mod tests {
         );
     }
 
+    /// A manifest reachable by two names is read once, and a manifest after an accepted root is not read at all.
+    #[test]
+    fn a_manifest_path_already_scanned_is_not_read_again() {
+        let fs = manifest_world_without_root(b"");
+        let same = "/out/bin/tool.runfiles/MANIFEST";
+        let message = refusal(locate(TOOL, &with_inherited_manifest(same), &fs));
+        assert!(message.contains("no vendored root"), "{message}");
+        let reads = fs.line_reads.borrow();
+        assert_eq!(
+            reads.iter().filter(|path| path.as_str() == same).count(),
+            1,
+            "the same path named twice is read once: {reads:?}"
+        );
+        assert_eq!(
+            reads.len(),
+            2,
+            "the second beside-name is the only other read: {reads:?}"
+        );
+    }
+
+    #[test]
+    fn a_manifest_after_the_accepted_root_is_not_read() {
+        let record = sidecar_json(VENDOR_A, SELF_PATH);
+        let fs = FakeFs::default()
+            .with_file("/out/bin/tool.launch", &record)
+            .with_file("/out/bin/tool.runfiles/MANIFEST", &manifest_line("/vendor/set"))
+            .with_file("/out/bin/tool.runfiles_manifest", &manifest_line("/vendor/set"))
+            .with_file(&format!("/vendor/set/{SELF_PATH}.launch"), &record);
+        let context = with_inherited_manifest("/out/bin/tool.runfiles_manifest");
+        assert_eq!(direct(locate(TOOL, &context, &fs).unwrap()).root, "/vendor/set");
+        assert_eq!(
+            *fs.line_reads.borrow(),
+            ["/out/bin/tool.runfiles/MANIFEST".to_string()],
+            "the first manifest accepted a root, so no other is opened"
+        );
+    }
+
     fn manifest_world_without_root(manifest: &[u8]) -> FakeFs {
         FakeFs::default()
             .with_file("/out/bin/tool.launch", &sidecar_json(VENDOR_A, SELF_PATH))
@@ -3244,7 +3301,8 @@ mod tests {
 
     #[test]
     fn vl44_an_inherited_manifest_that_is_not_a_regular_file_is_refused() {
-        let mut fs = manifest_world(&manifest_line("/vendor/set"));
+        // No earlier manifest yields a root, so the inherited one is reached.
+        let mut fs = manifest_world_without_root(b"");
         fs.unreadable.insert("/outer/fifo".to_string());
         let message = refusal(locate(TOOL, &with_inherited_manifest("/outer/fifo"), &fs));
         assert!(
