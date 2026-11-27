@@ -22,3 +22,10 @@ TODO/FIXME/todo!/unimplemented!: none. One `shortcut:` (non-Unicode argument, di
 
 ## 6. Gates
 `cargo test -p ocx_shim --locked`, `cargo test -p ocx_env_apply --locked`, `cargo clippy -p ocx_shim -p ocx_env_apply --all-targets --locked -- -D warnings`, `cargo fmt --check`: green. `scripts/shim_inputs.py --print` before and after: 29a64192…c192, unchanged (the digest excludes shim source). Launcher sources changed: `crates/ocx_shim/src/direct.rs`, `crates/ocx_shim/src/main.rs`.
+
+## Round 2 (review fixes)
+1. `fill_wide` also grows when `written + 1 >= capacity` (a name cut to `capacity - 1` plus NUL). Red: new fake form `truncate-minus-one` failed `a_wide_name_of_any_length_up_to_the_nt_limit_fills_in_every_short_buffer_form` with `assertion left == right failed: truncate-minus-one 512` (511 of 600 units returned). Green: same test plus the cap test (`TooLong` at 1024) pass; exact fit and 32767 units still return the full name.
+2. The `a_nul_in_an_env_value_exits_78` doc line is back on its test; `fake_call` documents its five forms.
+3. `length_limit_hint`: every program reaching it is absolute (direct records expand `@VENDOR_DIR@` against the absolute image directory; a home launch refuses a relative pin or baked `ocx` and skips relative PATH entries), and `spawn_child` prefixes an over-long absolute `.exe` with `\\?\`. No input reaches the "relative program path" branch (it also misfired for an already verbatim path); branch and its test lines deleted. The batch clause stays and is tested.
+4. `sanitize_for_terminal` in `ocx_cli` strips `is_control`, bidi controls (U+061C, U+200E/F, U+202A-E, U+2066-9) and zero-width (U+200B-D, U+FEFF); it does not treat U+2028/2029. The launcher now escapes those classes by code point. Red: `a_diagnostic_escapes_bidi_controls_and_zero_width_characters` showed the raw characters; green after the change.
+Gates: ocx_shim 162 + 18 passed (1 ignored), ocx_env_apply 78 + 1 passed, clippy clean on host and `x86_64-pc-windows-msvc`, `cargo check --tests` for msvc, fmt clean. Launcher inputs changed: `crates/ocx_shim/src/direct.rs`, `crates/ocx_shim/src/main.rs`.
