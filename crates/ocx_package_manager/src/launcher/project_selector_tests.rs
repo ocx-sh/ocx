@@ -4,12 +4,12 @@
 //! The selector a rendered trampoline bakes must reach the
 //! project it names.
 //!
-//! These two cases are end-to-end across a seam: [`unix_trampoline_body`](super::unix_trampoline_body)
-//! bakes a `--project` selector and `ConfigLoader::project_path` resolves it,
-//! and each half is self-consistently green on its own — the body has
+//! These two cases are end-to-end across a seam: [`toolchain_record`](super::toolchain_record)
+//! bakes a `project_root` and `ConfigLoader::project_path` resolves it,
+//! and each half is self-consistently green on its own — the record has
 //! byte-exact goldens, the resolver has its own directory cases. The defect
 //! the directory-selector fix addressed lived only in the join, so the test has to render the real
-//! body rather than a second spelling of it. That makes the launcher the
+//! record rather than a second spelling of it. That makes the launcher the
 //! subject, which is why they sit here and not with the resolver.
 
 #![cfg(test)]
@@ -21,20 +21,22 @@ fn write_file(path: &std::path::Path, content: &str) {
     std::fs::write(path, content).expect("write test fixture");
 }
 
-/// The `--project` value out of a POSIX trampoline body, between the single
-/// quotes `unix_trampoline_body` puts it in.
+/// The `project_root` out of a rendered toolchain record, read from its encoded bytes.
 ///
-/// Parsed out of the emitted text rather than re-derived, so this reads the
+/// Parsed out of the emitted record rather than re-derived, so this reads the
 /// **shipped** selector and not a second spelling of it.
-fn baked_project_selector(body: &str) -> String {
-    let after = body
-        .split_once("--project '")
-        .expect("a project trampoline bakes `--project '<root>'`")
-        .1;
-    after
-        .split_once('\'')
-        .expect("the baked selector is single-quoted")
-        .0
+fn baked_project_selector(project_root: &std::path::Path) -> String {
+    let record = super::toolchain_record(
+        &super::TrampolineTarget::Project(project_root.to_path_buf()),
+        Some(std::path::Path::new("/opt/ocx/bin/ocx")),
+        cfg!(windows),
+        project_root,
+    )
+    .expect("an ordinary absolute root carries no launcher-unsafe character");
+    let value: serde_json::Value = serde_json::from_slice(&record.encode()).expect("the record is JSON");
+    value["project_root"]
+        .as_str()
+        .expect("a project record bakes `project_root`")
         .to_owned()
 }
 
@@ -46,12 +48,12 @@ fn baked_project_selector(body: &str) -> String {
 ///
 /// This is the join between the two halves — the baked selector and this
 /// module's resolver — and it is deliberately end-to-end across them: each
-/// half is self-consistently green on its own (the body has byte-exact
+/// half is self-consistently green on its own (the record has byte-exact
 /// goldens, the resolver has the directory cases above), and the defect
 /// lived only in the seam.
 ///
 /// Mutation that reds it: restoring the regular-file-only arm, or changing
-/// `unix_trampoline_body` to bake `<root>/ocx.toml` — the workaround the design
+/// `toolchain_record` to bake `<root>/ocx.toml` — the workaround the design
 /// rejects, because it would contradict the home selector, the
 /// sidecar grammar, the trampoline goldens and the committed shim blobs.
 #[tokio::test]
@@ -68,17 +70,11 @@ async fn the_selector_a_trampoline_bakes_resolves_to_the_project_it_names() {
     let project_root = dunce::canonicalize(dir.path()).expect("the scratch project canonicalises");
     write_file(&project_root.join("ocx.toml"), "");
 
-    let body = super::unix_trampoline_body(
-        &super::TrampolineTarget::Project(project_root.clone()),
-        Some(std::path::Path::new("/opt/ocx/bin/ocx")),
-    )
-    .expect("an ordinary absolute root carries no launcher-unsafe character");
-
-    let baked = baked_project_selector(&body);
+    let baked = baked_project_selector(&project_root);
     assert_eq!(
         std::path::Path::new(&baked),
         project_root.as_path(),
-        "C-028 — the body bakes the project *root*, a directory, not the manifest inside it"
+        "C-028 — the record bakes the project *root*, a directory, not the manifest inside it"
     );
 
     let resolved = ocx_config::loader::ConfigLoader::project_path(None, Some(std::path::Path::new(&baked)))
@@ -111,12 +107,7 @@ async fn a_baked_home_whose_project_moved_away_resolves_to_no_project() {
     let manifest = project_root.join("ocx.toml");
     write_file(&manifest, "");
 
-    let body = super::unix_trampoline_body(
-        &super::TrampolineTarget::Project(project_root.clone()),
-        Some(std::path::Path::new("/opt/ocx/bin/ocx")),
-    )
-    .expect("an ordinary absolute root carries no launcher-unsafe character");
-    let baked = baked_project_selector(&body);
+    let baked = baked_project_selector(&project_root);
 
     // The project moves away; the trampoline keeps its baked selector.
     std::fs::remove_file(&manifest).expect("the manifest is removable");

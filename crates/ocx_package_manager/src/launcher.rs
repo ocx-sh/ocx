@@ -17,10 +17,8 @@ pub use generate::{binary_pin_value, generate, generate_direct};
 
 /// A `pub(crate)` item inside a private `mod` does not escape it, so the
 /// trampoline surface `crate::tasks::render_toolchain` calls needs this
-/// re-export. It lists exactly those items: re-exporting one nothing imports is
-/// an `unused_imports` error under `-D warnings`. `EXEC_SIDECAR_GLOBAL` stays
-/// absent because only [`body::exec_sidecar_body`] spells that literal.
-pub(crate) use body::{TrampolineTarget, exec_sidecar_body, unix_trampoline_body};
+/// re-export; re-exporting one nothing imports is an `unused_imports` error.
+pub(crate) use body::{TrampolineTarget, toolchain_record};
 pub(crate) use generate::{
     EntryPointDir, entry_point_dir, first_use, host_generation, host_launcher_blob, names_complete,
     trampoline_ocx_binary, write_launcher,

@@ -155,11 +155,13 @@ pub enum ToolchainPathError {
 ///
 /// ```text
 /// <root>/
-/// ├── .gitignore                     "*", ensure-present, both tiers
-/// ├── active -> shells/default/      the PATH-facing indirection
-/// ├── links/<group>/<entry>/         directory link to a package root
-/// └── shells/default/bin/            launcher trampolines, DEFAULT group only
+/// ├── .gitignore                         "*", ensure-present, both tiers
+/// ├── active -> shells/default-<16 hex>/ the PATH-facing indirection, switched per render
+/// ├── links/<group>/<entry>/             directory link to a package root
+/// └── shells/default-<16 hex>/bin/       launcher trampolines, DEFAULT group only
 /// ```
+///
+/// `shells/default/` is the directory an older ocx renders in place; this tree only reads it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolchainHome {
     root: PathBuf,

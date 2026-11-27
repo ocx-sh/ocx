@@ -794,10 +794,6 @@ mod firewall_tests {
         ),
         ("ocx_package/src/libc_lint.rs", "test-only `cc` building ELF fixtures"),
         (
-            "ocx_package_manager/src/launcher/body.rs",
-            "test-only `/bin/sh` harness over the emitted launcher body",
-        ),
-        (
             "ocx_package_manager/src/tasks/update_check.rs",
             "the installed-version probe is hermetic (`env_clear` plus the resolved package env, nothing inherited)",
         ),

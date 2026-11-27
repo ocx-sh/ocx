@@ -411,17 +411,22 @@ mod tests {
             self.project_dir.join("ocx.lock")
         }
 
-        /// A stale trampoline in the directory the renderer actually writes and
-        /// prunes — the **physical** `<home>/shells/default/bin`.
-        ///
-        /// Through the accessor, never a literal join: a fixture that spelled
-        /// the tree itself would keep seeding the old place after a layout
-        /// move and the prune assertions would pass over a file the renderer
-        /// never looked at.
-        fn stale_trampoline(&self) -> PathBuf {
+        /// The project's toolchain home.
+        fn home(&self) -> ocx_store::file_structure::ToolchainHome {
             ocx_store::file_structure::ToolchainHome::new(self.project_dir.join(".ocx").join("toolchain"))
-                .shell_bin(ocx_store::file_structure::DEFAULT_SHELL)
-                .join("stale")
+        }
+
+        /// Seed a stale trampoline in a render directory `active` names, as an earlier render leaves it, and
+        /// return its PATH-facing path `active/bin/stale`. Through the accessors, never a literal join.
+        fn stale_trampoline(&self) -> PathBuf {
+            let home = self.home();
+            let shell_dir = "default-0123456789abcdef";
+            let bin = home.render_dir(shell_dir).join("bin");
+            std::fs::create_dir_all(&bin).expect("the render directory is creatable");
+            std::fs::write(bin.join("stale"), b"#!/bin/sh\n").expect("the stale trampoline is writable");
+            ocx_util::fs::symlink::create(home.expected_active_target(shell_dir), home.active())
+                .expect("the activation link is creatable");
+            home.bin().join("stale")
         }
 
         /// A guard over `ocx.toml` holding `text`, plus the staged candidate and
@@ -506,7 +511,7 @@ mod tests {
 
     /// The sequence is **commit then render**, and the render is
     /// reached: a mutation whose new lock declares no tools still reconciles
-    /// `bin/`, so a stale trampoline left by the removed tool is pruned.
+    /// `bin/`, so a stale trampoline left by the removed tool leaves `active/bin`.
     ///
     /// Two claims in one, and both are load-bearing:
     ///
@@ -517,15 +522,14 @@ mod tests {
     ///
     /// Mutation that reds it: a `commit_and_render` that only calls
     /// `guard.commit(...)` — the four-copies-of-a-two-step-sequence defect the shared function
-    /// exists to prevent — leaves `render == None` and `bin/stale` on disk.
+    /// exists to prevent — leaves `render == None` and `active/bin/stale` on PATH.
     // Multi-thread flavour: `MutationGuard::commit` fans its two publishes
     // (`ocx.lock`, then `ocx.toml`) onto the blocking pool.
     #[tokio::test(flavor = "multi_thread")]
     async fn commit_and_render_reconciles_bin_after_the_commit_lands() {
         let tree = Tree::new();
         let stale = tree.stale_trampoline();
-        std::fs::create_dir_all(stale.parent().expect("bin has a parent")).expect("bin/ is creatable");
-        std::fs::write(&stale, b"#!/bin/sh\n").expect("the stale trampoline is writable");
+        assert!(stale.exists(), "precondition: the stale trampoline is on `active/bin`");
 
         let (guard, staged, new_lock) = tree.staged("", Vec::new()).await;
         let (scope, platform) = (tree.scope(), platform());
@@ -553,7 +557,7 @@ mod tests {
         );
         assert!(
             !stale.exists(),
-            "S-008 — a trampoline the new lock no longer declares must be pruned by the re-render"
+            "S-008 — a trampoline the new lock no longer declares must leave `active/bin` on the re-render"
         );
     }
 
@@ -576,8 +580,7 @@ mod tests {
     async fn commit_and_render_covers_bin_even_when_the_lock_declares_no_default_group() {
         let tree = Tree::new();
         let stale = tree.stale_trampoline();
-        std::fs::create_dir_all(stale.parent().expect("bin has a parent")).expect("bin/ is creatable");
-        std::fs::write(&stale, b"#!/bin/sh\n").expect("the stale trampoline is writable");
+        assert!(stale.exists(), "precondition: the stale trampoline is on `active/bin`");
 
         let manifest = "[group.ci.tools]\nlinter = \"example.com/linter:1.0.0\"\n";
         let (guard, staged, new_lock) = tree.staged(manifest, vec![locked_tool("linter", "ci", "linter")]).await;

@@ -2,19 +2,19 @@
 // Copyright 2026 The OCX Authors
 
 //! Rendering a toolchain home — trampolines and `links/<group>/<entry>` links
-//! (`adr_toolchain_activation.md` § Rationale from code: render_toolchain).
+//! (`adr_toolchain_activation.md` § Rationale from code: render_toolchain, `adr_unified_launcher.md` § 6.4).
 //!
 //! ```text
 //! <home>/
-//! ├── .gitignore                    "*", owned by `ToolchainHome`
-//! ├── active -> shells/default      the depth-1 link every PATH route resolves through
-//! ├── links/<group>/<entry>/        directory link to a package root, one per selected group
-//! └── shells/<shell>/bin/<name>     one launcher trampoline per exposed name, DEFAULT group only
-//!                                    (Windows: `<name>.exe` plus its `<name>.exec` sidecar — two entries)
+//! ├── .gitignore                         "*", owned by `ToolchainHome`
+//! ├── active -> shells/default-<16 hex>  the depth-1 link every PATH route resolves through
+//! ├── links/<group>/<entry>/             directory link to a package root, one per selected group
+//! └── shells/default-<16 hex>/bin/       per exposed name the launcher `NAME[.exe]` and its `NAME.launch`
 //! ```
 //!
-//! Every write, prune, fingerprint and guard uses the physical `shell_bin()`, never the PATH-facing
-//! `bin()`, so a repointed `active` redirects none of them.
+//! A render with new content stages a whole directory, publishes it under a new name and switches
+//! `active`; a published directory is never edited and the render deletes nothing. `shells/default` and
+//! the v1 `render_stamp.json` an older ocx wrote are never written.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -22,27 +22,32 @@ use std::time::Duration;
 
 use crate::error::PackageErrorKind;
 use crate::launcher::direct::write_direct_launcher_for;
-use crate::launcher::{TrampolineTarget, exec_sidecar_body, trampoline_ocx_binary, unix_trampoline_body};
+use crate::launcher::{
+    TrampolineTarget, host_generation, host_launcher_blob, toolchain_record, trampoline_ocx_binary, write_launcher,
+};
+use ocx_env_apply::launch::LaunchRecord;
 use ocx_project::{DEFAULT_GROUP, LockedTool, ProjectLock};
 use ocx_store::file_structure::{
-    BinEntryStamp, DEFAULT_SHELL, FileStructure, RenderStamp, RenderStampScope, RenderStampTarget, ShimBinStore,
+    BinEntryStamp, DEFAULT_SHELL, FileStructure, RenderStampScope, RenderStampTarget, RenderStampV2,
     TREE_OWN_DEPTH1_NAMES, ToolchainHome,
 };
+use ocx_store::launcher_generation::render_fingerprint;
 use ocx_store::reference_manager::ReferenceManager;
+use ocx_util::fs::{Published, publish_dir, retarget_link};
 
 use super::super::PackageManager;
 use super::common::ClosureNode;
-use super::toolchain_names::{NotEnumerablePolicy, exposed_names, fold_case_insensitive};
+use super::toolchain_names::{NotEnumerablePolicy, exposed_names, fold_case_insensitive, is_record_name};
 use super::vendor::VendorError;
 use ocx_env_apply::launch::DirectRecord;
 
-/// The `__OCX_TESTING_RENDER_FAULT` value that aborts a render between the first `bin/` entry
-/// write and the stamp write.
+/// The `__OCX_TESTING_RENDER_FAULT` value that aborts a render after its staging directory is
+/// written and before it is published.
 #[cfg(any(test, feature = "__testing"))]
 pub const FAULT_AFTER_FIRST_ENTRY_WRITE: &str = "after_first_entry_write";
 
-/// The `__OCX_TESTING_RENDER_FAULT` value that aborts a render between `shells/<shell>/` and the
-/// `active` link — the only point at which the heal order is observable.
+/// The `__OCX_TESTING_RENDER_FAULT` value that aborts a render after `shells/` exists and before
+/// any render directory or `active` is written.
 #[cfg(any(test, feature = "__testing"))]
 pub const FAULT_AFTER_SHELL_TREE: &str = "after_shell_tree";
 
@@ -78,8 +83,8 @@ pub struct RenderRequest<'a> {
     pub dry_run: bool,
 
     /// Default-group tools whose closure could not be walked, so [`Self::surface`] omits them. Their
-    /// launcher names are unknown, so `bin/` is not pruned while any exist: pruning would delete the
-    /// launchers an earlier render wrote for tools that are still locked.
+    /// launcher names are unknown, so while any exist an intact stamped directory is kept as it is:
+    /// a new one from the partial surface would drop the launchers of tools that are still locked.
     pub unrendered: &'a [String],
 }
 
@@ -95,7 +100,7 @@ pub struct RenderedItem {
 /// (`adr_toolchain_activation.md` § Rationale from code: render_toolchain).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RenderedArtifact {
-    /// A `bin/` trampoline, one per on-disk file (Windows: `<name>.exe` and `<name>.exec` are two).
+    /// A trampoline, one per exposed name: its launcher and its `NAME.launch` record.
     Trampoline(String),
     /// A `links/<group>/<entry>` directory link to a package root.
     Link {
@@ -135,8 +140,8 @@ pub struct RenderReport {
     /// [`RenderRequest::dry_run`], the delta it would apply.
     pub items: Vec<RenderedItem>,
 
-    /// Whether `bin/` was reconciled at all. A field, not inferred from [`Self::items`]: zero
-    /// trampolines means "all removed" or "never read", and only this tells them apart.
+    /// Whether the trampoline directory was rendered at all. A field, not inferred from [`Self::items`]:
+    /// zero trampolines means "an empty set" or "never read", and only this tells them apart.
     pub bin_in_scope: bool,
 
     /// Whether this call wrote the render stamp. Written last, so `false` beside non-empty
@@ -190,7 +195,8 @@ impl PackageManager {
         Ok(merged)
     }
 
-    /// Render `request.home`: trampolines, the selected groups' links, prunes, then the stamp last.
+    /// Render `request.home`: a new trampoline directory when the content changed, the selected groups'
+    /// links and their prunes, then the stamp last.
     /// Idempotent; a write, removal or lock-timeout failure is [`RenderOutcome::Skipped`], never an
     /// error (`adr_toolchain_activation.md` § Rationale from code: render_toolchain).
     ///
@@ -200,7 +206,7 @@ impl PackageManager {
     ///   (exit 78).
     /// - [`PackageErrorKind::ShimNameInvalid`] — an entry point name is not a valid
     ///   [`BinaryName`](ocx_package::metadata::BinaryName).
-    /// - [`PackageErrorKind::Internal`] — a trampoline body or sidecar refusal, or a
+    /// - [`PackageErrorKind::Internal`] — a toolchain record the launcher would refuse, or a
     ///   `__OCX_TESTING_RENDER_FAULT` seam; never a filesystem failure.
     pub async fn render_toolchain(&self, request: RenderRequest<'_>) -> Result<RenderReport, PackageErrorKind> {
         let file_structure = self.file_structure();
@@ -277,32 +283,21 @@ impl PackageManager {
             }
         };
 
-        // Step 6: `shells/<shell>/` then `active`, before any trampoline. A failure only warns: a bad
-        // `active` fails `active_is_valid` so the gate withholds; returning would skip a read-only checkout.
+        // Step 6: `shells/`, the parent of every staging and render directory. A failure only warns:
+        // the publish then skips, and returning would skip a read-only checkout's links too.
         let root = request.home.root().to_path_buf();
-        let shell_tree =
-            tokio::task::spawn_blocking(move || ensure_shell_tree(&ToolchainHome::new(root), DEFAULT_SHELL)).await;
-
-        // An abort here leaves `active` absent — a lookup miss, never a wrong answer.
-        #[cfg(any(test, feature = "__testing"))]
-        maybe_inject_fault(fault, RenderStage::AfterShellTree)?;
-
-        let root = request.home.root().to_path_buf();
-        let healed = match shell_tree {
-            Ok(Ok(())) => {
-                tokio::task::spawn_blocking(move || heal_active(&ToolchainHome::new(root), DEFAULT_SHELL)).await
-            }
-            other => other,
-        };
-        match healed {
+        match tokio::task::spawn_blocking(move || ensure_shell_tree(&ToolchainHome::new(root))).await {
             Ok(Ok(())) => {}
             Ok(Err(error)) => log::warn!(
-                "Toolchain '{}' has no usable '{}' link: {error}",
-                request.home.root().display(),
-                request.home.active().display()
+                "Toolchain '{}' has no usable render directory parent: {error}",
+                request.home.root().display()
             ),
-            Err(join_error) => log::warn!("The toolchain activation-link task failed: {join_error}"),
+            Err(join_error) => log::warn!("The toolchain render-directory task failed: {join_error}"),
         }
+
+        // An abort here leaves `active` and every published directory as they were.
+        #[cfg(any(test, feature = "__testing"))]
+        maybe_inject_fault(fault, RenderStage::AfterShellTree)?;
 
         render_with(file_structure, request, case_insensitive, fault).await
     }
@@ -436,8 +431,8 @@ fn stamp_key(scope: &RenderStampScope) -> String {
 /// The render body, with the case-fold probe and fault stage as parameters (a free function per
 /// `subsystem-package-manager.md`).
 ///
-/// Precondition: the home root exists — created above this call, or a first-ever `ocx pull` skips —
-/// and the caller holds the render lock for the whole call.
+/// Precondition: the home root and `shells/` exist — created above this call, or a first-ever `ocx pull`
+/// skips — and the caller holds the render lock for the whole call.
 ///
 /// # Errors
 ///
@@ -451,10 +446,35 @@ async fn render_with(
     let bin_in_scope = request.groups.iter().any(|group| group == DEFAULT_GROUP);
     let mut items: Vec<RenderedItem> = Vec::new();
 
+    let key = stamp_key(request.scope);
+    let state = file_structure.state.clone();
+    let stamp_owner = key.clone();
+    let scope_for_read = request.scope.clone();
+    let previous = blocking(request.home.root().to_path_buf(), move || {
+        Ok(state.render_stamp_v2(stamp_target(&scope_for_read, &stamp_owner)))
+    })
+    .await
+    .unwrap_or_else(|error| {
+        log::debug!("The v2 render stamp could not be read: {error}");
+        None
+    });
+
     let landed = if bin_in_scope {
-        reconcile_bin(file_structure, &request, case_insensitive, fault, &mut items).await?
+        render_bin(
+            file_structure,
+            &request,
+            case_insensitive,
+            fault,
+            previous.as_ref(),
+            &mut items,
+        )
+        .await?
     } else {
-        BTreeSet::new()
+        // Without a render of the trampoline directory, carry this home's previous half forward.
+        previous
+            .as_ref()
+            .filter(|stamp| stamp.home == request.home.root() && &stamp.scope == request.scope)
+            .map(LandedBin::of_stamp)
     };
 
     if !request.pinned {
@@ -474,30 +494,34 @@ async fn render_with(
         );
     }
 
-    // One blocking unit for the whole stamp: every step in it is a blocking filesystem call.
-    let stamp_written = if request.dry_run {
-        false
-    } else {
-        let root = request.home.root().to_path_buf();
-        let (state, scope, landed) = (file_structure.state.clone(), request.scope.clone(), landed.clone());
-        let written = blocking(root.clone(), move || {
-            Ok(write_render_stamp(
-                &state,
-                &ToolchainHome::new(root),
-                &scope,
-                bin_in_scope,
-                &landed,
-            ))
-        })
-        .await;
-        match written {
-            Ok(written) => written,
-            Err(error) => {
-                log::warn!(
-                    "Toolchain '{}' was rendered but its render-stamp task failed: {error}",
-                    request.home.root().display()
-                );
-                false
+    let stamp_written = match (request.dry_run, landed) {
+        (true, _) | (false, None) => false,
+        (false, Some(landed)) => {
+            let (state, root, scope) = (
+                file_structure.state.clone(),
+                request.home.root().to_path_buf(),
+                request.scope.clone(),
+            );
+            let written = blocking(root.clone(), move || {
+                let home = ToolchainHome::new(root);
+                let stamp = landed.into_stamp(&home, scope, observe_default_group_links(&home));
+                Ok(write_render_stamp(
+                    &state,
+                    stamp_target(&stamp.scope, &key),
+                    &stamp,
+                    previous.as_ref(),
+                ))
+            })
+            .await;
+            match written {
+                Ok(written) => written,
+                Err(error) => {
+                    log::warn!(
+                        "Toolchain '{}' was rendered but its render-stamp task failed: {error}",
+                        request.home.root().display()
+                    );
+                    false
+                }
             }
         }
     };
@@ -510,23 +534,69 @@ async fn render_with(
     })
 }
 
-/// Reconcile `bin/` and return the file names that landed (`Written` or `Unchanged`, never
-/// `Skipped`): the stamp must certify only trampolines the composing side may trust.
-async fn reconcile_bin(
+/// The trampoline directory a render left `active` on, as the v2 stamp records it.
+#[derive(Debug, Clone)]
+struct LandedBin {
+    shell_dir: String,
+    previous_shell_dir: String,
+    fingerprint: String,
+    generation: String,
+    bin_fingerprint: BTreeMap<String, BinEntryStamp>,
+}
+
+impl LandedBin {
+    fn of_stamp(stamp: &RenderStampV2) -> Self {
+        Self {
+            shell_dir: stamp.shell_dir.clone(),
+            previous_shell_dir: stamp.previous_shell_dir.clone(),
+            fingerprint: stamp.fingerprint.clone(),
+            generation: stamp.generation.clone(),
+            bin_fingerprint: stamp.bin_fingerprint.clone(),
+        }
+    }
+
+    fn into_stamp(
+        self,
+        home: &ToolchainHome,
+        scope: RenderStampScope,
+        link_fingerprint: BTreeMap<String, String>,
+    ) -> RenderStampV2 {
+        RenderStampV2::new(
+            home.root().to_path_buf(),
+            scope,
+            self.shell_dir,
+            self.previous_shell_dir,
+            self.fingerprint,
+            self.generation,
+            self.bin_fingerprint,
+            link_fingerprint,
+        )
+    }
+}
+
+/// How many fresh random names a staging or render directory gets before the render gives up.
+const PUBLISH_TRIES: usize = 8;
+
+/// Render the trampoline directory (`adr_unified_launcher.md` § 6.4 steps 1-6) and return what `active`
+/// is left on, `None` when nothing landed. A stamped directory that is current is kept (re-switched when
+/// `active` names another); otherwise a new one is staged, published and switched to.
+///
+/// # Errors
+///
+/// A name that is not a valid [`BinaryName`](ocx_package::metadata::BinaryName), a record the launcher
+/// would refuse, or a fault seam; a filesystem failure is [`RenderOutcome::Skipped`].
+async fn render_bin(
     file_structure: &FileStructure,
     request: &RenderRequest<'_>,
     case_insensitive: bool,
     fault: Option<&str>,
+    previous: Option<&RenderStampV2>,
     items: &mut Vec<RenderedItem>,
-) -> Result<BTreeSet<String>, PackageErrorKind> {
+) -> Result<Option<LandedBin>, PackageErrorKind> {
     #[cfg(not(any(test, feature = "__testing")))]
     let _ = fault;
 
     let home = request.home;
-    // Physical `shell_bin`, never `bin()`: through `active`, every write and the stamp would land in
-    // and certify whatever directory `active` points at.
-    let bin = home.shell_bin(DEFAULT_SHELL);
-
     // `Skip`, not `Refuse`: a package claiming no names contributes nothing and is not an error.
     let names = exposed_names(request.surface, NotEnumerablePolicy::Skip)?;
     let names = if case_insensitive {
@@ -534,113 +604,304 @@ async fn reconcile_bin(
     } else {
         names
     };
+    let names: Vec<String> = names
+        .keys()
+        .map(|name| name.as_str().to_owned())
+        .filter(|name| {
+            let record = is_record_name(name);
+            if record {
+                log::warn!(
+                    "Skipping the launcher '{name}': a name ending in '.launch' collides with a launcher record"
+                );
+            }
+            !record
+        })
+        .collect();
 
-    // Both bodies on every platform, not `cfg`-gated, so each one's non-absolute-root refusal is
-    // compiled on the CI leg that actually runs.
-    let target = trampoline_target(request.scope);
+    // Before any write: a record the launcher would refuse is never written.
     let ocx_binary = trampoline_ocx_binary(file_structure).await;
-    let body = unix_trampoline_body(&target, ocx_binary.as_deref()).map_err(PackageErrorKind::Internal)?;
-    // The sidecar bakes the resolved `ocx` too: Windows searches a bare `ocx` in `bin/` first, where a
-    // package claiming the name has rendered `ocx.exe`.
-    let sidecar = exec_sidecar_body(&target, ocx_binary.as_deref()).map_err(PackageErrorKind::Internal)?;
+    let record = toolchain_record(
+        &trampoline_target(request.scope),
+        ocx_binary.as_deref(),
+        cfg!(windows),
+        home.root(),
+    )
+    .map_err(PackageErrorKind::Internal)?;
 
-    let mut expected: BTreeSet<String> = BTreeSet::new();
-    for name in names.keys() {
-        expected.extend(trampoline_file_names(name.as_str()));
-    }
+    let Some(generation) = host_generation() else {
+        skip_all(items, &names, &shells_root(home), "no launcher blob for this host");
+        return Ok(None);
+    };
+    let record_bytes = record.encode();
+    let records: BTreeMap<String, Vec<u8>> = names.iter().map(|name| (name.clone(), record_bytes.clone())).collect();
+    let fingerprint = render_fingerprint(generation, &records);
 
-    let mut writable = true;
-    if !request.dry_run && !names.is_empty() {
-        let target = bin.clone();
-        // Owner-only at create, never the umask: `bin/` is on PATH, so group-writable is a write
-        // primitive into the shell. Non-recursive, or a symlinked level is followed across the lock wait.
-        if let Err(error) = blocking(bin.clone(), move || create_directory_owner_only(&target)).await {
-            log::warn!("Toolchain '{}' is not writable: {error}", bin.display());
-            writable = false;
-        }
-    }
-
-    let mut landed: BTreeSet<String> = BTreeSet::new();
-    let mut wrote_first = false;
-    for name in names.keys() {
-        let files = trampoline_file_names(name.as_str());
-        let outcome = if writable {
-            publish_bin_entry(
-                &bin,
-                name.as_str(),
-                &body,
-                &sidecar,
-                &file_structure.shim_bin,
-                request.dry_run,
-            )
+    let keep_partial = !request.unrendered.is_empty();
+    let current = match previous.cloned() {
+        Some(stamp) => {
+            let (root, scope, fingerprint) = (home.root().to_path_buf(), request.scope.clone(), fingerprint.clone());
+            blocking(root.clone(), move || {
+                let current =
+                    stamp_directory_is_current(&ToolchainHome::new(root), &scope, &stamp, &fingerprint, keep_partial);
+                Ok(current.then_some(stamp))
+            })
             .await
-        } else {
-            Err(crate::error::file_error(
-                &bin,
-                std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    "the trampoline directory is not writable",
-                ),
-            ))
-        };
-
-        match outcome {
-            Ok(written) => {
-                let outcome = if written {
-                    RenderOutcome::Written
-                } else {
-                    RenderOutcome::Unchanged
-                };
-                for file in &files {
-                    landed.insert(file.clone());
-                    items.push(RenderedItem {
-                        artifact: RenderedArtifact::Trampoline(file.clone()),
-                        outcome: outcome.clone(),
-                    });
-                }
-                if written && !request.dry_run && !wrote_first {
-                    wrote_first = true;
-                    #[cfg(any(test, feature = "__testing"))]
-                    maybe_inject_fault(fault, RenderStage::AfterFirstEntryWrite)?;
-                }
-            }
-            Err(error) => {
-                let reason = error.to_string();
-                for file in &files {
-                    items.push(RenderedItem {
-                        artifact: RenderedArtifact::Trampoline(file.clone()),
-                        outcome: RenderOutcome::Skipped {
-                            path: bin.join(file),
-                            reason: reason.clone(),
-                        },
-                    });
-                }
-            }
+            .unwrap_or(None)
         }
+        None => None,
+    };
+
+    if request.dry_run {
+        let outcome = if current.is_some() {
+            RenderOutcome::Unchanged
+        } else {
+            RenderOutcome::Written
+        };
+        push_all(items, &names, &outcome);
+        return Ok(None);
     }
 
-    // The prune half; a non-UTF-8 name is neither reported nor removed. Withheld while a tool is
-    // unwalked: its launchers are not in `expected` yet are still wanted, so they are stamped as
-    // landed instead (an unnamed on-disk file reads as a mismatch and turns activation inert).
-    // ponytail: an offline partial render keeps every unexpected launcher, including those of
-    // tools removed from the lock, until the next online render.
-    let withheld = !request.unrendered.is_empty();
-    for name in read_dir_utf8_names(&bin).await {
-        if is_expected(&expected, &name, case_insensitive) {
-            continue;
+    if let Some(stamp) = current {
+        // § 6.4 steps 2-3: a no-op, or a re-switch when an older ocx healed `active` elsewhere.
+        switch_active(home, &stamp.shell_dir).await;
+        push_all(items, &names, &RenderOutcome::Unchanged);
+        return Ok(Some(LandedBin::of_stamp(&stamp)));
+    }
+
+    let blob = host_launcher_blob(home.root()).map_err(PackageErrorKind::Internal)?;
+    let previous_shell_dir = blocking(home.root().to_path_buf(), {
+        let root = home.root().to_path_buf();
+        move || Ok(ToolchainHome::new(root).active_target_name().unwrap_or_default())
+    })
+    .await
+    .unwrap_or_default();
+
+    let staged = match stage_render_dir(home, &names, blob, &record, cfg!(windows)).await {
+        Ok(staged) => staged,
+        Err(error) => {
+            skip_all(items, &names, &shells_root(home), &error.to_string());
+            return Ok(None);
         }
-        if withheld {
-            landed.insert(name);
-            continue;
+    };
+    // An abort here leaves a `.staging-*` behind and `active` as it was.
+    #[cfg(any(test, feature = "__testing"))]
+    if !names.is_empty() {
+        maybe_inject_fault(fault, RenderStage::AfterFirstEntryWrite)?;
+    }
+    let shell_dir = match publish_staged(home, &staged).await {
+        Ok(shell_dir) => shell_dir,
+        Err(error) => {
+            skip_all(items, &names, &staged, &error.to_string());
+            return Ok(None);
         }
-        let artifact = RenderedArtifact::Trampoline(name);
+    };
+
+    // § 6.4 step 6, the commit point.
+    switch_active(home, &shell_dir).await;
+
+    let bin = home.render_dir(&shell_dir).join(TRAMPOLINE_BIN_DIR);
+    let bin_fingerprint = blocking(bin.clone(), move || Ok(fingerprint_bin(&bin)))
+        .await
+        .unwrap_or_default();
+    push_all(items, &names, &RenderOutcome::Written);
+    Ok(Some(LandedBin {
+        shell_dir,
+        previous_shell_dir,
+        fingerprint,
+        generation: generation.as_str().to_owned(),
+        bin_fingerprint,
+    }))
+}
+
+/// The directory below a render directory that holds its launchers.
+const TRAMPOLINE_BIN_DIR: &str = "bin";
+
+fn push_all(items: &mut Vec<RenderedItem>, names: &[String], outcome: &RenderOutcome) {
+    for name in names {
         items.push(RenderedItem {
-            outcome: prune_outcome(home, &artifact, request.dry_run).await,
-            artifact,
+            artifact: RenderedArtifact::Trampoline(name.clone()),
+            outcome: outcome.clone(),
         });
     }
+}
 
-    Ok(landed)
+fn skip_all(items: &mut Vec<RenderedItem>, names: &[String], path: &Path, reason: &str) {
+    push_all(
+        items,
+        names,
+        &RenderOutcome::Skipped {
+            path: path.to_path_buf(),
+            reason: reason.to_owned(),
+        },
+    );
+}
+
+/// Point `active` at `shells/<shell_dir>`, warning on failure: a stamp naming a directory `active` does not
+/// name is withheld by the prompt gate and re-switched by the next render.
+async fn switch_active(home: &ToolchainHome, shell_dir: &str) {
+    let (root, shell_dir) = (home.root().to_path_buf(), shell_dir.to_owned());
+    if let Err(error) = blocking(root.clone(), move || heal_active(&ToolchainHome::new(root), &shell_dir)).await {
+        log::warn!(
+            "Toolchain '{}' has no usable '{}' link: {error}",
+            home.root().display(),
+            home.active().display()
+        );
+    }
+}
+
+/// Whether `stamp`'s directory is what this render would publish: written for this home and tier, under the
+/// same fingerprint (unless `keep_partial`), and still holding exactly the stamped entries. A published
+/// directory that differs from its stamp is never repaired: the render publishes another.
+fn stamp_directory_is_current(
+    home: &ToolchainHome,
+    scope: &RenderStampScope,
+    stamp: &RenderStampV2,
+    fingerprint: &str,
+    keep_partial: bool,
+) -> bool {
+    is_render_dir_name(&stamp.shell_dir)
+        && stamp.home == home.root()
+        && &stamp.scope == scope
+        && (keep_partial || stamp.fingerprint == fingerprint)
+        && directory_matches(&home.render_dir(&stamp.shell_dir), &stamp.bin_fingerprint)
+}
+
+/// Whether `name` is a render directory this tree publishes: `default-` and 16 lowercase hex.
+fn is_render_dir_name(name: &str) -> bool {
+    name.strip_prefix("default-")
+        .is_some_and(|hex| hex.len() == 16 && hex.bytes().all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f')))
+}
+
+/// Whether `directory` is a real directory whose `bin/` holds exactly `expected`, entry for entry. Blocking.
+fn directory_matches(directory: &Path, expected: &BTreeMap<String, BinEntryStamp>) -> bool {
+    let bin = directory.join(TRAMPOLINE_BIN_DIR);
+    // `symlink_metadata`: a linked directory is never trusted, it may resolve anywhere.
+    let real_directory = |path: &Path| std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir());
+    if !real_directory(directory) || !real_directory(&bin) {
+        return false;
+    }
+    let Ok(entries) = std::fs::read_dir(&bin) else {
+        return false;
+    };
+    let mut seen = 0usize;
+    for entry in entries {
+        let Ok(entry) = entry else {
+            return false;
+        };
+        let Some(stamped) = entry.file_name().to_str().and_then(|name| expected.get(name)) else {
+            return false;
+        };
+        let path = entry.path();
+        let Some(metadata) = std::fs::symlink_metadata(&path).ok().filter(std::fs::Metadata::is_file) else {
+            return false;
+        };
+        // Mode is part of the match: a launcher committed at `100644` keeps its bytes and its identity.
+        if !is_record_name(&entry.file_name().to_string_lossy()) && !is_executable(&metadata) {
+            return false;
+        }
+        if BinEntryStamp::of_file(&path, &metadata).as_ref() != Some(stamped) {
+            return false;
+        }
+        seen += 1;
+    }
+    seen == expected.len()
+}
+
+/// Whether a launcher's mode lets it run; any execute bit, never `== 0o755`, so a narrowed mode is still fine.
+#[cfg(unix)]
+fn is_executable(metadata: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt as _;
+    metadata.permissions().mode() & 0o111 != 0
+}
+
+/// No mode bits off Unix: `NAME.exe` runs by its extension.
+#[cfg(not(unix))]
+fn is_executable(_metadata: &std::fs::Metadata) -> bool {
+    true
+}
+
+/// Stage a complete render directory: `shells/.staging-<16 hex>/bin/` holding, per name, the launcher and its
+/// record (`adr_unified_launcher.md` § 6.4 step 4). The staging directory is owner-only and created exclusively.
+///
+/// # Errors
+///
+/// The creation's or a write's own I/O failure, or eight taken staging names.
+async fn stage_render_dir(
+    home: &ToolchainHome,
+    names: &[String],
+    blob: &[u8],
+    record: &LaunchRecord,
+    windows: bool,
+) -> crate::Result<PathBuf> {
+    let shells = shells_root(home);
+    let staged = blocking(shells.clone(), move || {
+        // Re-judged here: a `shells/` swapped for a link during the render lock's wait is followed by `mkdir`.
+        create_directory_owner_only(&shells)?;
+        for _ in 0..PUBLISH_TRIES {
+            let candidate = shells.join(format!(".staging-{}", random_hex16()));
+            match create_staging_directory(&candidate) {
+                Ok(()) => {
+                    let bin = candidate.join(TRAMPOLINE_BIN_DIR);
+                    create_directory_owner_only(&bin)?;
+                    return Ok(candidate);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(crate::error::file_error(&candidate, error)),
+            }
+        }
+        Err(crate::error::file_error(
+            &shells,
+            std::io::Error::new(std::io::ErrorKind::AlreadyExists, "every staging name tried was taken"),
+        ))
+    })
+    .await?;
+    let bin = staged.join(TRAMPOLINE_BIN_DIR);
+    for name in names {
+        write_launcher(&bin, name, blob, record, windows).await?;
+    }
+    Ok(staged)
+}
+
+/// Publish `staged` as `shells/default-<16 hex>` and return that name (§ 6.4 step 5); an occupied name is
+/// retried under a fresh one.
+///
+/// # Errors
+///
+/// The rename's own I/O failure, or eight taken names.
+async fn publish_staged(home: &ToolchainHome, staged: &Path) -> crate::Result<String> {
+    for _ in 0..PUBLISH_TRIES {
+        let shell_dir = format!("default-{}", random_hex16());
+        let target = home.render_dir(&shell_dir);
+        match publish_dir(staged, &target).await {
+            Ok(Published::New) => return Ok(shell_dir),
+            Ok(Published::AlreadyThere) => continue,
+            Err(error) => return Err(crate::error::file_error(&target, error)),
+        }
+    }
+    Err(crate::error::file_error(
+        staged,
+        std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "every render directory name tried was taken",
+        ),
+    ))
+}
+
+/// 16 lowercase hex characters, fresh per call: the random part of a staging or render directory name.
+fn random_hex16() -> String {
+    use std::hash::{BuildHasher as _, Hasher as _};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    hasher.write_u32(std::process::id());
+    hasher.write_u64(SEQUENCE.fetch_add(1, Ordering::Relaxed));
+    hasher.write_u128(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_nanos()),
+    );
+    format!("{:016x}", hasher.finish())
 }
 
 /// Writes one direct launcher per name of `names` into `bin` (`selections/<id>/shells/default/bin` of a
@@ -670,102 +931,6 @@ pub async fn render_direct_bin(
         write_direct_launcher_for(bin, name, blob, &sidecar_for(name)?, windows).await?;
     }
     Ok(())
-}
-
-/// Publish one exposed name's `bin/` entry; `Ok(true)` when this call wrote. A runtime branch, not
-/// a `cfg`, so the Windows arm stays testable on every host.
-async fn publish_bin_entry(
-    bin: &Path,
-    name: &str,
-    body: &str,
-    sidecar: &str,
-    shim_bin: &ShimBinStore,
-    dry_run: bool,
-) -> crate::Result<bool> {
-    if cfg!(windows) {
-        let exe = bin.join(format!("{name}.exe"));
-        let sidecar_path = bin.join(format!("{name}.exec"));
-        // The blob is what `<name>.exe` must be. `ensure()` publishes it, so a dry run skips it for the
-        // weaker predicate — sound, since a dry run writes no stamp to bless its `Unchanged`.
-        let blob = if dry_run { None } else { Some(shim_bin.ensure().await?) };
-
-        let (exe_probe, sidecar_probe) = (exe.clone(), sidecar_path.clone());
-        let sidecar_bytes = sidecar.to_string();
-        let unchanged = blocking(exe.clone(), move || {
-            windows_pair_unchanged(&exe_probe, &sidecar_probe, &sidecar_bytes, blob.as_deref())
-        })
-        .await?;
-        if unchanged {
-            return Ok(false);
-        }
-        if !dry_run {
-            publish_windows_trampoline(shim_bin, &exe, &sidecar_path, sidecar).await?;
-        }
-        return Ok(true);
-    }
-
-    let path = bin.join(name);
-    let body = body.to_string();
-    blocking(path.clone(), move || {
-        let existing = read_existing_trampoline(&path, body.len() as u64)?;
-        // Mode is part of the predicate: a committed `100644` file with the exact body would stay
-        // non-executable forever, as only `write_trampoline_atomic` sets the bit.
-        if existing.as_deref() == Some(body.as_bytes()) && has_execute_bit(&path) {
-            return Ok(false);
-        }
-        if !dry_run {
-            write_trampoline_atomic(&path, &body)?;
-        }
-        Ok(true)
-    })
-    .await
-}
-
-/// Whether the Windows pair on disk is what this render would publish: the sidecar's bytes and the
-/// `.exe`'s file identity — existence alone would certify a substituted `.exe`
-/// (`adr_toolchain_activation.md` § Rationale from code: render_toolchain).
-/// `blob` is `None` only under a dry run, where a regular-file check suffices.
-///
-/// # Errors
-///
-/// The sidecar read's own I/O failure.
-fn windows_pair_unchanged(exe: &Path, sidecar_path: &Path, sidecar: &str, blob: Option<&Path>) -> crate::Result<bool> {
-    let existing = read_existing_trampoline(sidecar_path, sidecar.len() as u64)?;
-    if existing.as_deref() != Some(sidecar.as_bytes()) {
-        return Ok(false);
-    }
-    match blob {
-        // No file identity falls through to the write branch, fail-closed like `BinEntryStamp::file_id`.
-        Some(blob) => Ok(matches!(
-            (file_identity(exe), file_identity(blob)),
-            (Some(published), Some(expected)) if published == expected
-        )),
-        None => Ok(file_identity(exe).is_some()),
-    }
-}
-
-/// One file's identity (inode / file index), or `None` when absent, not a regular file or unreported.
-/// Via [`BinEntryStamp::from_metadata`] so both ends of the prompt gate derive it alike.
-fn file_identity(path: &Path) -> Option<u64> {
-    let metadata = std::fs::symlink_metadata(path).ok()?;
-    if !metadata.is_file() {
-        return None;
-    }
-    BinEntryStamp::from_metadata(path, &metadata, String::new()).file_id
-}
-
-/// Whether `path` has any execute bit. Not `== 0o755`: a narrowed mode is still correct, and
-/// rewriting it on every render would break idempotence.
-#[cfg(unix)]
-fn has_execute_bit(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt as _;
-    std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.permissions().mode() & 0o111 != 0)
-}
-
-/// No mode bits off Unix; never reached there, as the caller branches on the host first.
-#[cfg(not(unix))]
-fn has_execute_bit(_path: &Path) -> bool {
-    true
 }
 
 /// Reconcile each selected group's links, then the orphans under `links/` (entries first, so a
@@ -990,24 +1155,9 @@ async fn prune_outcome(home: &ToolchainHome, artifact: &RenderedArtifact, dry_ru
     }
 }
 
-/// The sorted UTF-8 entry names of `directory`; absent or unreadable reads as empty, and a non-UTF-8
-/// name is dropped, so it is never pruned.
-async fn read_dir_utf8_names(directory: &Path) -> Vec<String> {
-    let Ok(mut entries) = tokio::fs::read_dir(directory).await else {
-        return Vec::new();
-    };
-    let mut names = Vec::new();
-    while let Ok(Some(entry)) = entries.next_entry().await {
-        if let Some(name) = entry.file_name().to_str() {
-            names.push(name.to_string());
-        }
-    }
-    names.sort();
-    names
-}
-
-/// [`read_dir_utf8_names`] minus OS metadata files, which are left in place unreported: Finder and
-/// Explorer recreate them, so refusing one warned on every render. Never for `bin/`, which is on `PATH`.
+/// The sorted UTF-8 entry names of `directory` minus OS metadata files, which are left in place
+/// unreported: Finder and Explorer recreate them, so refusing one warned on every render. Absent or
+/// unreadable reads as empty, and a non-UTF-8 name is dropped, so it is never pruned.
 async fn read_dir_link_side_names(directory: &Path) -> Vec<String> {
     let Ok(mut entries) = tokio::fs::read_dir(directory).await else {
         return Vec::new();
@@ -1031,77 +1181,69 @@ async fn read_dir_link_side_names(directory: &Path) -> Vec<String> {
     names
 }
 
-/// The path `artifact` occupies under `home`, unvalidated — containment is [`prune_within`]'s job.
+/// The path `artifact` occupies under `home`, unvalidated — containment is [`prune_within`]'s job. A
+/// trampoline is named through the PATH-facing `active/bin`, for a report only: it is never pruned.
 fn artifact_path(home: &ToolchainHome, artifact: &RenderedArtifact) -> PathBuf {
     match artifact {
-        RenderedArtifact::Trampoline(name) => home.shell_bin(DEFAULT_SHELL).join(name),
+        RenderedArtifact::Trampoline(name) => home.bin().join(name),
         RenderedArtifact::Link { group, entry } => links_root(home).join(group).join(entry),
         RenderedArtifact::GroupDirectory(group) => links_root(home).join(group),
         RenderedArtifact::RootEntry(name) => home.root().join(name),
     }
 }
 
-/// Write the render stamp, last; `true` when written. A failure is a skip, so the prompt gate
-/// withholds. Heavily blocking: [`render_with`] runs it as one [`blocking`] unit.
+/// The stamp target a tier's stamp is written to, keyed by `key` ([`stamp_key`]).
+fn stamp_target<'a>(scope: &RenderStampScope, key: &'a str) -> RenderStampTarget<'a> {
+    match scope {
+        RenderStampScope::Global => RenderStampTarget::Global,
+        RenderStampScope::Project(_) => RenderStampTarget::Project(key),
+    }
+}
+
+/// Write the v2 stamp, last; `true` when the stamp on disk now certifies this render. An unchanged stamp is
+/// not rewritten. A failure is a skip, so the prompt gate withholds. Blocking.
 fn write_render_stamp(
     state: &ocx_store::file_structure::StateStore,
-    home: &ToolchainHome,
-    scope: &RenderStampScope,
-    bin_in_scope: bool,
-    landed: &BTreeSet<String>,
+    target: RenderStampTarget<'_>,
+    stamp: &RenderStampV2,
+    previous: Option<&RenderStampV2>,
 ) -> bool {
-    let key = stamp_key(scope);
-    let target = match scope {
-        RenderStampScope::Global => RenderStampTarget::Global,
-        RenderStampScope::Project(_) => RenderStampTarget::Project(&key),
-    };
-
-    // Without a `bin/` reconcile, carry the previous half forward rather than certify an unread directory.
-    let bin_fingerprint = if bin_in_scope {
-        // Physical directory: a fingerprint taken through `active` certifies wherever `active` points,
-        // and `bin_matches_recorded` then passes by agreeing with it.
-        fingerprint_bin(&home.shell_bin(DEFAULT_SHELL), landed)
-    } else {
-        state
-            .render_stamp(target)
-            .map(|previous| previous.bin_fingerprint)
-            .unwrap_or_default()
-    };
-
-    let stamp = RenderStamp::new(
-        home.root().to_path_buf(),
-        scope.clone(),
-        bin_fingerprint,
-        observe_default_group_links(home),
-    );
-    match state.set_render_stamp(target, &stamp) {
+    if previous == Some(stamp) {
+        return true;
+    }
+    match state.set_render_stamp_v2(target, stamp) {
         Ok(()) => true,
         Err(error) => {
             log::warn!(
                 "Toolchain '{}' was rendered but its render stamp was not written: {error}",
-                home.root().display()
+                stamp.home.display()
             );
             false
         }
     }
 }
 
-/// One entry per landed on-disk file (Windows: `.exe` and `.exec` apart), via the same
-/// [`BinEntryStamp::of_file`](ocx_store::file_structure::BinEntryStamp::of_file) the prompt gate checks.
-fn fingerprint_bin(bin: &Path, landed: &BTreeSet<String>) -> BTreeMap<String, BinEntryStamp> {
+/// One entry per regular file in a freshly published `bin/`, records included, via the same
+/// [`BinEntryStamp::of_file`] the prompt gate checks. Blocking.
+fn fingerprint_bin(bin: &Path) -> BTreeMap<String, BinEntryStamp> {
     let mut fingerprint = BTreeMap::new();
-    for name in landed {
-        let path = bin.join(name);
+    let Ok(entries) = std::fs::read_dir(bin) else {
+        return fingerprint;
+    };
+    for entry in entries.flatten() {
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let path = entry.path();
         let Ok(metadata) = std::fs::symlink_metadata(&path) else {
             continue;
         };
         if !metadata.is_file() {
             continue;
         }
-        let Some(stamp) = BinEntryStamp::of_file(&path, &metadata) else {
-            continue;
-        };
-        fingerprint.insert(name.clone(), stamp);
+        if let Some(stamp) = BinEntryStamp::of_file(&path, &metadata) {
+            fingerprint.insert(name, stamp);
+        }
     }
     fingerprint
 }
@@ -1126,15 +1268,6 @@ fn observe_default_group_links(home: &ToolchainHome) -> BTreeMap<String, String>
         fingerprint.insert(format!("{DEFAULT_GROUP}/{name}"), target.to_string_lossy().into_owned());
     }
     fingerprint
-}
-
-/// The file names one exposed name occupies in `bin/`: two on Windows, `.exe` plus its `.exec`.
-fn trampoline_file_names(name: &str) -> Vec<String> {
-    if cfg!(windows) {
-        vec![format!("{name}.exe"), format!("{name}.exec")]
-    } else {
-        vec![name.to_string()]
-    }
 }
 
 /// Run one blocking unit off the runtime; a panicked or cancelled task is attributed to `context`.
@@ -1334,9 +1467,9 @@ pub(crate) fn refuse_symlinked_home(scope: &RenderStampScope, home: &ToolchainHo
     refuse_symlinked_home_leaves(home)
 }
 
-/// Refuse a symlink at the home root or a tree-own directory, outermost first, judging the physical
-/// `shells/<shell>/bin` (through `active/bin` it would resolve the link). `links/` and `shells/` are
-/// included because [`create_owner_only`] follows them; `active` must be a link.
+/// Refuse a symlink at the home root or a tree-own directory, outermost first: `links/` and `shells/`,
+/// because a staging directory or a group directory created below a linked one lands outside the home.
+/// `active` must be a link; a render directory is judged by `lstat` where it is trusted.
 fn refuse_symlinked_home_leaves(home: &ToolchainHome) -> crate::Result<()> {
     for path in tree_own_directories(home) {
         // `symlink_metadata`, never `metadata`, which follows the link.
@@ -1350,13 +1483,14 @@ fn refuse_symlinked_home_leaves(home: &ToolchainHome) -> crate::Result<()> {
 /// Every directory the rendered tree owns, outermost first, derived from the accessors rather than
 /// re-joined names so the guard and the scan cannot drift.
 fn tree_own_directories(home: &ToolchainHome) -> Vec<PathBuf> {
-    let mut paths = vec![home.root().to_path_buf(), links_root(home)];
-    // `ancestors` yields `bin`, `shells/<shell>`, `shells` first — never the root, already listed.
-    let shell_bin = home.shell_bin(DEFAULT_SHELL);
-    let mut chain: Vec<PathBuf> = shell_bin.ancestors().take(3).map(Path::to_path_buf).collect();
-    chain.reverse();
-    paths.extend(chain);
-    paths
+    vec![home.root().to_path_buf(), links_root(home), shells_root(home)]
+}
+
+/// `<root>/shells`, as the parent of the grammar's own `render_dir` so the name has one spelling.
+fn shells_root(home: &ToolchainHome) -> PathBuf {
+    home.render_dir(DEFAULT_SHELL)
+        .parent()
+        .map_or_else(|| home.root().to_path_buf(), Path::to_path_buf)
 }
 
 fn refuse_symlinked_project_path(scope: &RenderStampScope, home: &ToolchainHome) -> crate::Result<()> {
@@ -1442,21 +1576,32 @@ fn create_directory_owner_only(directory: &Path) -> crate::Result<()> {
     }
 }
 
-/// Create `shells/` and `shells/<shell>/` one guarded level at a time — `create_dir_all` would follow
-/// a committed symlink at either. `bin/` is [`reconcile_bin`]'s, or a `-g`-narrowed run would create it.
+/// Create one staging directory owner-only by an exclusive `mkdir(2)`, which never follows a symlink at
+/// its final component: any occupant, a planted link included, is `AlreadyExists` and left as it is.
+///
+/// # Errors
+///
+/// The create's own I/O failure, `AlreadyExists` for an occupied name.
+fn create_staging_directory(directory: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        std::fs::DirBuilder::new().mode(0o700).create(directory)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::DirBuilder::new().create(directory)
+    }
+}
+
+/// Create `shells/` guarded — `create_dir_all` would follow a committed symlink at it. Never a render
+/// directory: those are published whole, and `shells/default` is an older ocx's.
 ///
 /// # Errors
 ///
 /// Whatever [`create_directory_owner_only`] refuses.
-fn ensure_shell_tree(home: &ToolchainHome, shell: &str) -> crate::Result<()> {
-    // `shells/<shell>/bin`'s two ancestors below the root, outermost first.
-    let shell_bin = home.shell_bin(shell);
-    let mut levels: Vec<&Path> = shell_bin.ancestors().skip(1).take(2).collect();
-    levels.reverse();
-    for level in levels {
-        create_directory_owner_only(level)?;
-    }
-    Ok(())
+fn ensure_shell_tree(home: &ToolchainHome) -> crate::Result<()> {
+    create_directory_owner_only(&shells_root(home))
 }
 
 /// Create `links/` and `links/<group>/` one guarded level at a time — `create_dir_all` would follow a
@@ -1472,44 +1617,45 @@ fn ensure_link_group(group_directory: &Path) -> crate::Result<()> {
     create_directory_owner_only(group_directory)
 }
 
-/// Bring `<root>/active` to its one legal shape by the kind observed: correct link, nothing; absent,
-/// create; other link, `replace_atomic`; real directory (a dereferencing copy), `remove_dir_all` then
-/// create; anything else, `remove_file` then create. The recursion is safe only because no untrusted
-/// string contributes to the path (`adr_toolchain_activation.md` § "Defensive layout").
+/// Point `<root>/active` at `shells/<shell_dir>`, the commit point of a render: correct link, nothing; a
+/// link or nothing, one [`retarget_link`] on every OS, so `active` is never absent mid-switch; a real
+/// directory (a dereferencing copy) `remove_dir_all`, anything else `remove_file`, then the retarget. The
+/// recursion is safe only because no untrusted string contributes to the path
+/// (`adr_toolchain_activation.md` § "Defensive layout").
 ///
 /// # Errors
 ///
-/// The removal's or creation's own I/O failure; the caller warns and renders on.
-fn heal_active(home: &ToolchainHome, shell: &str) -> crate::Result<()> {
-    if home.active_is_valid(shell) {
+/// The removal's or the switch's own I/O failure; the caller warns and renders on.
+fn heal_active(home: &ToolchainHome, shell_dir: &str) -> crate::Result<()> {
+    if home.active_is_valid(shell_dir) {
         return Ok(());
     }
     let active = home.active();
-    let target = home.expected_active_target(shell);
+    let target = home.expected_active_target(shell_dir);
 
     // `symlink::is_link` first, never `Path::is_symlink`: a Windows junction is no symlink to std, and
     // `is_dir()` would otherwise claim it.
-    if ocx_util::fs::symlink::is_link(&active) {
-        log::debug!(
-            "Toolchain link '{}' is repointed at its derived target",
-            active.display()
-        );
-        return ocx_util::fs::symlink::replace_atomic(&target, &active).map_err(Into::into);
-    }
-    match std::fs::symlink_metadata(&active) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(crate::error::file_error(&active, error)),
-        Ok(metadata) => {
-            if metadata.is_dir() {
-                std::fs::remove_dir_all(&active).map_err(|error| crate::error::file_error(&active, error))?;
-            } else {
-                // `remove_file`, never a rename over it, which would drop the bytes unobserved.
-                std::fs::remove_file(&active).map_err(|error| crate::error::file_error(&active, error))?;
+    if !ocx_util::fs::symlink::is_link(&active) {
+        match std::fs::symlink_metadata(&active) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(crate::error::file_error(&active, error)),
+            Ok(metadata) => {
+                if metadata.is_dir() {
+                    std::fs::remove_dir_all(&active).map_err(|error| crate::error::file_error(&active, error))?;
+                } else {
+                    // `remove_file`, never a rename over it, which would drop the bytes unobserved.
+                    std::fs::remove_file(&active).map_err(|error| crate::error::file_error(&active, error))?;
+                }
+                log::debug!("Toolchain link '{}' is replaced by its derived link", active.display());
             }
-            log::debug!("Toolchain link '{}' is replaced by its derived link", active.display());
         }
     }
-    ocx_util::fs::symlink::create(&target, &active).map_err(Into::into)
+    log::debug!(
+        "Toolchain link '{}' is switched to '{}'",
+        active.display(),
+        target.display()
+    );
+    retarget_link(&target, &active).map_err(|error| crate::error::file_error(&active, error))
 }
 
 /// A rendered toolchain path that is a symlink, refused on both the write and the delete side.
@@ -1531,6 +1677,17 @@ fn refuse_not_a_link(path: &Path) -> crate::Error {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "this name holds something other than a link ocx wrote; refusing to remove it",
+        ),
+    )
+}
+
+/// A file inside a published render directory: never written, renamed or removed.
+fn refuse_published(path: &Path) -> crate::Error {
+    crate::error::file_error(
+        path,
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "a published launcher directory is never edited; refusing to remove from it",
         ),
     )
 }
@@ -1611,7 +1768,8 @@ pub(crate) async fn filesystem_is_case_insensitive(directory: &Path) -> crate::R
 /// The removal's own I/O failure, or a containment refusal; the caller reports either as `Skipped`.
 fn prune_within(home: &ToolchainHome, artifact: &RenderedArtifact) -> crate::Result<()> {
     let (parent, name) = match artifact {
-        RenderedArtifact::Trampoline(name) => (home.shell_bin(DEFAULT_SHELL), name.clone()),
+        // A published launcher directory is never edited; nothing reaches this arm.
+        RenderedArtifact::Trampoline(name) => return Err(refuse_published(&home.bin().join(name))),
         RenderedArtifact::Link { group, entry } => (links_root(home).join(group), entry.clone()),
         RenderedArtifact::GroupDirectory(group) => (links_root(home), group.clone()),
         RenderedArtifact::RootEntry(name) => (home.root().to_path_buf(), name.clone()),
@@ -1638,9 +1796,7 @@ fn prune_within(home: &ToolchainHome, artifact: &RenderedArtifact) -> crate::Res
 
     let victim = resolved_parent.join(&name);
     match artifact {
-        RenderedArtifact::Trampoline(_) => {
-            std::fs::remove_file(&victim).map_err(|error| crate::error::file_error(&victim, error))
-        }
+        RenderedArtifact::Trampoline(_) => Err(refuse_published(&victim)),
         // `symlink::remove` silently deletes a regular file at the name too, so a non-link is refused.
         RenderedArtifact::Link { .. } => {
             if !std::fs::symlink_metadata(&victim).is_ok_and(|metadata| metadata.is_symlink()) {
@@ -1686,96 +1842,12 @@ fn trampoline_target(scope: &RenderStampScope) -> TrampolineTarget {
     }
 }
 
-/// Atomically publish one POSIX trampoline at `path`, executable. Blocking.
-///
-/// # Errors
-///
-/// The write's, permission change's or rename's own I/O failure.
-fn write_trampoline_atomic(path: &Path, body: &str) -> crate::Result<()> {
-    use std::io::Write as _;
-
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let mut staged =
-        tempfile::NamedTempFile::new_in(parent).map_err(|error| crate::error::file_error(parent, error))?;
-    staged
-        .write_all(body.as_bytes())
-        .map_err(|error| crate::error::file_error(path, error))?;
-    staged.flush().map_err(|error| crate::error::file_error(path, error))?;
-
-    // Mode on the temp file, before the rename, so `bin/<name>` is never on PATH non-executable.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        staged
-            .as_file()
-            .set_permissions(std::fs::Permissions::from_mode(0o755))
-            .map_err(|error| crate::error::file_error(path, error))?;
-    }
-
-    ocx_util::fs::persist_temp_file(staged, path).map_err(|error| crate::error::file_error(path, error))
-}
-
-/// Publish one Windows trampoline: the `.exec` sidecar first, then the `.exe` as a hardlink of the
-/// blob. Only `.exec`-without-`.exe` is recoverable — the reverse is live on `PATH` and fails to run
-/// (`adr_toolchain_activation.md` § "Rationale from code: render_toolchain").
-///
-/// # Errors
-///
-/// The sidecar write's, blob publish's or hardlink's own I/O failure.
-async fn publish_windows_trampoline(
-    shim_bin: &ShimBinStore,
-    exe_path: &Path,
-    sidecar_path: &Path,
-    sidecar_body: &str,
-) -> crate::Result<()> {
-    let sidecar_target = sidecar_path.to_path_buf();
-    let sidecar_bytes = sidecar_body.as_bytes().to_vec();
-    blocking(sidecar_path.to_path_buf(), move || {
-        ocx_util::fs::write_private_file_atomic(&sidecar_target, &sidecar_bytes)
-            .map_err(|error| crate::error::file_error(&sidecar_target, error))
-    })
-    .await?;
-
-    let blob = shim_bin.ensure().await?;
-    let exe_path = exe_path.to_path_buf();
-    // `hardlink::update`, not `create`: a previous render's `.exe` may occupy the live slot.
-    blocking(exe_path.clone(), move || {
-        ocx_store::hardlink::update(&blob, &exe_path).map_err(Into::into)
-    })
-    .await
-}
-
-/// Read an existing `bin/` entry for the `Unchanged` compare; `Ok(None)` means take the write
-/// branch. Gated by `symlink_metadata` then [`read_bounded`](ocx_util::fs::read_bounded): a plain
-/// read hangs on a planted FIFO, trusts a matching symlink, and reads a planted 200 MB file (CWE-400).
-///
-/// # Errors
-///
-/// The stat's or read's own I/O failure other than "absent".
-fn read_existing_trampoline(path: &Path, cap: u64) -> crate::Result<Option<Vec<u8>>> {
-    let metadata = match std::fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(crate::error::file_error(path, error)),
-    };
-    if !metadata.is_file() {
-        return Ok(None);
-    }
-    match ocx_util::fs::read_bounded(path, cap) {
-        Ok(bytes) => Ok(Some(bytes)),
-        // Nothing comparable: over `cap` cannot equal the body, and a non-regular file is no trampoline.
-        Err(ocx_util::fs::BoundedReadError::TooLarge { .. })
-        | Err(ocx_util::fs::BoundedReadError::NotRegularFile { .. }) => Ok(None),
-        Err(ocx_util::fs::BoundedReadError::Io { path, source }) => Err(crate::error::file_error(&path, source)),
-    }
-}
-
 /// The points at which a render fault may be injected.
 #[cfg(any(test, feature = "__testing"))]
 enum RenderStage {
-    /// After the first `bin/` entry has landed, before the stamp is written.
+    /// After the staging directory is written, before it is published.
     AfterFirstEntryWrite,
-    /// After `shells/<shell>/` exists, before `active` is healed.
+    /// After `shells/` exists, before any render directory or `active` is written.
     AfterShellTree,
 }
 
@@ -1820,7 +1892,7 @@ mod tests {
     use ocx_package::metadata::visibility::Visibility;
     use ocx_package::metadata::{Binaries, BinaryName, EntrypointName};
     use ocx_project::{DECLARATION_HASH_VERSION, DEFAULT_GROUP, LockMetadata, LockVersion, LockedTool};
-    use ocx_store::file_structure::{RenderStamp, RenderStampTarget};
+    use ocx_store::file_structure::RenderStampTarget;
     use ocx_store::reference_manager::ReferenceManager;
 
     // ── Fixtures ─────────────────────────────────────────────────────────────
@@ -2025,16 +2097,8 @@ mod tests {
         file_structure: FileStructure,
         project_dir: PathBuf,
         home: ToolchainHome,
-        /// The absolute `ocx` every golden body must bake — seeded, never
+        /// The absolute `ocx` every golden record must bake — seeded, never
         /// inferred. See [`Tree::new`].
-        // Read only by the `#[cfg(unix)]` trampoline-body assertions and by
-        // `expected_unix_trampoline_body` beside them; the Windows arm asserts
-        // over the `.exec` sidecar instead. `expect`, so this line fails the
-        // day a Windows test reads it.
-        #[cfg_attr(
-            not(unix),
-            expect(dead_code, reason = "read only by cfg(unix) trampoline-body tests")
-        )]
         ocx_binary: PathBuf,
     }
 
@@ -2084,31 +2148,32 @@ mod tests {
             ReferenceManager::name_for_path(&self.project_dir)
         }
 
-        fn stamp(&self) -> Option<RenderStamp> {
+        /// The v2 stamp, the only one this render writes.
+        fn stamp(&self) -> Option<RenderStampV2> {
             self.file_structure
                 .state
-                .render_stamp(RenderStampTarget::Project(&self.key()))
+                .render_stamp_v2(RenderStampTarget::Project(&self.key()))
         }
 
         fn stamp_file(&self) -> PathBuf {
+            self.file_structure.state.render_stamp_v2_file(&self.key())
+        }
+
+        /// The v1 `render_stamp.json` an older ocx writes and this one never does.
+        fn v1_stamp_file(&self) -> PathBuf {
             self.file_structure.state.render_stamp_file(&self.key())
         }
 
         /// `render_with`'s documented precondition: steps 2–6 have run — the
-        /// home root and `shells/<shell>/` exist and are real directories, and
-        /// `active` is the link they render. Every `render_with` caller in this
-        /// module establishes it; `render_toolchain` callers do not, because
-        /// establishing it is what they are testing.
-        ///
-        /// `shells/<shell>/bin` itself is deliberately **not** created — that
-        /// is `reconcile_bin`'s, and only when the render has a name to put in
-        /// it (RUL-25).
+        /// home root and `shells/` exist and are real directories. Every
+        /// `render_with` caller in this module establishes it; `render_toolchain`
+        /// callers do not, because establishing it is what they are testing.
         fn create_home_root(&self) {
             seed_rendered_home(&self.home);
         }
 
-        /// `<root>/shells/<shell>` — `shell_bin`'s parent.
-        fn shell_directory(&self) -> PathBuf {
+        /// The render directory `active` names, `None` when it names none.
+        fn shell_directory(&self) -> Option<PathBuf> {
             shell_directory_of(&self.home)
         }
 
@@ -2143,37 +2208,30 @@ mod tests {
             PackageManager::new(self.file_structure.clone(), index, None, REGISTRY)
         }
 
-        /// The on-disk names in the **physical** trampoline directory, sorted.
-        /// Absent reads as empty, which is the state a render that never
-        /// touched it leaves.
-        ///
-        /// `shell_bin`, never `bin()`: reading through `active` would make
-        /// every assertion below agree with whatever that link points at, which
-        /// is the property half this module's guards exist to defend.
+        /// The on-disk names in the render directory `active` names, sorted,
+        /// read through the name `active` carries, never through the link.
+        /// Absent reads as empty, the state a render that never landed leaves.
         fn bin_entries(&self) -> Vec<String> {
-            read_dir_names(&self.home.shell_bin(DEFAULT_SHELL))
+            shell_directory_of(&self.home)
+                .map(|directory| read_dir_names(&directory.join("bin")))
+                .unwrap_or_default()
         }
     }
 
     /// Steps 2 and 6 of the render order, for **any** home — the root and
-    /// `shells/<shell>/` as real directories, `active` as the link they render.
+    /// `shells/` as real directories.
     ///
     /// A free function rather than a `Tree` method because several rows render
     /// into a *second* home (`toolchain_dir` relocation, two project
     /// directories) that the fixture never wrapped.
     fn seed_rendered_home(home: &ToolchainHome) {
-        std::fs::create_dir_all(shell_directory_of(home)).expect("the shell directory is creatable");
-        ocx_util::fs::symlink::create(home.expected_active_target(DEFAULT_SHELL), home.active())
-            .expect("the activation link is creatable");
+        std::fs::create_dir_all(shells_root(home)).expect("the shells directory is creatable");
     }
 
-    /// `<root>/shells/<shell>` — `shell_bin`'s parent, spelled through the
-    /// accessor so no fixture can drift from the tree it seeds.
-    fn shell_directory_of(home: &ToolchainHome) -> PathBuf {
-        home.shell_bin(DEFAULT_SHELL)
-            .parent()
-            .expect("the trampoline directory has a parent")
-            .to_path_buf()
+    /// The render directory `active` names, read off the link's name and
+    /// joined onto the physical `shells/`, never resolved through `active`.
+    fn shell_directory_of(home: &ToolchainHome) -> Option<PathBuf> {
+        home.active_target_name().map(|name| home.render_dir(&name))
     }
 
     /// The on-disk entry names of `directory`, sorted; an absent directory
@@ -2190,18 +2248,16 @@ mod tests {
         names
     }
 
-    /// The on-disk file names one exposed `name` occupies in `bin/`.
-    ///
-    /// One on POSIX; **two** on Windows — `<name>.exe` plus its `<name>.exec`
-    /// sidecar (RUL-26). Every count and set assertion in this module goes
-    /// through here rather than through a bare `name`, so a Windows-only
-    /// off-by-one cannot pass on the POSIX leg.
+    /// The on-disk file names one exposed `name` occupies in `bin/`: the
+    /// launcher (`<name>.exe` on Windows) and its `<name>.launch` record, on
+    /// every OS. Every count and set assertion goes through here.
     fn trampoline_files(name: &str) -> Vec<String> {
-        if cfg!(windows) {
-            vec![format!("{name}.exe"), format!("{name}.exec")]
+        let launcher = if cfg!(windows) {
+            format!("{name}.exe")
         } else {
-            vec![name.to_string()]
-        }
+            name.to_string()
+        };
+        vec![launcher, format!("{name}.launch")]
     }
 
     /// The sorted `bin/` name set for a whole exposed-name set.
@@ -2243,28 +2299,16 @@ mod tests {
         matches!(outcome, RenderOutcome::Skipped { .. })
     }
 
-    /// The POSIX trampoline body the renderer must produce for a project home.
+    /// The `toolchain` record the renderer must write for a project home.
     ///
-    /// Restated here rather than called through
-    /// `launcher::body::unix_trampoline_body`: a golden that asks the producer
-    /// what it produces cannot tell a correct body from a changed one, and the
-    /// producer's own goldens already pin it from the other side (C-034's
-    /// paired-golden pattern). The marker is imported rather than spelled,
-    /// because it is a *shared* constant the reader (`env::is_ocx_trampoline`)
-    /// also reads — case 43(d).
-    // Every caller is a `#[cfg(unix)]` test — the POSIX trampoline is a shell
-    // script, and Windows renders an `.exe` plus a sidecar instead.
-    #[cfg(unix)]
-    fn expected_unix_trampoline_body(project_root: &Path, ocx_binary: &Path) -> String {
-        let marker = ocx_config::env::TRAMPOLINE_MARKER;
+    /// Restated here rather than called through `launcher::toolchain_record`:
+    /// a golden that asks the producer what it produces cannot tell a correct
+    /// record from a changed one.
+    fn expected_record(project_root: &Path, ocx_binary: &Path) -> String {
         format!(
-            "#!/bin/sh\n\
-             {marker}\n\
-             unset OCX_GLOBAL OCX_PROJECT\n\
-             __ocx_binary='{binary}'\n\
-             exec \"${{OCX_BINARY_PIN:-$__ocx_binary}}\" --project '{root}' exec -- \"${{0##*/}}\" \"$@\"\n",
-            binary = ocx_binary.display(),
-            root = project_root.display(),
+            "{{\"kind\":\"toolchain\",\"schema_version\":1,\"tier\":\"project\",\"project_root\":{},\"ocx\":{}}}\n",
+            serde_json::to_string(&project_root.to_string_lossy()).expect("a string serialises"),
+            serde_json::to_string(&ocx_binary.to_string_lossy()).expect("a string serialises"),
         )
     }
 
@@ -2413,18 +2457,17 @@ mod tests {
 
     // ── 1. The name set — boundaries (C-021…C-025, C-044, C-045) ────────────
 
-    /// C-044, case 1 — an **empty** computed set over a **non-empty** tree is
-    /// the prune pass's whole job: every seeded entry reports `Pruned` and
-    /// `bin/` ends empty.
+    /// C-044, case 1 — an **empty** computed set over a **non-empty** tree
+    /// publishes an empty directory: no earlier launcher reaches `active/bin`,
+    /// and the directory that held them is left as it was (the render deletes
+    /// nothing).
     ///
-    /// RED: early-return on an empty name set, skipping the prune pass.
+    /// RED: early-return on an empty name set — `active` keeps naming the old
+    /// directory and both launchers stay on PATH.
     #[tokio::test]
-    async fn an_empty_surface_prunes_every_entry_already_in_bin() {
+    async fn an_empty_surface_publishes_an_empty_directory_and_leaves_the_old_one() {
         let tree = Tree::new();
-        tree.create_home_root();
-        std::fs::create_dir_all(tree.home.shell_bin(DEFAULT_SHELL)).unwrap();
-        std::fs::write(tree.home.shell_bin(DEFAULT_SHELL).join("cmake"), b"#!/bin/sh\n").unwrap();
-        std::fs::write(tree.home.shell_bin(DEFAULT_SHELL).join("ctest"), b"#!/bin/sh\n").unwrap();
+        let old_bin = published_bin(&tree, &["cmake", "ctest"]).await;
 
         let scope = tree.scope();
         let lock = lock_of(Vec::new());
@@ -2449,16 +2492,22 @@ mod tests {
         .await
         .expect("an empty surface is an ordinary render, not a refusal");
 
-        assert_eq!(
-            outcome_of(&report, &trampoline("cmake")),
-            &RenderOutcome::Pruned,
-            "C-044 — a name no longer in the computed set is pruned"
+        assert!(
+            report
+                .items
+                .iter()
+                .all(|item| !matches!(item.artifact, RenderedArtifact::Trampoline(_))),
+            "an empty set reports no trampoline, and none is pruned: {report:?}"
         );
-        assert_eq!(outcome_of(&report, &trampoline("ctest")), &RenderOutcome::Pruned);
         assert!(
             tree.bin_entries().is_empty(),
-            "C-044 — and `bin/` is empty afterwards, not merely reported as pruned: {:?}",
+            "C-044 — `active/bin` holds no name the computed set lost: {:?}",
             tree.bin_entries()
+        );
+        assert_eq!(
+            read_dir_names(&old_bin),
+            expected_bin_entries(&["cmake", "ctest"]),
+            "…and the directory that held them is whole"
         );
     }
 
@@ -2677,13 +2726,14 @@ mod tests {
         .expect("`bin` is an ordinary claimed name");
 
         assert_eq!(tree.bin_entries(), expected_bin_entries(&["bin"]));
+        let bin = tree.shell_directory().expect("`active` names the render").join("bin");
         assert!(
-            tree.home.shell_bin(DEFAULT_SHELL).is_dir(),
+            bin.is_dir(),
             "C-013 — the trampoline directory itself stays a directory"
         );
         for file in trampoline_files("bin") {
             assert!(
-                tree.home.shell_bin(DEFAULT_SHELL).join(&file).is_file(),
+                bin.join(&file).is_file(),
                 "the claim lands at `bin/{file}`, never at the home root"
             );
             assert!(
@@ -2846,15 +2896,19 @@ mod tests {
             "…and never a skip either: {report:?}"
         );
 
-        #[cfg(unix)]
-        {
-            let body = std::fs::read_to_string(tree.home.shell_bin(DEFAULT_SHELL).join("ocx")).unwrap();
-            assert!(
-                body.contains(&format!("__ocx_binary='{}'", tree.ocx_binary.display())),
-                "D-V19 — the body re-enters ocx through the absolute install path, or a \
-                 `bin/ocx` trampoline resolves itself through PATH: {body}"
-            );
-        }
+        let record = std::fs::read_to_string(
+            tree.shell_directory()
+                .expect("`active` names the render")
+                .join("bin")
+                .join("ocx.launch"),
+        )
+        .unwrap();
+        assert_eq!(
+            record,
+            expected_record(&tree.project_dir, &tree.ocx_binary),
+            "D-V19 — the record re-enters ocx through the absolute install path, or a \
+             `bin/ocx` trampoline resolves itself through PATH"
+        );
     }
 
     /// RUL-25, case 11 — a `-g`-narrowed pull that does **not** select the
@@ -2864,12 +2918,13 @@ mod tests {
     /// RED: derive `bin/`'s set from `request.groups`. A narrowed
     /// `ocx pull -g ci` then either empties `bin/` or resolves the default
     /// group's metadata the invocation never asked for.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_narrowed_pull_that_excludes_the_default_group_does_not_touch_bin() {
         let tree = Tree::new();
-        tree.create_home_root();
-        std::fs::create_dir_all(tree.home.shell_bin(DEFAULT_SHELL)).unwrap();
-        std::fs::write(tree.home.shell_bin(DEFAULT_SHELL).join("cmake"), b"#!/bin/sh\nold\n").unwrap();
+        let old_bin = published_bin(&tree, &["cmake"]).await;
+        let shells_before = snapshot_subtree(&shells_root(&tree.home));
+        let active_before = std::fs::read_link(tree.home.active()).unwrap();
 
         let surface = vec![node(pinned("ns/other", 'a'), Some(&["other"]), &[])];
         let scope = tree.scope();
@@ -2899,15 +2954,16 @@ mod tests {
             !report.bin_in_scope,
             "RUL-25 — `bin/` was not in scope, and that is a field rather than an inference"
         );
+        assert_eq!(read_dir_names(&old_bin), expected_bin_entries(&["cmake"]));
         assert_eq!(
-            tree.bin_entries(),
-            vec!["cmake".to_string()],
-            "…so the pre-existing entry is neither rewritten nor pruned"
+            snapshot_subtree(&shells_root(&tree.home)),
+            shells_before,
+            "…so nothing under `shells/` is written, byte-identical, not merely present"
         );
         assert_eq!(
-            std::fs::read(tree.home.shell_bin(DEFAULT_SHELL).join("cmake")).unwrap(),
-            b"#!/bin/sh\nold\n",
-            "…byte-identical, not merely present"
+            std::fs::read_link(tree.home.active()).unwrap(),
+            active_before,
+            "…and `active` stays"
         );
         assert!(
             report
@@ -2964,155 +3020,114 @@ mod tests {
 
     // ── 2. Prune — validation item 31's four orphan classes (C-044) ─────────
 
-    /// C-044, case 13 — an orphan **trampoline** (a `binaries` claim
-    /// disappeared) is removed, and the `<group>/<entry>` link is untouched.
+    /// C-044, case 13 — an orphan **launcher** planted in a published directory
+    /// (a `binaries` claim disappeared) never reaches the next directory, the
+    /// directory it was planted in is left as found, and the `<group>/<entry>`
+    /// link is untouched.
     ///
-    /// RED: skip the `bin/` prune pass.
+    /// RED: copy the previous directory forward — the orphan reaches `active/bin`.
     #[tokio::test]
-    async fn an_orphan_trampoline_is_pruned_and_its_group_link_is_left_alone() {
+    async fn an_orphan_launcher_never_reaches_the_next_directory_and_its_link_is_left_alone() {
         let tree = Tree::new();
-        tree.create_home_root();
-        std::fs::create_dir_all(tree.home.shell_bin(DEFAULT_SHELL)).unwrap();
-        std::fs::write(tree.home.shell_bin(DEFAULT_SHELL).join("gone"), b"#!/bin/sh\n").unwrap();
+        let old_bin = published_bin(&tree, &["cmake"]).await;
+        std::fs::write(old_bin.join("gone"), b"#!/bin/sh\n").unwrap();
 
-        let tool = locked_tool("cmake", DEFAULT_GROUP, "ns/cmake", &[(PLATFORM_KEY, 'd')]);
-        let expected_target = expected_link_target(&tree.file_structure, &tool);
-        let surface = vec![node(pinned("ns/cmake", 'd'), Some(&["cmake"]), &[])];
-        let scope = tree.scope();
-        let lock = lock_of(vec![tool]);
-        let groups = groups_of(&[DEFAULT_GROUP]);
-        let platform = platform();
-        let report = render_with(
-            &tree.file_structure,
-            RenderRequest {
-                unrendered: &[],
-                home: &tree.home,
-                scope: &scope,
-                lock: &lock,
-                surface: &surface,
-                groups: &groups,
-                pinned: false,
-                platform: &platform,
-                dry_run: false,
-            },
-            false,
-            None,
-        )
-        .await
-        .expect("the render succeeds");
+        let report = render_names(&tree, &["cmake"]).await;
 
-        assert_eq!(outcome_of(&report, &trampoline("gone")), &RenderOutcome::Pruned);
+        assert!(
+            report.items.iter().all(|item| item.outcome != RenderOutcome::Pruned),
+            "the render deletes nothing: {report:?}"
+        );
         assert_eq!(tree.bin_entries(), expected_bin_entries(&["cmake"]));
+        assert!(old_bin.join("gone").exists(), "…the orphan stays where it was planted");
+        let tool = locked_tool("cmake", DEFAULT_GROUP, "ns/cmake", &[(PLATFORM_KEY, 'a')]);
         let entry = tree
             .home
             .entry(DEFAULT_GROUP, "cmake")
             .expect("an admitted component pair");
         assert_eq!(
             std::fs::read_link(&entry).expect("the link exists"),
-            expected_target,
-            "C-044 — the link half of the tree is untouched by the trampoline prune"
+            expected_link_target(&tree.file_structure, &tool),
+            "C-044 — the link half of the tree is untouched by the orphan"
         );
     }
 
-    /// An unwalked tool withholds the prune: the orphan survives and the stamp still names it,
-    /// so the activation gate keeps matching (the `&[]` control above prunes the same orphan).
+    /// An unwalked tool keeps the intact stamped directory as it is: the launchers of the tool the
+    /// partial surface omits stay on `active/bin`, and the stamp still certifies them. The `&[]`
+    /// control publishes a new directory from the same partial surface.
     #[tokio::test]
-    async fn a_withheld_prune_keeps_the_orphan_and_stamps_it() {
+    async fn an_unwalked_tool_keeps_the_intact_stamped_directory() {
         let tree = Tree::new();
-        tree.create_home_root();
-        let bin = tree.home.shell_bin(DEFAULT_SHELL);
-        std::fs::create_dir_all(&bin).unwrap();
-        std::fs::write(bin.join("gone"), b"#!/bin/sh\n").unwrap();
+        render_names(&tree, &["cmake", "ctest"]).await;
+        let kept = tree.home.active_target_name().expect("published");
+        let stamp_before = tree.stamp().expect("the stamp exists");
 
-        let tool = locked_tool("cmake", DEFAULT_GROUP, "ns/cmake", &[(PLATFORM_KEY, 'd')]);
-        let surface = vec![node(pinned("ns/cmake", 'd'), Some(&["cmake"]), &[])];
-        let scope = tree.scope();
-        let lock = lock_of(vec![tool]);
-        let groups = groups_of(&[DEFAULT_GROUP]);
-        let platform = platform();
+        let surface = vec![node(pinned("ns/cmake", 'a'), Some(&["cmake"]), &[])];
+        let lock = lock_of(vec![locked_tool(
+            "cmake",
+            DEFAULT_GROUP,
+            "ns/cmake",
+            &[(PLATFORM_KEY, 'a')],
+        )]);
         let unrendered = vec!["ns/other".to_string()];
-        let report = render_with(
-            &tree.file_structure,
-            RenderRequest {
-                unrendered: &unrendered,
-                home: &tree.home,
-                scope: &scope,
-                lock: &lock,
-                surface: &surface,
-                groups: &groups,
-                pinned: false,
-                platform: &platform,
-                dry_run: false,
-            },
-            false,
-            None,
-        )
-        .await
-        .expect("the render succeeds");
+        render_body(&tree, &lock, &surface, &groups_of(&[DEFAULT_GROUP]), &unrendered).await;
 
-        assert!(bin.join("gone").exists(), "the withheld prune keeps the orphan");
-        assert!(
-            !report.items.iter().any(|item| item.outcome == RenderOutcome::Pruned),
-            "nothing is pruned: {report:?}"
+        assert_eq!(
+            tree.home.active_target_name(),
+            Some(kept.clone()),
+            "nothing is published"
         );
+        assert_eq!(tree.bin_entries(), expected_bin_entries(&["cmake", "ctest"]));
         let stamp = tree.stamp().expect("the stamp exists");
-        assert!(
-            crate::activation::bin_stamp_matches(&bin, &stamp).await,
-            "the stamp names the retained launcher: {stamp:?}"
+        assert_eq!(
+            stamp.bin_fingerprint, stamp_before.bin_fingerprint,
+            "…and the stamp still names both"
         );
+
+        render_body(&tree, &lock, &surface, &groups_of(&[DEFAULT_GROUP]), &[]).await;
+        assert_ne!(
+            tree.home.active_target_name(),
+            Some(kept),
+            "the control: a whole surface publishes"
+        );
+        assert_eq!(tree.bin_entries(), expected_bin_entries(&["cmake"]));
     }
 
-    /// C-044, case 14 — an orphan **link** (its entry left the lock) takes its
-    /// trampoline with it: both halves are pruned in one render.
+    /// C-044, case 14 — an entry that left the lock loses its link and its
+    /// trampoline in one render: the link is pruned, and the next directory
+    /// holds no launcher for it.
     ///
-    /// RED: prune only one of the two.
+    /// RED: drop only one of the two.
     #[tokio::test]
     async fn an_entry_that_left_the_lock_loses_both_its_link_and_its_trampoline() {
         let tree = Tree::new();
-        tree.create_home_root();
-        std::fs::create_dir_all(tree.home.shell_bin(DEFAULT_SHELL)).unwrap();
-        std::fs::write(tree.home.shell_bin(DEFAULT_SHELL).join("ninja"), b"#!/bin/sh\n").unwrap();
+        let old_bin = published_bin(&tree, &["ninja"]).await;
         let stale_entry = tree
             .home
             .entry(DEFAULT_GROUP, "ninja")
             .expect("an admitted component pair");
-        std::fs::create_dir_all(stale_entry.parent().unwrap()).unwrap();
         std::fs::create_dir_all(tree.tmp.path().join("stale-package")).unwrap();
         ocx_util::fs::symlink::create(tree.tmp.path().join("stale-package"), &stale_entry).unwrap();
 
-        let scope = tree.scope();
-        let lock = lock_of(Vec::new());
-        let groups = groups_of(&[DEFAULT_GROUP]);
-        let platform = platform();
-        let report = render_with(
-            &tree.file_structure,
-            RenderRequest {
-                unrendered: &[],
-                home: &tree.home,
-                scope: &scope,
-                lock: &lock,
-                surface: &[],
-                groups: &groups,
-                pinned: false,
-                platform: &platform,
-                dry_run: false,
-            },
-            false,
-            None,
-        )
-        .await
-        .expect("the render succeeds");
+        let report = render_body(&tree, &lock_of(Vec::new()), &[], &groups_of(&[DEFAULT_GROUP]), &[]).await;
 
         assert_eq!(
             outcome_of(&report, &link(DEFAULT_GROUP, "ninja")),
             &RenderOutcome::Pruned
         );
-        assert_eq!(outcome_of(&report, &trampoline("ninja")), &RenderOutcome::Pruned);
         assert!(
             std::fs::symlink_metadata(&stale_entry).is_err(),
             "the link itself is gone, not merely reported"
         );
-        assert!(tree.bin_entries().is_empty());
+        assert!(
+            tree.bin_entries().is_empty(),
+            "…and `active/bin` holds no launcher for it"
+        );
+        assert_eq!(
+            read_dir_names(&old_bin),
+            expected_bin_entries(&["ninja"]),
+            "the old directory is whole"
+        );
     }
 
     /// C-044, case 15 — a removed or renamed group leaves the whole
@@ -3167,47 +3182,23 @@ mod tests {
     }
 
     /// C-044, case 16 — a renamed tool key is one render, not two: both old
-    /// spellings are gone and both new ones are present afterwards.
+    /// spellings are gone from what `active` names and both new ones are present.
     ///
-    /// RED: implement the write pass without the prune pass — the old spelling
-    /// survives on PATH beside the new one.
+    /// RED: carry the previous directory forward — the old spelling survives on
+    /// PATH beside the new one.
     #[tokio::test]
     async fn a_renamed_tool_key_replaces_both_halves_in_one_render() {
         let tree = Tree::new();
-        tree.create_home_root();
-        std::fs::create_dir_all(tree.home.shell_bin(DEFAULT_SHELL)).unwrap();
-        std::fs::write(tree.home.shell_bin(DEFAULT_SHELL).join("old-name"), b"#!/bin/sh\n").unwrap();
+        published_bin(&tree, &["old-name"]).await;
         let old_entry = tree.home.entry(DEFAULT_GROUP, "old-name").expect("an admitted pair");
-        std::fs::create_dir_all(old_entry.parent().unwrap()).unwrap();
         std::fs::create_dir_all(tree.tmp.path().join("old-package")).unwrap();
         ocx_util::fs::symlink::create(tree.tmp.path().join("old-package"), &old_entry).unwrap();
 
         let tool = locked_tool("new-name", DEFAULT_GROUP, "ns/tool", &[(PLATFORM_KEY, 'd')]);
         let surface = vec![node(pinned("ns/tool", 'd'), Some(&["new-name"]), &[])];
-        let scope = tree.scope();
-        let lock = lock_of(vec![tool]);
-        let groups = groups_of(&[DEFAULT_GROUP]);
-        let platform = platform();
-        let report = render_with(
-            &tree.file_structure,
-            RenderRequest {
-                unrendered: &[],
-                home: &tree.home,
-                scope: &scope,
-                lock: &lock,
-                surface: &surface,
-                groups: &groups,
-                pinned: false,
-                platform: &platform,
-                dry_run: false,
-            },
-            false,
-            None,
-        )
-        .await
-        .expect("the render succeeds");
+        let report = render_body(&tree, &lock_of(vec![tool]), &surface, &groups_of(&[DEFAULT_GROUP]), &[]).await;
 
-        assert_eq!(outcome_of(&report, &trampoline("old-name")), &RenderOutcome::Pruned);
+        assert_eq!(outcome_of(&report, &trampoline("new-name")), &RenderOutcome::Written);
         assert_eq!(
             outcome_of(&report, &link(DEFAULT_GROUP, "old-name")),
             &RenderOutcome::Pruned
@@ -3220,117 +3211,51 @@ mod tests {
         assert!(std::fs::symlink_metadata(&old_entry).is_err(), "the old link is gone");
     }
 
-    /// S-003, case 17 — a file in `bin/` ocx never wrote is pruned. The
-    /// **dotfile** is the discriminating half.
+    /// S-003, case 17 — a file in a published directory ocx never wrote, or one
+    /// overwritten in place, never reaches the next directory. The **dotfile** is
+    /// the discriminating half of the directory check.
     ///
-    /// RED: filter `.`-prefixed entries out of the prune `readdir`. A hostile
-    /// clone's `.hidden` then survives every render inside a directory that is
-    /// on someone's PATH.
+    /// RED: skip `.`-prefixed entries in the directory check — the tampered
+    /// directory reads as current and `.hidden` stays on PATH.
     #[tokio::test]
-    async fn a_committed_foreign_file_in_bin_is_pruned_including_a_dotfile() {
+    async fn a_foreign_file_in_a_published_directory_including_a_dotfile_is_left_behind() {
         let tree = Tree::new();
-        tree.create_home_root();
-        std::fs::create_dir_all(tree.home.shell_bin(DEFAULT_SHELL)).unwrap();
-        std::fs::write(
-            tree.home.shell_bin(DEFAULT_SHELL).join("cmake"),
-            b"#!/bin/sh\nhostile\n",
-        )
-        .unwrap();
-        std::fs::write(
-            tree.home.shell_bin(DEFAULT_SHELL).join(".hidden"),
-            b"#!/bin/sh\nhostile\n",
-        )
-        .unwrap();
+        let old_bin = published_bin(&tree, &["cmake"]).await;
+        std::fs::write(old_bin.join(".hidden"), b"#!/bin/sh\nhostile\n").unwrap();
 
-        let scope = tree.scope();
-        let lock = lock_of(Vec::new());
-        let groups = groups_of(&[DEFAULT_GROUP]);
-        let platform = platform();
-        let report = render_with(
-            &tree.file_structure,
-            RenderRequest {
-                unrendered: &[],
-                home: &tree.home,
-                scope: &scope,
-                lock: &lock,
-                surface: &[],
-                groups: &groups,
-                pinned: false,
-                platform: &platform,
-                dry_run: false,
-            },
-            false,
-            None,
-        )
-        .await
-        .expect("the render succeeds");
+        render_names(&tree, &["cmake"]).await;
 
-        assert_eq!(outcome_of(&report, &trampoline("cmake")), &RenderOutcome::Pruned);
         assert_eq!(
-            outcome_of(&report, &trampoline(".hidden")),
-            &RenderOutcome::Pruned,
-            "S-003 — a dot-prefixed committed file is exactly as foreign as any other"
+            tree.bin_entries(),
+            expected_bin_entries(&["cmake"]),
+            "S-003 — a dot-prefixed foreign file is exactly as foreign as any other"
         );
-        assert!(tree.bin_entries().is_empty());
+        assert!(old_bin.join(".hidden").exists(), "…and it is left where it was planted");
     }
 
-    /// RUL-32, case 18 — an orphan that is a **directory** is `Skipped` with a
-    /// reason, never removed recursively, and the render continues to later
-    /// entries.
+    /// RUL-32, case 18 — an orphan that is a **directory** in a published
+    /// `bin/` is never removed recursively and never carried over, and the
+    /// render continues into a new directory.
     ///
-    /// RED: propagate the error instead — one hostile directory then aborts
-    /// every later entry.
+    /// RED: copy the previous directory forward, or remove the orphan.
     #[tokio::test]
-    async fn an_orphan_directory_in_bin_is_skipped_and_does_not_abort_the_render() {
+    async fn an_orphan_directory_in_a_published_bin_is_left_whole_and_not_carried_over() {
         let tree = Tree::new();
-        tree.create_home_root();
-        std::fs::create_dir_all(tree.home.shell_bin(DEFAULT_SHELL).join("hostile")).unwrap();
-        std::fs::write(
-            tree.home.shell_bin(DEFAULT_SHELL).join("hostile").join("payload"),
-            b"keep me\n",
-        )
-        .unwrap();
+        let old_bin = published_bin(&tree, &["cmake"]).await;
+        std::fs::create_dir_all(old_bin.join("hostile")).unwrap();
+        std::fs::write(old_bin.join("hostile").join("payload"), b"keep me\n").unwrap();
 
-        let surface = vec![node(pinned("ns/cmake", 'a'), Some(&["cmake"]), &[])];
-        let scope = tree.scope();
-        let lock = lock_of(Vec::new());
-        let groups = groups_of(&[DEFAULT_GROUP]);
-        let platform = platform();
-        let report = render_with(
-            &tree.file_structure,
-            RenderRequest {
-                unrendered: &[],
-                home: &tree.home,
-                scope: &scope,
-                lock: &lock,
-                surface: &surface,
-                groups: &groups,
-                pinned: false,
-                platform: &platform,
-                dry_run: false,
-            },
-            false,
-            None,
-        )
-        .await
-        .expect("RUL-32 — a hostile directory is a skip, never an error");
+        let report = render_names(&tree, &["cmake"]).await;
 
+        assert!(report.items.iter().all(|item| !is_skipped(&item.outcome)), "{report:?}");
         assert!(
-            is_skipped(outcome_of(&report, &trampoline("hostile"))),
-            "the orphan directory is reported as skipped: {report:?}"
+            old_bin.join("hostile").join("payload").exists(),
+            "nothing was removed recursively"
         );
-        assert!(
-            tree.home
-                .shell_bin(DEFAULT_SHELL)
-                .join("hostile")
-                .join("payload")
-                .exists(),
-            "…and nothing under it was removed recursively"
-        );
-        assert!(
-            tree.bin_entries().contains(&trampoline_files("cmake")[0]),
-            "…and the render continued to the entries after it: {:?}",
-            tree.bin_entries()
+        assert_eq!(
+            tree.bin_entries(),
+            expected_bin_entries(&["cmake"]),
+            "…and the new directory holds the computed set and nothing else"
         );
     }
 
@@ -3442,70 +3367,46 @@ mod tests {
         }
     }
 
-    /// The `RenderedArtifact` doc limit, case 20 — a non-UTF-8 `bin/` entry
-    /// has no representation in the report, is therefore **never pruned**, and
-    /// survives the render as an untouched foreign file.
-    ///
-    /// Specified rather than left implicit: the alternative reading — "the
-    /// prune is exact for every entry" — is false, and validation item 31's
-    /// exactness claim has to be read against this limit.
+    /// The `RenderedArtifact` doc limit, case 20 — a non-UTF-8 entry in a
+    /// published directory has no representation in the report, is never
+    /// removed, and does not reach the next directory.
     #[cfg(unix)]
     #[tokio::test]
-    async fn a_non_utf8_bin_entry_is_neither_reported_nor_pruned() {
+    async fn a_non_utf8_entry_in_a_published_directory_is_never_reported_or_removed() {
         use std::os::unix::ffi::OsStrExt as _;
 
         let tree = Tree::new();
-        tree.create_home_root();
-        std::fs::create_dir_all(tree.home.shell_bin(DEFAULT_SHELL)).unwrap();
-        let hostile = tree
-            .home
-            .shell_bin(DEFAULT_SHELL)
-            .join(std::ffi::OsStr::from_bytes(b"invalid-\xff-name"));
+        let old_bin = published_bin(&tree, &["cmake"]).await;
+        let hostile = old_bin.join(std::ffi::OsStr::from_bytes(b"invalid-\xff-name"));
         if let Err(refused) = std::fs::write(&hostile, b"#!/bin/sh\n") {
-            // APFS validates filenames as UTF-8 and rejects these bytes
-            // outright, so the on-disk state under test cannot exist on a macOS
-            // volume. Observed, not assumed via `target_os`: the row still runs
-            // on any filesystem that accepts the name, and a refusal for any
-            // other reason (an absent `bin/`) reds here rather than passing as
-            // this carve-out. Same shape as `index_store`'s two non-UTF-8 rows.
+            // APFS validates filenames as UTF-8 and rejects these bytes outright, so the state under
+            // test cannot exist there; a refusal for any other reason reds below.
             assert!(
-                tree.home.shell_bin(DEFAULT_SHELL).exists(),
-                "only the non-UTF-8 component may be refused; bin/ must exist: {refused}"
+                old_bin.exists(),
+                "only the non-UTF-8 component may be refused: {refused}"
             );
             eprintln!("skipped: this filesystem refuses a non-UTF-8 filename: {refused}");
             return;
         }
 
-        let scope = tree.scope();
-        let lock = lock_of(Vec::new());
-        let groups = groups_of(&[DEFAULT_GROUP]);
-        let platform = platform();
-        let report = render_with(
-            &tree.file_structure,
-            RenderRequest {
-                unrendered: &[],
-                home: &tree.home,
-                scope: &scope,
-                lock: &lock,
-                surface: &[],
-                groups: &groups,
-                pinned: false,
-                platform: &platform,
-                dry_run: false,
-            },
-            false,
-            None,
-        )
-        .await
-        .expect("an unnameable entry is not an error");
+        let report = render_names(&tree, &["cmake"]).await;
 
         assert!(
-            report.items.is_empty(),
+            report
+                .items
+                .iter()
+                .all(|item| item.artifact == trampoline("cmake")
+                    || matches!(item.artifact, RenderedArtifact::Link { .. })),
             "the entry cannot become a `RenderedArtifact`, so it is not reported: {report:?}"
         );
         assert!(
             std::fs::symlink_metadata(&hostile).is_ok(),
-            "…and it survives as an untouched foreign file"
+            "…and it survives untouched"
+        );
+        assert_eq!(
+            tree.bin_entries(),
+            expected_bin_entries(&["cmake"]),
+            "…outside the next directory"
         );
     }
 
@@ -3596,7 +3497,7 @@ mod tests {
         names.sort();
         assert_eq!(
             names,
-            vec!["consent.json".to_string(), "render_stamp.json".to_string()],
+            vec!["consent.json".to_string(), "render_stamp.v2.json".to_string()],
             "the render adds exactly one file to that directory"
         );
     }
@@ -3648,66 +3549,39 @@ mod tests {
         );
     }
 
-    /// V-30 / RUL-33 — a symlink at `<home>/bin` is refused **at the create**,
-    /// never followed.
+    /// V-30 / RUL-33 — a symlink at `shells/` swapped in after step 2's guard is
+    /// refused **at the staging create**, never followed.
     ///
-    /// Step 2's `refuse_symlinked_home_leaves` judges `bin/` and then the
-    /// render **lock acquisition** runs, blocking for an unbounded time; a
-    /// project home inside a group-writable checkout can have `bin/` swapped in
-    /// that window. This test plants the link where such a swap leaves it — the
-    /// check has already passed — and asserts the publish does not follow it.
+    /// The render lock acquisition blocks for an unbounded time after the guard;
+    /// a project home inside a group-writable checkout can have `shells/` swapped
+    /// in that window. This plants the link where such a swap leaves it.
     ///
-    /// RED: `create_owner_only` in place of `create_bin_owner_only`. Its
-    /// `create_dir_all` stats with `metadata`, which follows the link, returns
-    /// `Ok`, and every trampoline lands in `outside/` — a directory that then
-    /// goes on the user's `PATH`.
+    /// RED: create the staging directory without re-judging `shells/` — every
+    /// launcher lands in `outside/`, a directory that then goes on `PATH`.
     #[cfg(unix)]
     #[tokio::test]
-    async fn a_symlinked_bin_directory_is_refused_at_the_create_never_followed() {
+    async fn a_symlinked_shells_directory_is_refused_at_the_staging_create_never_followed() {
         let tree = Tree::new();
-        tree.create_home_root();
+        std::fs::create_dir_all(tree.home.root()).unwrap();
         let outside = tree.tmp.path().join("outside");
         std::fs::create_dir_all(&outside).unwrap();
-        std::os::unix::fs::symlink(&outside, tree.home.shell_bin(DEFAULT_SHELL)).unwrap();
+        std::os::unix::fs::symlink(&outside, shells_root(&tree.home)).unwrap();
 
         let surface = vec![node(pinned("ns/cmake", 'a'), Some(&["cmake"]), &[])];
-        let scope = tree.scope();
-        let lock = lock_of(Vec::new());
-        let groups = groups_of(&[DEFAULT_GROUP]);
-        let platform = platform();
-        let report = render_with(
-            &tree.file_structure,
-            RenderRequest {
-                unrendered: &[],
-                home: &tree.home,
-                scope: &scope,
-                lock: &lock,
-                surface: &surface,
-                groups: &groups,
-                pinned: false,
-                platform: &platform,
-                dry_run: false,
-            },
-            false,
-            None,
-        )
-        .await
-        .expect("RUL-33 degrades, never errors");
+        let report = render_body(&tree, &lock_of(Vec::new()), &surface, &groups_of(&[DEFAULT_GROUP]), &[]).await;
 
         assert!(
             std::fs::read_dir(&outside)
                 .expect("the planted target is readable")
                 .next()
                 .is_none(),
-            "nothing may be published through a symlinked `bin/` — the link's target must stay empty"
+            "nothing may be staged through a symlinked `shells/` — the link's target must stay empty"
         );
         assert!(
-            report
-                .items
-                .iter()
-                .any(|item| matches!(item.outcome, RenderOutcome::Skipped { .. })),
-            "C-050 — the refusal is reported as a skip, one warn line each"
+            is_skipped(outcome_of(&report, &trampoline("cmake"))),
+            "C-050 — the refusal is reported as a skip, one warn line each: {report:?}"
         );
+        assert!(!report.stamp_written, "…and nothing that did not land is stamped");
     }
 
     /// C-053, case 24 — setting and then unsetting `toolchain_dir` leaves the
@@ -3778,7 +3652,7 @@ mod tests {
             "C-053 — a tree at a location ocx no longer resolves to is left in place, never deleted"
         );
         assert_eq!(
-            read_dir_names(&relocated.shell_bin(DEFAULT_SHELL)),
+            read_dir_names(&shell_directory_of(&relocated).expect("published").join("bin")),
             expected_bin_entries(&["cmake"]),
             "…and the new home is complete"
         );
@@ -3804,47 +3678,45 @@ mod tests {
         );
     }
 
-    /// C-053/S-4/RUL-33, case 25(b) — a `bin/` committed as a symlink is
-    /// refused too: every `bin/<name>` write and removal would otherwise land
-    /// in the link's target directory.
+    /// C-053/S-4/RUL-33, case 25(b) — a `shells/` committed as a symlink is
+    /// refused too: every staging and render directory would otherwise land in
+    /// the link's target.
     #[cfg(unix)]
     #[test]
-    fn ensure_home_root_refuses_a_symlinked_bin_directory() {
+    fn ensure_home_root_refuses_a_symlinked_shells_directory() {
         let tree = Tree::new();
         let outside = tree.tmp.path().join("outside");
         std::fs::create_dir_all(&outside).unwrap();
-        std::fs::create_dir_all(tree.shell_directory()).unwrap();
-        std::os::unix::fs::symlink(&outside, tree.home.shell_bin(DEFAULT_SHELL)).unwrap();
+        std::fs::create_dir_all(tree.home.root()).unwrap();
+        std::os::unix::fs::symlink(&outside, shells_root(&tree.home)).unwrap();
 
         assert!(
             ensure_home_root(&tree.home).is_err(),
-            "RUL-33 — a symlinked `bin/` is the same hole one level down"
+            "RUL-33 — a symlinked `shells/` is the same hole one level down"
         );
     }
 
-    /// C-053/S-4, case 25(b) delete side — `prune_within` refuses a
-    /// `bin/<name>` that resolves outside the home through a symlinked `bin/`.
+    /// C-131 — `prune_within` never removes a trampoline: a published launcher
+    /// directory is never edited, even when the file resolves inside the home.
     ///
-    /// RED: replace the canonicalising containment check with `starts_with` —
-    /// the spelled path is still under the home, so the delete escapes.
-    #[cfg(unix)]
+    /// RED: restore the trampoline `remove_file` arm — the launcher is gone.
     #[test]
-    fn prune_within_refuses_a_trampoline_reached_through_a_symlinked_bin() {
+    fn prune_within_never_removes_a_trampoline() {
         let tree = Tree::new();
-        let outside = tree.tmp.path().join("outside");
-        std::fs::create_dir_all(&outside).unwrap();
-        std::fs::write(outside.join("cmake"), b"not ours\n").unwrap();
-        std::fs::create_dir_all(tree.shell_directory()).unwrap();
-        std::os::unix::fs::symlink(&outside, tree.home.shell_bin(DEFAULT_SHELL)).unwrap();
+        let bin = tree.home.render_dir("default-0123456789abcdef").join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("cmake"), b"launcher\n").unwrap();
+        ocx_util::fs::symlink::create(
+            tree.home.expected_active_target("default-0123456789abcdef"),
+            tree.home.active(),
+        )
+        .unwrap();
 
         assert!(
             prune_within(&tree.home, &trampoline("cmake")).is_err(),
-            "C-053 — the delete path canonicalises both sides before comparing"
+            "C-131 — the render deletes nothing in a published directory"
         );
-        assert!(
-            outside.join("cmake").exists(),
-            "…and the file outside the home survives"
-        );
+        assert!(bin.join("cmake").exists(), "…and the launcher survives");
     }
 
     /// C-053/S-4, case 25(c) — a `<group>/` that is a symlink out of the home
@@ -3870,18 +3742,21 @@ mod tests {
     /// C-044/C-053 — the positive half of the containment guard: an artifact
     /// that really is inside the home **is** removed.
     ///
-    /// Without this, the three refusals above would be satisfied by a
-    /// `prune_within` that refuses everything — the always-red shape that is
-    /// half a proof.
+    /// Without this, the refusals above would be satisfied by a `prune_within`
+    /// that refuses everything — the always-red shape that is half a proof.
     #[test]
     fn prune_within_removes_an_artifact_that_resolves_inside_the_home() {
         let tree = Tree::new();
-        std::fs::create_dir_all(tree.home.shell_bin(DEFAULT_SHELL)).unwrap();
-        let victim = tree.home.shell_bin(DEFAULT_SHELL).join("cmake");
-        std::fs::write(&victim, b"#!/bin/sh\n").unwrap();
+        let victim = tree.home.entry(DEFAULT_GROUP, "cmake").expect("an admitted pair");
+        std::fs::create_dir_all(victim.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(tree.tmp.path().join("package")).unwrap();
+        ocx_util::fs::symlink::create(tree.tmp.path().join("package"), &victim).unwrap();
 
-        prune_within(&tree.home, &trampoline("cmake")).expect("an entry inside the home is removable");
-        assert!(!victim.exists(), "C-044 — the prune half actually removes");
+        prune_within(&tree.home, &link(DEFAULT_GROUP, "cmake")).expect("an entry inside the home is removable");
+        assert!(
+            std::fs::symlink_metadata(&victim).is_err(),
+            "C-044 — the prune half actually removes"
+        );
     }
 
     /// RUL-32 — `prune_within` never removes a group directory recursively: a
@@ -3908,61 +3783,6 @@ mod tests {
     }
 
     // ── 3. Concurrency and the atomic-publish shapes ────────────────────────
-
-    /// C-048/C-061, case 27 — a trampoline rewrite is temp-file-plus-rename,
-    /// never a truncate in place.
-    ///
-    /// The **inode** is the discriminating assertion: a truncating write
-    /// leaves the bytes correct and the inode identical, and a reconciler
-    /// reading `bin/` concurrently would then observe a torn file. A running
-    /// trampoline keeping the old inode is the other half of the same
-    /// property.
-    ///
-    /// RED: make the write truncate in place.
-    #[cfg(unix)]
-    #[test]
-    fn write_trampoline_atomic_replaces_the_inode_rather_than_truncating_in_place() {
-        let tree = Tree::new();
-        std::fs::create_dir_all(tree.home.shell_bin(DEFAULT_SHELL)).unwrap();
-        let path = tree.home.shell_bin(DEFAULT_SHELL).join("cmake");
-        std::fs::write(&path, b"#!/bin/sh\nold\n").unwrap();
-        let before = inode_of(&path);
-
-        write_trampoline_atomic(&path, "#!/bin/sh\nnew\n").expect("the write succeeds");
-
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "#!/bin/sh\nnew\n");
-        assert_ne!(
-            inode_of(&path),
-            before,
-            "C-061 — the publish is a rename over the live file, so a running trampoline keeps \
-             the old inode and no reader ever sees a half-written one"
-        );
-    }
-
-    /// C-044, case 38 — a published trampoline is **owner-executable**.
-    ///
-    /// Asserted as `mode & 0o100 != 0`, never `== 0o755`: the exact mode
-    /// depends on the ambient umask, so an equality assertion would be a CI
-    /// flake rather than a check.
-    ///
-    /// RED: drop the mode set — the default `0o600` publishes a
-    /// non-executable trampoline onto someone's PATH.
-    #[cfg(unix)]
-    #[test]
-    fn write_trampoline_atomic_publishes_an_owner_executable_file() {
-        let tree = Tree::new();
-        std::fs::create_dir_all(tree.home.shell_bin(DEFAULT_SHELL)).unwrap();
-        let path = tree.home.shell_bin(DEFAULT_SHELL).join("cmake");
-
-        write_trampoline_atomic(&path, "#!/bin/sh\n").expect("the write succeeds");
-
-        assert_ne!(
-            mode_of(&path) & 0o100,
-            0,
-            "C-044 — the owner-execute bit is set, and it is set on the temp file before the \
-             rename so no window exists in which the entry is present and not executable"
-        );
-    }
 
     /// C-044, case 38 through the render — the same property must hold for
     /// what a whole render publishes, not only for the seam.
@@ -3996,20 +3816,23 @@ mod tests {
         .await
         .expect("the render succeeds");
 
-        assert_ne!(mode_of(&tree.home.shell_bin(DEFAULT_SHELL).join("cmake")) & 0o100, 0);
+        let launcher = tree.shell_directory().expect("published").join("bin").join("cmake");
+        assert_eq!(
+            mode_of(&launcher) & 0o777,
+            0o755,
+            "the launcher is executable, as `write_launcher` sets it"
+        );
     }
 
-    /// C-048, case 28 — the ADR's named negative control: a fault injected
-    /// **between the first entry write and the stamp write** leaves `bin/`
-    /// holding at least one entry, no new stamp, and any previous stamp
-    /// unmodified.
+    /// C-048, case 28 — a fault injected **after staging and before the publish**
+    /// leaves the staged directory unpublished, `active` as it was, and any
+    /// previous stamp unmodified: a crash before the commit point changes nothing
+    /// anyone reads.
     ///
-    /// The fault is a **parameter**, so the test needs no environment write.
-    ///
-    /// RED: write the stamp before the entry pass — the tree then reports as
-    /// finished while it is half-written.
+    /// RED: switch `active` or write the stamp before the publish — the tree then
+    /// reports as finished while it is not.
     #[tokio::test]
-    async fn a_fault_between_the_first_entry_and_the_stamp_leaves_a_detectably_incomplete_tree() {
+    async fn a_fault_before_the_publish_leaves_active_and_the_stamp_as_they_were() {
         let tree = Tree::new();
         tree.create_home_root();
         let state_dir = tree.file_structure.state.project_state_dir(&tree.key());
@@ -4046,15 +3869,25 @@ mod tests {
             result.is_err(),
             "C-048 — the injected fault aborts the render: {result:?}"
         );
+        let staged: Vec<String> = read_dir_names(&shells_root(&tree.home))
+            .into_iter()
+            .filter(|name| name.starts_with(".staging-"))
+            .collect();
+        assert_eq!(staged.len(), 1, "…after the staging directory was written: {staged:?}");
+        assert_eq!(
+            read_dir_names(&shells_root(&tree.home).join(&staged[0]).join("bin")),
+            expected_bin_entries(&["one", "two"]),
+            "…complete, which is what makes the abort land between stage and publish"
+        );
+        assert!(published_directories(&tree.home).is_empty(), "nothing was published");
         assert!(
-            !tree.bin_entries().is_empty(),
-            "…after at least one entry landed, which is what makes the tree *partially* rendered"
+            tree.home.active().symlink_metadata().is_err(),
+            "…and `active` was not switched"
         );
         assert_eq!(
             std::fs::read(tree.stamp_file()).unwrap(),
             b"{\"previous\": true}\n",
-            "…and the previous stamp is untouched, so C-061's gate sees a mismatch rather than \
-             a tree that looks finished"
+            "…and the previous stamp is untouched"
         );
     }
 
@@ -4381,81 +4214,6 @@ mod tests {
 
     // ── 4. Platform divergence ──────────────────────────────────────────────
 
-    /// RUL-35/C-031, case 32 — the Windows publish hardlinks `<name>.exe` from
-    /// the `ShimBinStore` blob: byte-equal **and sharing the blob's file
-    /// identity**, which a copy would not.
-    ///
-    /// Not `#[cfg(windows)]`: both writes are cross-platform primitives, and
-    /// gating the seam would put its one testable property behind a `cfg` the
-    /// CI leg that actually runs never compiles.
-    ///
-    /// RED: copy the blob instead of hardlinking — the bytes still match, only
-    /// the identity assertion reds.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn the_windows_publish_hardlinks_the_exe_from_the_shim_blob() {
-        let tree = Tree::new();
-        std::fs::create_dir_all(tree.home.shell_bin(DEFAULT_SHELL)).unwrap();
-        let exe = tree.home.shell_bin(DEFAULT_SHELL).join("cmake.exe");
-        let sidecar = tree.home.shell_bin(DEFAULT_SHELL).join("cmake.exec");
-
-        let blob = tree
-            .file_structure
-            .shim_bin
-            .ensure()
-            .await
-            .expect("the committed shim blob publishes");
-        publish_windows_trampoline(&tree.file_structure.shim_bin, &exe, &sidecar, "C:\\proj\n")
-            .await
-            .expect("the Windows publish succeeds");
-
-        assert_eq!(
-            std::fs::read(&exe).unwrap(),
-            std::fs::read(&blob).unwrap(),
-            "C-031 — the `.exe` is byte-identical to the published blob"
-        );
-        assert_eq!(
-            inode_of(&exe),
-            inode_of(&blob),
-            "RUL-35 — …by construction, through a hardlink, so the Authenticode verbatim-copy \
-             property survives; a copy would satisfy the bytes and fail here"
-        );
-        assert_eq!(std::fs::read_to_string(&sidecar).unwrap(), "C:\\proj\n");
-    }
-
-    /// RUL-35, case 32's ordering postcondition — the **sidecar lands first**.
-    ///
-    /// The only recoverable partial state this function may leave is
-    /// `.exec`-present / `.exe`-absent. The inverse is directly harmful:
-    /// `which cmake` resolves `cmake.exe`, the shim runs, finds no selector
-    /// sidecar and fails at invocation — worse than the PATH lookup it
-    /// replaced. Driven by making the hardlink fail while the sidecar write
-    /// can still succeed.
-    ///
-    /// RED: swap the two writes, following the `prepare_lazy` precedent whose
-    /// premise (a staged tree nobody's PATH contains) does not hold for `bin/`.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn the_windows_publish_writes_the_sidecar_before_the_exe() {
-        let tree = Tree::new();
-        std::fs::create_dir_all(tree.home.shell_bin(DEFAULT_SHELL)).unwrap();
-        let sidecar = tree.home.shell_bin(DEFAULT_SHELL).join("cmake.exec");
-        // A directory at the `.exe` path makes the hardlink fail while the
-        // sidecar write beside it still succeeds — the one input that tells
-        // the two orderings apart.
-        let exe = tree.home.shell_bin(DEFAULT_SHELL).join("cmake.exe");
-        std::fs::create_dir_all(&exe).unwrap();
-
-        let result = publish_windows_trampoline(&tree.file_structure.shim_bin, &exe, &sidecar, "C:\\proj\n").await;
-
-        assert!(result.is_err(), "the blocked `.exe` publish fails: {result:?}");
-        assert!(
-            sidecar.is_file(),
-            "RUL-35 — the sidecar was already written when the `.exe` failed; the reverse order \
-             would leave an `.exe` on PATH with no selector"
-        );
-    }
-
     /// RUL-26, case 33 — the stamp keys on the **on-disk file set**: after a
     /// render, `readdir(bin/)` and `bin_fingerprint` have the same length.
     ///
@@ -4510,10 +4268,9 @@ mod tests {
     /// a non-absolute project root constructs fine here, and the refusal fires
     /// downstream at the writer.
     ///
-    /// RED: move the refusal into `trampoline_target` — the `.exec`-collision
-    /// regression in `body.rs` (`Project("global")` emitting a sidecar
-    /// byte-identical to the global home's) then loses its anchor, because the
-    /// input that produces it can no longer be constructed.
+    /// RED: move the refusal into `trampoline_target` — `body.rs`'s relative-root
+    /// refusal then loses its anchor, because the input that produces it can no
+    /// longer be constructed.
     #[test]
     fn trampoline_target_maps_the_tier_and_validates_nothing() {
         assert!(
@@ -4526,8 +4283,8 @@ mod tests {
                 trampoline_target(&RenderStampScope::Project(relative.clone())),
                 TrampolineTarget::Project(root) if root == relative
             ),
-            "RUL-20 — a non-absolute root constructs; `unix_trampoline_body` and the `.exec` \
-             writer are where D-V21's refusal fires"
+            "RUL-20 — a non-absolute root constructs; `toolchain_record` is where D-V21's \
+             refusal fires"
         );
     }
 
@@ -4581,18 +4338,18 @@ mod tests {
             .expect("both render");
         }
 
-        let first = std::fs::read_to_string(tree.home.shell_bin(DEFAULT_SHELL).join("cmake")).unwrap();
-        let second = std::fs::read_to_string(other_home.shell_bin(DEFAULT_SHELL).join("cmake")).unwrap();
+        let first = std::fs::read_to_string(record_path(&tree.home, "cmake")).unwrap();
+        let second = std::fs::read_to_string(record_path(&other_home, "cmake")).unwrap();
         assert_ne!(
             first, second,
             "C-028 — the baked selector names the project, so two projects bake two bodies"
         );
         assert_eq!(
             first,
-            expected_unix_trampoline_body(&tree.project_dir, &tree.ocx_binary),
+            expected_record(&tree.project_dir, &tree.ocx_binary),
             "…and each body is exactly the shipped grammar, not merely different"
         );
-        assert_eq!(second, expected_unix_trampoline_body(&other_project, &tree.ocx_binary));
+        assert_eq!(second, expected_record(&other_project, &tree.ocx_binary));
     }
 
     /// C-046 and validation item 33, case 42(a) — flipping `pinned` leaves
@@ -4655,8 +4412,8 @@ mod tests {
         .expect("the pinned render succeeds");
 
         assert_eq!(
-            std::fs::read_to_string(tree.home.shell_bin(DEFAULT_SHELL).join("cmake")).unwrap(),
-            expected_unix_trampoline_body(&tree.project_dir, &tree.ocx_binary),
+            std::fs::read_to_string(record_path(&tree.home, "cmake")).unwrap(),
+            expected_record(&tree.project_dir, &tree.ocx_binary),
             "C-046 — no digest and no `pinned` value is ever baked, so the body is unchanged"
         );
         assert!(
@@ -4826,8 +4583,8 @@ mod tests {
         }
 
         assert_eq!(
-            std::fs::read_to_string(tree.home.shell_bin(DEFAULT_SHELL).join("cmake")).unwrap(),
-            std::fs::read_to_string(relocated.shell_bin(DEFAULT_SHELL).join("cmake")).unwrap(),
+            std::fs::read_to_string(record_path(&tree.home, "cmake")).unwrap(),
+            std::fs::read_to_string(record_path(&relocated, "cmake")).unwrap(),
             "C-053 — a `toolchain_dir` change is not a body-rewriting input"
         );
     }
@@ -4872,10 +4629,10 @@ mod tests {
         .await
         .expect("the render succeeds");
 
-        let body = std::fs::read_to_string(tree.home.shell_bin(DEFAULT_SHELL).join("cmake")).unwrap();
+        let body = std::fs::read_to_string(record_path(&tree.home, "cmake")).unwrap();
         assert_eq!(
             body,
-            expected_unix_trampoline_body(&tree.project_dir, &tree.ocx_binary),
+            expected_record(&tree.project_dir, &tree.ocx_binary),
             "the golden pins all of: the project root, the store root, the baked ocx, the \
              trampoline marker and the platform"
         );
@@ -4926,10 +4683,10 @@ mod tests {
         .await
         .expect("C-028 — a dangling install tree is not a render failure");
 
-        let body = std::fs::read_to_string(tree.home.shell_bin(DEFAULT_SHELL).join("cmake")).unwrap();
+        let body = std::fs::read_to_string(record_path(&tree.home, "cmake")).unwrap();
         assert_ne!(
             body,
-            expected_unix_trampoline_body(&tree.project_dir, &tree.ocx_binary),
+            expected_record(&tree.project_dir, &tree.ocx_binary),
             "rung 1 declined, so the body must not bake the path that no longer resolves"
         );
     }
@@ -5097,7 +4854,7 @@ mod tests {
         )
         .await
         .expect("the first render succeeds");
-        let inode_before = inode_of(&tree.home.shell_bin(DEFAULT_SHELL).join("cmake"));
+        let inode_before = inode_of(&tree.shell_directory().expect("published").join("bin").join("cmake"));
         let subtree_before = snapshot_subtree(tree.home.root());
 
         let second = render_with(
@@ -5128,7 +4885,7 @@ mod tests {
             "C-047 — an already-correct entry is `Unchanged`, never rewritten: {second:?}"
         );
         assert_eq!(
-            inode_of(&tree.home.shell_bin(DEFAULT_SHELL).join("cmake")),
+            inode_of(&tree.shell_directory().expect("published").join("bin").join("cmake")),
             inode_before,
             "…and the file was left exactly as it is, which bytes alone cannot show"
         );
@@ -5252,9 +5009,8 @@ mod tests {
     async fn a_failed_stamp_write_reports_stamp_written_false_and_still_returns_ok() {
         let tree = Tree::new();
         tree.create_home_root();
-        std::fs::create_dir_all(tree.home.shell_bin(DEFAULT_SHELL)).unwrap();
         std::fs::create_dir_all(tree.file_structure.state.root()).unwrap();
-        deny_writes(&tree.home.shell_bin(DEFAULT_SHELL));
+        deny_writes(&shells_root(&tree.home));
         deny_writes(tree.file_structure.state.root());
 
         let surface = vec![node(pinned("ns/cmake", 'a'), Some(&["cmake", "ctest"]), &[])];
@@ -5279,7 +5035,7 @@ mod tests {
             None,
         )
         .await;
-        allow_writes(&tree.home.shell_bin(DEFAULT_SHELL));
+        allow_writes(&shells_root(&tree.home));
         allow_writes(tree.file_structure.state.root());
 
         let report = result.expect("C-050 — a read-only checkout composes digest paths and exits 0");
@@ -5290,33 +5046,25 @@ mod tests {
         assert!(!report.stamp_written, "…and the failed stamp write is a skip too");
     }
 
-    /// C-050/RUL-39 — the commoner half of case 46: a read-only `bin/` beside a
-    /// **writable** state store. Every item is `Skipped` and the stamp **is**
-    /// written, recording only what landed — which here is nothing.
+    /// C-050/RUL-39 — the commoner half of case 46: a read-only `shells/` beside a
+    /// **writable** state store. Every trampoline is `Skipped`, nothing is
+    /// published, and the previous stamp stays as it is, still naming the
+    /// directory `active` names.
     ///
-    /// That is the correct outcome, not a defect: C-061 then compares an empty
-    /// stamp against a `bin/` still holding the stale trampolines, mismatches,
-    /// and withholds the PATH entry. `stamp_written == true` beside an empty
-    /// fingerprint is a different state from `stamp_written == false`, and both
-    /// are reachable — which is why they need two tests.
-    ///
-    /// RED: gate the stamp write on "nothing was skipped", or build the
-    /// fingerprint from the intended name set — the stamp would then claim a
-    /// `bin/` that was never written, and C-061 would match on a stale tree.
+    /// RED: stamp the intended set — the stamp would then claim a directory that
+    /// was never published.
     #[cfg(unix)]
     #[tokio::test]
-    async fn a_read_only_bin_with_a_writable_state_store_still_stamps_what_landed() {
+    async fn a_read_only_shells_directory_skips_every_trampoline_and_keeps_the_previous_stamp() {
         let tree = Tree::new();
-        tree.create_home_root();
-        std::fs::create_dir_all(tree.home.shell_bin(DEFAULT_SHELL)).unwrap();
-        // What a previous render left, and what this one can neither rewrite
-        // nor prune.
-        std::fs::write(tree.home.shell_bin(DEFAULT_SHELL).join("cmake"), b"#!/bin/sh\nstale\n").unwrap();
-        deny_writes(&tree.home.shell_bin(DEFAULT_SHELL));
+        published_bin(&tree, &["cmake"]).await;
+        let kept = tree.home.active_target_name().expect("published");
+        let stamp_before = std::fs::read(tree.stamp_file()).unwrap();
+        deny_writes(&shells_root(&tree.home));
 
-        let surface = vec![node(pinned("ns/cmake", 'a'), Some(&["cmake"]), &[])];
-        let scope = tree.scope();
+        let surface = vec![node(pinned("ns/cmake", 'a'), Some(&["cmake", "ctest"]), &[])];
         let lock = lock_of(Vec::new());
+        let scope = tree.scope();
         let groups = groups_of(&[DEFAULT_GROUP]);
         let platform = platform();
         let result = render_with(
@@ -5336,230 +5084,54 @@ mod tests {
             None,
         )
         .await;
-        allow_writes(&tree.home.shell_bin(DEFAULT_SHELL));
+        allow_writes(&shells_root(&tree.home));
 
-        let report = result.expect("C-050 — an unwritable `bin/` is a skip, never an error");
+        let report = result.expect("C-050 — an unwritable `shells/` is a skip, never an error");
+        let trampolines: Vec<&RenderedItem> = report
+            .items
+            .iter()
+            .filter(|item| matches!(item.artifact, RenderedArtifact::Trampoline(_)))
+            .collect();
         assert!(
-            !report.items.is_empty() && report.items.iter().all(|item| is_skipped(&item.outcome)),
-            "every entry is skipped with its own reason: {report:?}"
+            !trampolines.is_empty() && trampolines.iter().all(|item| is_skipped(&item.outcome)),
+            "every trampoline is skipped with its reason: {report:?}"
         );
-        assert!(
-            report.stamp_written,
-            "RUL-39 — the state store was writable, so the stamp is written"
-        );
-        let stamp = tree.stamp().expect("the stamp exists");
-        assert!(
-            stamp.names.is_empty(),
-            "RUL-22 — …recording only what landed, which here is nothing: {stamp:?}"
-        );
+        assert!(!report.stamp_written, "RUL-22 — nothing landed, so nothing is stamped");
         assert_eq!(
-            std::fs::read(tree.home.shell_bin(DEFAULT_SHELL).join("cmake")).unwrap(),
-            b"#!/bin/sh\nstale\n",
-            "…while `bin/` still holds the stale trampoline C-061's gate will mismatch on"
+            std::fs::read(tree.stamp_file()).unwrap(),
+            stamp_before,
+            "…the previous stamp stays"
         );
+        assert_eq!(tree.home.active_target_name(), Some(kept), "…and so does `active`");
     }
 
-    /// RUL-22/27, case 47 and case 48 — one entry unwritable, the others
-    /// succeed: that entry is `Skipped` naming its path, the rest are
-    /// `Written`, a stamp **is** written, and `bin_fingerprint` carries only
-    /// what actually landed.
+    /// C-044, case 49 — a launcher replaced by a **symlink** to a file outside the
+    /// tree is never written through: the next render publishes a new directory
+    /// whose entry is a regular file, and the link's target is byte-identical.
     ///
-    /// RED: build the stamp from the intended name set. C-061's `readdir` gate
-    /// then mismatches on every prompt forever — the exact failure C-003 cites
-    /// when it refuses to widen `link_fingerprint`. Second RED:
-    /// `remove_dir_all` the blocking directory, turning a hostile clone's
-    /// committed directory into a delete primitive.
-    #[tokio::test]
-    async fn a_partially_skipped_render_stamps_only_what_landed() {
-        let tree = Tree::new();
-        tree.create_home_root();
-        std::fs::create_dir_all(tree.home.shell_bin(DEFAULT_SHELL)).unwrap();
-        // A directory where a trampoline must go: the write cannot succeed and
-        // RUL-32 forbids removing it recursively.
-        std::fs::create_dir_all(tree.home.shell_bin(DEFAULT_SHELL).join(&trampoline_files("blocked")[0])).unwrap();
-        std::fs::write(
-            tree.home
-                .shell_bin(DEFAULT_SHELL)
-                .join(&trampoline_files("blocked")[0])
-                .join("payload"),
-            b"keep me\n",
-        )
-        .unwrap();
-
-        let surface = vec![node(pinned("ns/tools", 'a'), Some(&["blocked", "fine"]), &[])];
-        let scope = tree.scope();
-        let lock = lock_of(Vec::new());
-        let groups = groups_of(&[DEFAULT_GROUP]);
-        let platform = platform();
-        let report = render_with(
-            &tree.file_structure,
-            RenderRequest {
-                unrendered: &[],
-                home: &tree.home,
-                scope: &scope,
-                lock: &lock,
-                surface: &surface,
-                groups: &groups,
-                pinned: false,
-                platform: &platform,
-                dry_run: false,
-            },
-            false,
-            None,
-        )
-        .await
-        .expect("C-050 — one blocked entry does not fail the render");
-
-        let blocked = outcome_of(&report, &trampoline(&trampoline_files("blocked")[0]));
-        match blocked {
-            RenderOutcome::Skipped { path, reason } => {
-                assert!(
-                    path.ends_with(&trampoline_files("blocked")[0]),
-                    "RUL-32 — the skip names the path it could not write: {path:?}"
-                );
-                assert!(!reason.is_empty(), "…and carries a reason for the warn line");
-            }
-            other => panic!("the blocked entry must be skipped, not {other:?}"),
-        }
-        assert_eq!(
-            outcome_of(&report, &trampoline(&trampoline_files("fine")[0])),
-            &RenderOutcome::Written,
-            "…and the render continued to the entries after it"
-        );
-        assert!(report.stamp_written, "RUL-22 — a partially-skipped render still stamps");
-        let stamp = tree.stamp().expect("the stamp exists");
-        assert_eq!(
-            stamp.names.iter().cloned().collect::<Vec<_>>(),
-            trampoline_files("fine"),
-            "RUL-22 — …and records only what landed, never the intended set: {stamp:?}"
-        );
-        assert!(
-            tree.home
-                .shell_bin(DEFAULT_SHELL)
-                .join(&trampoline_files("blocked")[0])
-                .join("payload")
-                .exists(),
-            "RUL-32 — the blocking directory was never removed recursively"
-        );
-    }
-
-    /// C-044, case 49 — a `bin/<name>` committed as a **symlink** to a file
-    /// outside the tree is *replaced* by the rename; the link's target is
-    /// byte-identical afterwards and `bin/<name>` is a regular file.
-    ///
-    /// RED: implement the write as `fs::write` + `set_permissions` — the write
-    /// then follows the link and overwrites `~/.bashrc`.
+    /// RED: trust a directory whose entry is a link — the link stays on PATH.
     #[cfg(unix)]
     #[tokio::test]
-    async fn a_committed_symlink_in_bin_is_replaced_and_its_target_is_not_written_through() {
+    async fn a_symlink_in_a_published_directory_is_never_written_through_or_trusted() {
         let tree = Tree::new();
-        tree.create_home_root();
-        std::fs::create_dir_all(tree.home.shell_bin(DEFAULT_SHELL)).unwrap();
+        let old_bin = published_bin(&tree, &["cmake"]).await;
         let victim = tree.tmp.path().join("bashrc");
         std::fs::write(&victim, b"# the user's shell profile\n").unwrap();
-        std::os::unix::fs::symlink(&victim, tree.home.shell_bin(DEFAULT_SHELL).join("cmake")).unwrap();
+        std::fs::remove_file(old_bin.join("cmake")).unwrap();
+        std::os::unix::fs::symlink(&victim, old_bin.join("cmake")).unwrap();
 
-        let surface = vec![node(pinned("ns/cmake", 'a'), Some(&["cmake"]), &[])];
-        let scope = tree.scope();
-        let lock = lock_of(Vec::new());
-        let groups = groups_of(&[DEFAULT_GROUP]);
-        let platform = platform();
-        render_with(
-            &tree.file_structure,
-            RenderRequest {
-                unrendered: &[],
-                home: &tree.home,
-                scope: &scope,
-                lock: &lock,
-                surface: &surface,
-                groups: &groups,
-                pinned: false,
-                platform: &platform,
-                dry_run: false,
-            },
-            false,
-            None,
-        )
-        .await
-        .expect("the render succeeds");
+        render_names(&tree, &["cmake"]).await;
 
         assert_eq!(
             std::fs::read(&victim).unwrap(),
             b"# the user's shell profile\n",
             "C-044 — nothing is ever written *through* a committed link"
         );
-        let metadata = std::fs::symlink_metadata(tree.home.shell_bin(DEFAULT_SHELL).join("cmake")).unwrap();
+        let entry = tree.shell_directory().expect("published").join("bin").join("cmake");
+        let metadata = std::fs::symlink_metadata(&entry).unwrap();
         assert!(
             metadata.is_file() && !metadata.is_symlink(),
-            "…and the entry is a regular file afterwards"
-        );
-    }
-
-    /// S-3, case 50 — the idempotence compare never opens a planted **FIFO**.
-    ///
-    /// This is the one hazard in this module with no recovery path: `open` on
-    /// a FIFO with no writer blocks indefinitely, so C-050 cannot catch it —
-    /// C-050 turns a *returned* failure into a skip, and this call would never
-    /// return. `Ok(None)` is "nothing comparable is there, take the write
-    /// branch".
-    ///
-    /// RED: swap in an unbounded `std::fs::read` and watch the test hang
-    /// rather than fail.
-    #[cfg(unix)]
-    #[test]
-    fn reading_an_existing_entry_never_opens_a_planted_fifo() {
-        let tree = Tree::new();
-        std::fs::create_dir_all(tree.home.shell_bin(DEFAULT_SHELL)).unwrap();
-        let fifo = tree.home.shell_bin(DEFAULT_SHELL).join("cmake");
-        mkfifo(&fifo);
-
-        assert_eq!(
-            read_existing_trampoline(&fifo, 64).expect("a FIFO is not an error, it is not comparable"),
-            None,
-            "S-3 — the type gate is `symlink_metadata`, so nothing is opened"
-        );
-    }
-
-    /// C-047/S-3 — `read_existing_trampoline`'s other two refusals and its one
-    /// acceptance, so the FIFO case above is not the only reachable branch.
-    ///
-    /// A symlink whose target happens to match would otherwise short-circuit
-    /// to `Unchanged` and survive every render, leaving `bin/<name>`
-    /// permanently a link rather than a trampoline; an over-cap regular file
-    /// differs from a body of exactly `cap` bytes by definition (CWE-400).
-    #[cfg(unix)]
-    #[test]
-    fn reading_an_existing_entry_refuses_a_symlink_and_an_over_cap_file() {
-        let tree = Tree::new();
-        std::fs::create_dir_all(tree.home.shell_bin(DEFAULT_SHELL)).unwrap();
-        let target = tree.tmp.path().join("elsewhere");
-        std::fs::write(&target, b"body").unwrap();
-        let linked = tree.home.shell_bin(DEFAULT_SHELL).join("linked");
-        std::os::unix::fs::symlink(&target, &linked).unwrap();
-        let oversized = tree.home.shell_bin(DEFAULT_SHELL).join("oversized");
-        std::fs::write(&oversized, vec![b'x'; 4096]).unwrap();
-        let ordinary = tree.home.shell_bin(DEFAULT_SHELL).join("ordinary");
-        std::fs::write(&ordinary, b"body").unwrap();
-
-        assert_eq!(
-            read_existing_trampoline(&linked, 4).expect("a symlink is not an error"),
-            None,
-            "a link is never read as if it were a trampoline"
-        );
-        assert_eq!(
-            read_existing_trampoline(&oversized, 4).expect("an over-cap file is not an error"),
-            None,
-            "over-cap is the write branch, never an error"
-        );
-        assert_eq!(
-            read_existing_trampoline(&ordinary, 4).expect("an ordinary file reads"),
-            Some(b"body".to_vec()),
-            "…and the acceptance branch is reachable, or the three refusals above prove nothing"
-        );
-        assert_eq!(
-            read_existing_trampoline(&tree.home.shell_bin(DEFAULT_SHELL).join("absent"), 4)
-                .expect("absence is not an error"),
-            None
+            "…and the entry `active` now names is a regular file"
         );
     }
 
@@ -6287,8 +5859,9 @@ mod tests {
         .await
         .expect("the seeding render succeeds");
         // Something for the dry run to *want* to change, so the snapshot is
-        // not comparing two empty trees.
-        std::fs::write(tree.home.shell_bin(DEFAULT_SHELL).join("stale"), b"#!/bin/sh\n").unwrap();
+        // not comparing two empty trees: a tampered directory reads as stale.
+        let published = tree.shell_directory().expect("published").join("bin");
+        std::fs::write(published.join("stale"), b"#!/bin/sh\n").unwrap();
         let before = snapshot_subtree(tree.home.root());
 
         let report = tree
@@ -6313,8 +5886,8 @@ mod tests {
             "C-049 — nothing under the home changed identity, content or timestamp"
         );
         assert_eq!(
-            outcome_of(&report, &trampoline("stale")),
-            &RenderOutcome::Pruned,
+            outcome_of(&report, &trampoline("cmake")),
+            &RenderOutcome::Written,
             "…while the report still names the delta it *would* have applied"
         );
     }
@@ -6430,8 +6003,6 @@ mod tests {
     async fn a_dry_run_predicts_exactly_what_the_real_run_applies() {
         let tree = Tree::new();
         tree.create_home_root();
-        std::fs::create_dir_all(tree.home.shell_bin(DEFAULT_SHELL)).unwrap();
-        std::fs::write(tree.home.shell_bin(DEFAULT_SHELL).join("stale"), b"#!/bin/sh\n").unwrap();
 
         let tool = locked_tool("cmake", DEFAULT_GROUP, "ns/cmake", &[(PLATFORM_KEY, 'd')]);
         let surface = vec![node(pinned("ns/cmake", 'd'), Some(&["cmake"]), &[])];
@@ -6813,90 +6384,6 @@ mod tests {
         );
     }
 
-    /// B3/RUL-46, the `bin/` half — on a **case-insensitive** home the prune
-    /// comparison is ASCII-case-folded, so a pre-existing entry differing from
-    /// the winner only in case is **not** removed.
-    ///
-    /// The bug this pins is data loss, and it needs the write pass and the
-    /// prune pass read together. `expected` holds the winner's *original*
-    /// spelling (RUL-19), so with `Make` winning and `bin/make` already on
-    /// disk: on a case-insensitive filesystem the two names are one file, the
-    /// write pass finds the body already correct and leaves it `Unchanged`
-    /// under its on-disk name `make`, and a case-**sensitive** prune then sees
-    /// `make` ∉ {`Make`} and removes it. `fingerprint_bin` afterwards stats a
-    /// file that is gone, so the stamp records an empty name set that *matches*
-    /// the now-empty `bin/` — C-061's gate is satisfied while the tool has
-    /// silently vanished.
-    ///
-    /// On the case-**sensitive** filesystem this test runs on, `bin/make` and
-    /// `bin/Make` are two files, so the end state differs; what is pinned here
-    /// is the rule that prevents the loss — the folded entry survives the prune
-    /// and is not reported — plus its gate, in the second half.
-    ///
-    /// RED: use `expected.contains(&name)` in `reconcile_bin`'s prune loop.
-    #[tokio::test]
-    async fn a_differently_cased_bin_entry_survives_the_prune_on_a_case_insensitive_home() {
-        for case_insensitive in [true, false] {
-            let tree = Tree::new();
-            tree.create_home_root();
-            // The row's premise, read rather than presupposed: `bin/make` is
-            // the winner `Make`'s *twin* only where the two are separate files.
-            // On a case-insensitive volume they are one, the injected flag stops
-            // describing the disk it is asserted against, and neither arm's end
-            // state is the one written down above.
-            if !tree.holds_case_twins().await {
-                eprintln!(
-                    "skipped: the probe reported a case-insensitive home, so `make` and `Make` cannot \
-                     be two files here"
-                );
-                return;
-            }
-            std::fs::create_dir_all(tree.home.shell_bin(DEFAULT_SHELL)).unwrap();
-            let twin = tree.home.shell_bin(DEFAULT_SHELL).join("make");
-            std::fs::write(&twin, b"#!/bin/sh\n# already here\n").unwrap();
-
-            let surface = vec![node(pinned("ns/make", 'a'), Some(&["Make"]), &[])];
-            let scope = tree.scope();
-            let lock = lock_of(Vec::new());
-            let groups = groups_of(&[DEFAULT_GROUP]);
-            let platform = platform();
-            let report = render_with(
-                &tree.file_structure,
-                RenderRequest {
-                    unrendered: &[],
-                    home: &tree.home,
-                    scope: &scope,
-                    lock: &lock,
-                    surface: &surface,
-                    groups: &groups,
-                    pinned: false,
-                    platform: &platform,
-                    dry_run: false,
-                },
-                case_insensitive,
-                None,
-            )
-            .await
-            .expect("the render is not a refusal");
-
-            let pruned = report
-                .items
-                .iter()
-                .any(|item| item.artifact == trampoline("make") && item.outcome == RenderOutcome::Pruned);
-            assert_eq!(
-                twin.exists(),
-                case_insensitive,
-                "RUL-46 — `make` is the winner `Make` itself on a case-insensitive home and must \
-                 survive; on a case-sensitive one it is an ordinary orphan and must not \
-                 (case_insensitive = {case_insensitive})"
-            );
-            assert_eq!(
-                pruned, !case_insensitive,
-                "…and the report says the same thing (case_insensitive = {case_insensitive})"
-            );
-        }
-    }
-
     /// B3/RUL-46, the `<group>/<entry>` half — the identical shape in
     /// `reconcile_links`, with the same gate.
     ///
@@ -7050,122 +6537,32 @@ mod tests {
         );
     }
 
-    /// B5/C-003 — the Windows `Unchanged` predicate requires `<name>.exe` to
-    /// **be** the published `ShimBinStore` blob, not merely to be a regular
-    /// file beside a matching sidecar.
-    ///
-    /// The sidecar body is one line — the absolute project root plus `\n` — so
-    /// it is predictable on a CI runner. With the existence-only predicate, a
-    /// hostile clone shipping a substituted `bin/<name>.exe` beside a matching
-    /// `<name>.exec` was reported `Unchanged`, never republished, landed in
-    /// `landed`, was stamped by `fingerprint_bin` and then blessed by C-061's
-    /// gate — defeating the ADR's R1 mitigation, whose whole claim is that the
-    /// first `ocx pull` renders over it.
-    ///
-    /// Runs on every host: the predicate is deliberately not `#[cfg(windows)]`,
-    /// for the reason `publish_windows_trampoline` states — a `cfg`-gated seam
-    /// puts the property behind a `cfg` the CI leg that actually runs never
-    /// compiles.
-    ///
-    /// RED: return `symlink_metadata(exe).is_ok_and(|m| m.is_file())` for the
-    /// `Some(blob)` arm.
-    #[test]
-    fn the_windows_unchanged_predicate_requires_the_exe_to_be_the_published_blob() {
-        let tmp = tempfile::tempdir().unwrap();
-        let blob = tmp.path().join("0123abcd.exe");
-        std::fs::write(&blob, b"MZ\x00the published shim blob\n").unwrap();
-        let exe = tmp.path().join("cmake.exe");
-        let sidecar_path = tmp.path().join("cmake.exec");
-        let sidecar = "/home/someone/project\n";
-        std::fs::write(&sidecar_path, sidecar).unwrap();
-
-        // The positive control, first: a hardlink of the blob beside a matching
-        // sidecar is exactly what the render publishes, and republishing it on
-        // every invocation would break C-047's idempotence.
-        std::fs::hard_link(&blob, &exe).unwrap();
-        assert!(
-            windows_pair_unchanged(&exe, &sidecar_path, sidecar, Some(&blob)).unwrap(),
-            "the pair this render would publish is `Unchanged`"
-        );
-
-        // A substituted executable beside the same matching sidecar.
-        std::fs::remove_file(&exe).unwrap();
-        std::fs::write(&exe, b"MZ\x00attacker-authored\n").unwrap();
-        assert!(
-            !windows_pair_unchanged(&exe, &sidecar_path, sidecar, Some(&blob)).unwrap(),
-            "C-003 — a substituted `.exe` takes the write branch, whatever the sidecar says"
-        );
-
-        // A byte-identical *copy* is still not the blob: #301's property is one
-        // inode per store, so an `ocx` upgrade that re-signs the blob must
-        // reach every published name.
-        std::fs::copy(&blob, &exe).unwrap();
-        assert!(
-            !windows_pair_unchanged(&exe, &sidecar_path, sidecar, Some(&blob)).unwrap(),
-            "the predicate is file identity, not content equality"
-        );
-
-        // And the sidecar half still decides on its own.
-        std::fs::remove_file(&exe).unwrap();
-        std::fs::hard_link(&blob, &exe).unwrap();
-        std::fs::write(&sidecar_path, "/somewhere/else\n").unwrap();
-        assert!(
-            !windows_pair_unchanged(&exe, &sidecar_path, sidecar, Some(&blob)).unwrap(),
-            "a sidecar naming another project is not this render's pair"
-        );
-    }
-
-    /// W6/R-W19 — the POSIX `Unchanged` predicate decides on the mode as well
-    /// as the bytes: a clone committing `bin/<name>` with the exact expected
-    /// body at git mode `100644` is republished, not left non-executable
+    /// W6/R-W19 — a published launcher that lost its execute bit (a clone
+    /// committing it at git mode `100644`) makes its directory stale: the next
+    /// render publishes a new one rather than leaving the tool non-executable
     /// forever.
     ///
-    /// RED: drop `&& has_execute_bit(&path)` from the POSIX arm.
+    /// RED: drop the execute-bit check from `directory_matches`.
     #[cfg(unix)]
     #[tokio::test]
-    async fn a_committed_trampoline_body_without_its_execute_bit_is_republished() {
+    async fn a_published_launcher_without_its_execute_bit_makes_the_directory_stale() {
         use std::os::unix::fs::PermissionsExt as _;
 
         let tree = Tree::new();
-        tree.create_home_root();
-        std::fs::create_dir_all(tree.home.shell_bin(DEFAULT_SHELL)).unwrap();
-        let entry = tree.home.shell_bin(DEFAULT_SHELL).join("cmake");
-        let body = expected_unix_trampoline_body(&tree.project_dir, &tree.ocx_binary);
-        std::fs::write(&entry, body.as_bytes()).unwrap();
-        std::fs::set_permissions(&entry, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let old_bin = published_bin(&tree, &["cmake"]).await;
+        std::fs::set_permissions(old_bin.join("cmake"), std::fs::Permissions::from_mode(0o644)).unwrap();
 
-        let surface = vec![node(pinned("ns/cmake", 'a'), Some(&["cmake"]), &[])];
-        let scope = tree.scope();
-        let lock = lock_of(Vec::new());
-        let groups = groups_of(&[DEFAULT_GROUP]);
-        let platform = platform();
-        let report = render_with(
-            &tree.file_structure,
-            RenderRequest {
-                unrendered: &[],
-                home: &tree.home,
-                scope: &scope,
-                lock: &lock,
-                surface: &surface,
-                groups: &groups,
-                pinned: false,
-                platform: &platform,
-                dry_run: false,
-            },
-            false,
-            None,
-        )
-        .await
-        .expect("the render is not a refusal");
+        let report = render_names(&tree, &["cmake"]).await;
 
         assert_eq!(
             outcome_of(&report, &trampoline("cmake")),
             &RenderOutcome::Written,
             "R-W19 — matching bytes at a non-executable mode are not `Unchanged`"
         );
+        let launcher = tree.shell_directory().expect("published").join("bin").join("cmake");
         assert!(
-            mode_of(&entry) & 0o111 != 0,
-            "…and the republished entry carries an execute bit"
+            mode_of(&launcher) & 0o111 != 0,
+            "…and the new launcher carries an execute bit"
         );
     }
 
@@ -7179,7 +6576,7 @@ mod tests {
     /// a rename primitive over the whole subtree below it. This layout added
     /// three directories and nothing mode-checked them.
     ///
-    /// RED: restore `tokio::fs::create_dir_all` in `reconcile_bin` and
+    /// RED: create the staging directory with `tokio::fs::create_dir_all` or
     /// `std::fs::create_dir_all` in `publish_link_within` — under the ordinary
     /// `umask 002` both come out group-writable. RED for the three new rows:
     /// give `ensure_shell_tree` a plain `std::fs::create_dir_all`.
@@ -7198,8 +6595,8 @@ mod tests {
         let lock = lock_of(vec![tool]);
         let groups = groups_of(&[DEFAULT_GROUP]);
         let platform = platform();
-        // The **public** entry, so step 6 creates `shells/` and
-        // `shells/<shell>/` under the code that chooses their modes.
+        // The **public** entry, so step 6 creates `shells/` and the staging
+        // directory under the code that chooses their modes.
         tree.manager()
             .render_toolchain(RenderRequest {
                 unrendered: &[],
@@ -7215,17 +6612,15 @@ mod tests {
             .await
             .expect("the render is not a refusal");
 
+        let published = tree.shell_directory().expect("published");
         for directory in [
-            tree.home.shell_bin(DEFAULT_SHELL),
-            tree.shell_directory(),
+            published.join("bin"),
+            published,
             tree.home
                 .links_group(DEFAULT_GROUP)
                 .expect("the default group is admitted"),
             links_root(&tree.home),
-            shell_directory_of(&tree.home)
-                .parent()
-                .expect("the shell directory has a parent")
-                .to_path_buf(),
+            shells_root(&tree.home),
         ] {
             assert!(directory.is_dir(), "precondition: {directory:?} was created");
             assert_eq!(
@@ -7332,8 +6727,9 @@ mod tests {
     /// and never reported, so it warns on no render; Finder recreates it anyway.
     ///
     /// Two discriminating halves: a *link* named `Thumbs.db` is still pruned (a
-    /// valid tool name, so the name alone must not exempt it), and `bin/` still
-    /// prunes its `.DS_Store`, since that directory is on `PATH`.
+    /// valid tool name, so the name alone must not exempt it), and a `.DS_Store`
+    /// in a published `bin/` never reaches the next directory, since that
+    /// directory is on `PATH`.
     ///
     /// RED: drop the `is_os_metadata_file` filter in `read_dir_link_side_names`.
     /// Every planted file comes back `Skipped` with a warn-line reason.
@@ -7342,7 +6738,6 @@ mod tests {
         let tree = Tree::new();
         let default_group = links_root(&tree.home).join(DEFAULT_GROUP);
         std::fs::create_dir_all(&default_group).unwrap();
-        std::fs::create_dir_all(tree.home.shell_bin(DEFAULT_SHELL)).unwrap();
         let planted = [
             tree.home.root().join(".DS_Store"),
             links_root(&tree.home).join(".DS_Store"),
@@ -7353,8 +6748,6 @@ mod tests {
         for path in &planted {
             std::fs::write(path, b"os-owned\n").unwrap();
         }
-        let in_bin = tree.home.shell_bin(DEFAULT_SHELL).join(".DS_Store");
-        std::fs::write(&in_bin, b"os-owned\n").unwrap();
         #[cfg(unix)]
         std::os::unix::fs::symlink(tree.tmp.path(), default_group.join("Thumbs.db")).unwrap();
 
@@ -7380,13 +6773,20 @@ mod tests {
             .collect();
         assert!(reported.is_empty(), "no OS metadata file is reported: {reported:?}");
 
-        assert_eq!(outcome_of(&report, &trampoline(".DS_Store")), &RenderOutcome::Pruned);
-        assert!(std::fs::symlink_metadata(&in_bin).is_err(), "bin/ keeps pruning it");
         #[cfg(unix)]
         assert_eq!(
             outcome_of(&report, &link(DEFAULT_GROUP, "Thumbs.db")),
             &RenderOutcome::Pruned,
             "a link named like an OS file is still ocx's to prune"
+        );
+
+        let in_bin = tree.shell_directory().expect("published").join("bin").join(".DS_Store");
+        std::fs::write(&in_bin, b"os-owned\n").unwrap();
+        render_a_default_tool(&tree).await;
+        assert_eq!(
+            tree.bin_entries(),
+            expected_bin_entries(&["cmake"]),
+            "`bin/` never carries it over"
         );
     }
 
@@ -7677,12 +7077,13 @@ mod tests {
     /// path that is not there.
     #[test]
     fn artifact_path_and_prune_within_agree_on_every_variant() {
-        for artifact in [
-            trampoline("cmake"),
-            link("ci", "ninja"),
-            group_directory("ci"),
-            root_entry("legacy"),
-        ] {
+        let tree = Tree::new();
+        assert_eq!(
+            artifact_path(&tree.home, &trampoline("cmake")),
+            tree.home.bin().join("cmake"),
+            "a trampoline is reported through `active/bin` and never pruned"
+        );
+        for artifact in [link("ci", "ninja"), group_directory("ci"), root_entry("legacy")] {
             let tree = Tree::new();
             std::fs::create_dir_all(tree.home.root()).unwrap();
             let reported = artifact_path(&tree.home, &artifact);
@@ -7692,7 +7093,6 @@ mod tests {
                     std::fs::create_dir_all(tree.tmp.path().join("package")).unwrap();
                     ocx_util::fs::symlink::create(tree.tmp.path().join("package"), &reported).unwrap();
                 }
-                RenderedArtifact::Trampoline(_) => std::fs::write(&reported, b"#!/bin/sh\n").unwrap(),
                 _ => std::fs::create_dir_all(&reported).unwrap(),
             }
             assert!(reported.symlink_metadata().is_ok(), "precondition: {reported:?} exists");
@@ -7891,71 +7291,8 @@ mod tests {
         }
     }
 
-    /// C-074's second trap — **every** directory the tree owns is refused when
-    /// it is a symlink, not only the home root and the trampoline directory.
-    ///
-    /// This layout inserts `links/` and `shells/` between the home root and
-    /// every entry link, and no shipped guard judged them:
-    /// `publish_link_within` checks an entry's *immediate* parent —
-    /// `links/<group>`, never `links` — and `create_owner_only` is
-    /// `DirBuilder::recursive(true)`, i.e. `create_dir_all`, which follows an
-    /// existing symlink. A committed `.ocx/toolchain/links -> /outside` would
-    /// otherwise put every group directory and every entry link outside the
-    /// home on a plain `ocx pull`.
-    ///
-    /// RED: shrink `tree_own_directories` back to `[root, shell_bin]` — the
-    /// `links` and `shells` rows write into `outside/` and both assertions
-    /// fire.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn every_tree_own_directory_is_refused_when_it_is_a_symlink() {
-        for relative in ["links", "shells", "shells/default", "shells/default/bin"] {
-            let tree = Tree::new();
-            std::fs::create_dir_all(tree.home.root()).unwrap();
-            let outside = tree.tmp.path().join(format!("outside-{}", relative.replace('/', "-")));
-            std::fs::create_dir_all(&outside).unwrap();
-
-            let planted = tree.home.root().join(relative);
-            std::fs::create_dir_all(planted.parent().unwrap()).unwrap();
-            ocx_util::fs::symlink::create(&outside, &planted).unwrap();
-
-            let lock = lock_of(vec![locked_tool(
-                "cmake",
-                DEFAULT_GROUP,
-                "ns/cmake",
-                &[(PLATFORM_KEY, 'a')],
-            )]);
-            let groups = groups_of(&[DEFAULT_GROUP]);
-            let platform = platform();
-            let report = tree
-                .manager()
-                .render_toolchain(RenderRequest {
-                    unrendered: &[],
-                    home: &tree.home,
-                    scope: &tree.scope(),
-                    lock: &lock,
-                    surface: &[node(pinned("ns/cmake", 'a'), Some(&["cmake"]), &[])],
-                    groups: &groups,
-                    pinned: false,
-                    platform: &platform,
-                    dry_run: false,
-                })
-                .await
-                .expect("RUL-33 — a refused tree is a skip, never an error");
-
-            assert!(
-                report.items.is_empty() && !report.stamp_written,
-                "`{relative}` as a symlink refuses the whole render before anything is written: {report:?}"
-            );
-            assert_eq!(
-                read_dir_names(&outside),
-                Vec::<String>::new(),
-                "…and nothing was written through it into {outside:?}"
-            );
-        }
-    }
-
-    /// C-081, row 1 — an **absent** `active` is created, silently.
+    /// C-081, row 1 — an **absent** `active` is created, silently, at the
+    /// directory the render published.
     ///
     /// RED: delete the create arm — `active` stays absent and `bin()` resolves
     /// to nothing for every PATH route.
@@ -7969,9 +7306,11 @@ mod tests {
             "…and it is a link, not a directory: {:?}",
             read_dir_names(tree.home.root())
         );
+        let published = published_directories(&tree.home);
+        assert_eq!(published.len(), 1);
         assert!(
-            tree.home.active_is_valid(DEFAULT_SHELL),
-            "C-080 — at exactly its derived target"
+            tree.home.active_is_valid(&published[0]),
+            "C-080 — at exactly the derived target of the published directory"
         );
         assert_eq!(
             tree.bin_entries(),
@@ -7981,10 +7320,11 @@ mod tests {
     }
 
     /// C-081, corrupt-states row 21, the **heal** half — an `active` pointing
-    /// outside the home is repointed before anything is written.
+    /// outside the home is switched to the published directory, and nothing is
+    /// written through it.
     ///
-    /// RED: delete the `replace_atomic` arm from [`heal_active`] — the link
-    /// stays pointed at `outside/` and both assertions fire.
+    /// RED: delete the retarget arm from [`heal_active`] — the link stays
+    /// pointed at `outside/` and both assertions fire.
     #[cfg(unix)]
     #[tokio::test]
     async fn an_active_pointing_outside_the_home_is_repointed_by_the_render() {
@@ -7996,9 +7336,10 @@ mod tests {
 
         let report = render_a_default_tool(&tree).await;
 
+        let published = published_directories(&tree.home);
         assert!(
-            tree.home.active_is_valid(DEFAULT_SHELL),
-            "the hostile link is repointed at its derived target: {report:?}"
+            published.len() == 1 && tree.home.active_is_valid(&published[0]),
+            "the hostile link is switched to the published directory: {report:?}"
         );
         assert_eq!(
             read_dir_names(&outside),
@@ -8007,80 +7348,40 @@ mod tests {
         );
     }
 
-    /// C-080, corrupt-states row 21, the **anchor** half — the render writes,
-    /// prunes and stamps through the *physical* directory even while `active`
-    /// points outside the home.
+    /// C-080, corrupt-states row 21, the **anchor** half — the render stages,
+    /// publishes and stamps through the *physical* `shells/` even while `active`
+    /// points outside the home, swung after the fixture's steps 2–6 and before
+    /// the body, exactly where a concurrent repoint lands.
     ///
-    /// # Why this drives `render_with` and not the public entry
-    ///
-    /// Step 6 heals `active` before the body runs, so a hostile link planted
-    /// before `ocx pull` is gone by the time `reconcile_bin` writes — and a row
-    /// that plants it there therefore measures the heal and **cannot** observe
-    /// the anchors at all. That was this row's first form, and mutating
-    /// `reconcile_bin`, `fingerprint_bin` and `prune_within` back to `bin()`
-    /// each left it green.
-    ///
-    /// The state this row is about is the one the anchors exist for and the
-    /// heal cannot rule out: `active` is a symlink, and **any process that can
-    /// write the home can swing it at any instant** — the render lock is
-    /// ocx's own convention and stops no one (R12). So the link is swung after
-    /// the fixture's steps 2–6 and before the body, which is exactly where a
-    /// concurrent repoint lands.
-    ///
-    /// RED: revert `reconcile_bin`'s binding, `write_render_stamp`'s
-    /// `fingerprint_bin` argument, `artifact_path`'s trampoline arm or
-    /// `prune_within`'s trampoline parent to `home.bin()`.
+    /// RED: stage or fingerprint through `home.bin()` — the attacker's directory
+    /// is written into, or the stamp certifies it.
     #[cfg(unix)]
     #[tokio::test]
-    async fn a_render_writes_prunes_and_stamps_through_the_physical_directory() {
+    async fn a_render_stages_publishes_and_stamps_through_the_physical_directory() {
         let tree = Tree::new();
         tree.create_home_root();
-        // A committed orphan, so the prune pass has something to act on too.
-        std::fs::create_dir_all(tree.home.shell_bin(DEFAULT_SHELL)).unwrap();
-        std::fs::write(tree.home.shell_bin(DEFAULT_SHELL).join("orphan"), b"#!/bin/sh\n").unwrap();
-
         let outside = tree.tmp.path().join("outside");
         std::fs::create_dir_all(outside.join("bin")).unwrap();
         std::fs::write(outside.join("bin").join("orphan"), b"not ours\n").unwrap();
         ocx_util::fs::symlink::replace_atomic(&outside, tree.home.active()).unwrap();
         assert!(
-            !tree.home.active_is_valid(DEFAULT_SHELL),
+            tree.home.active_target_name().is_none(),
             "precondition: `active` is swung outside the home, as a concurrent writer leaves it"
         );
 
         let surface = vec![node(pinned("ns/cmake", 'a'), Some(&["cmake"]), &[])];
-        let scope = tree.scope();
         let lock = lock_of(vec![locked_tool(
             "cmake",
             DEFAULT_GROUP,
             "ns/cmake",
             &[(PLATFORM_KEY, 'a')],
         )]);
-        let groups = groups_of(&[DEFAULT_GROUP]);
-        let platform = platform();
-        let report = render_with(
-            &tree.file_structure,
-            RenderRequest {
-                unrendered: &[],
-                home: &tree.home,
-                scope: &scope,
-                lock: &lock,
-                surface: &surface,
-                groups: &groups,
-                pinned: false,
-                platform: &platform,
-                dry_run: false,
-            },
-            false,
-            None,
-        )
-        .await
-        .expect("the render succeeds");
+        let report = render_body(&tree, &lock, &surface, &groups_of(&[DEFAULT_GROUP]), &[]).await;
 
         assert_eq!(
             tree.bin_entries(),
             expected_bin_entries(&["cmake"]),
-            "the write and the prune both acted on the physical directory: {report:?}"
+            "the publish acted on the physical directory: {report:?}"
         );
         assert_eq!(
             read_dir_names(&outside.join("bin")),
@@ -8101,29 +7402,26 @@ mod tests {
     }
 
     /// C-080, corrupt-states row 22 — validity is **raw** equality with the
-    /// derived target, never a containment or canonicalising test.
-    ///
-    /// `shells/../shells/default` is contained *and* resolves to exactly the
-    /// right directory, and it is still not the value this tree writes. A
-    /// containment test admits it; a canonicalising compare admits it; only raw
-    /// equality repoints it.
+    /// derived target, never a containment or canonicalising test: an `active`
+    /// spelled `shells/../shells/<T>` resolves to the stamped directory and is
+    /// still re-switched to the spelling this tree writes, without a publish.
     ///
     /// RED: swap `active_is_valid`'s `read_link` for `dunce::canonicalize`, or
-    /// replace the equality with a `starts_with` containment check — the link
-    /// is left as it is and the target assertion fires.
+    /// replace the equality with a `starts_with` containment check.
     #[cfg(unix)]
     #[tokio::test]
     async fn an_active_that_resolves_correctly_by_a_different_spelling_is_still_repointed() {
         let tree = Tree::new();
-        std::fs::create_dir_all(tree.shell_directory()).unwrap();
-        ocx_util::fs::symlink::create(
-            Path::new("shells").join("..").join("shells").join(DEFAULT_SHELL),
+        render_a_default_tool(&tree).await;
+        let published = tree.home.active_target_name().expect("published");
+        ocx_util::fs::symlink::replace_atomic(
+            Path::new("shells").join("..").join("shells").join(&published),
             tree.home.active(),
         )
         .unwrap();
         assert_eq!(
             std::fs::canonicalize(tree.home.active()).unwrap(),
-            std::fs::canonicalize(tree.shell_directory()).unwrap(),
+            std::fs::canonicalize(tree.home.render_dir(&published)).unwrap(),
             "precondition: the planted spelling resolves to the right directory, so only a raw \
              comparison can reject it"
         );
@@ -8132,21 +7430,22 @@ mod tests {
 
         assert_eq!(
             std::fs::read_link(tree.home.active()).unwrap(),
-            tree.home.expected_active_target(DEFAULT_SHELL),
+            tree.home.expected_active_target(&published),
             "the raw target is the one this tree writes, not merely one that resolves there"
+        );
+        assert_eq!(
+            published_directories(&tree.home),
+            vec![published],
+            "…and nothing was published"
         );
     }
 
-    /// C-081, row 4 (inverted from the corrupt-states matrix, which asserted
-    /// the opposite) — a **real directory** at `active` is the `cp -rL` /
-    /// Docker `COPY` / zip outcome, and it is healed: removed and replaced by
-    /// the link. Its contents do **not** survive, because they are a copy of
-    /// the tree this render is about to rewrite.
+    /// C-081, row 4 — a **real directory** at `active` is the `cp -rL` / Docker
+    /// `COPY` / zip outcome, and it is healed: removed and replaced by the link.
+    /// Its contents do **not** survive, because they are a copy of the tree.
     ///
     /// RED: drop the `remove_dir_all` arm and refuse instead — `active` stays a
-    /// directory and the link assertion fires. RED for the carve-out's bound:
-    /// replace `remove_dir_all` with `remove_dir` — a populated copy fails
-    /// `ENOTEMPTY` and the same assertion fires.
+    /// directory and the link assertion fires.
     #[cfg(unix)]
     #[tokio::test]
     async fn a_real_directory_at_active_is_healed_rather_than_refused() {
@@ -8160,7 +7459,8 @@ mod tests {
             ocx_util::fs::symlink::is_link(&tree.home.active()),
             "the dereferenced copy is replaced by the link it was a copy of"
         );
-        assert!(tree.home.active_is_valid(DEFAULT_SHELL), "…at its derived target");
+        let published = published_directories(&tree.home);
+        assert!(tree.home.active_is_valid(&published[0]), "…at its derived target");
         assert_eq!(
             tree.bin_entries(),
             expected_bin_entries(&["cmake"]),
@@ -8203,8 +7503,9 @@ mod tests {
                 ocx_util::fs::symlink::is_link(&tree.home.active()),
                 "a {plant} at `active` is removed and replaced by the link"
             );
+            let published = published_directories(&tree.home);
             assert!(
-                tree.home.active_is_valid(DEFAULT_SHELL),
+                tree.home.active_is_valid(&published[0]),
                 "…at its derived target ({plant})"
             );
         }
@@ -8233,29 +7534,25 @@ mod tests {
 
             render_a_default_tool(&tree).await;
 
+            let published = published_directories(&tree.home);
             assert!(
-                tree.home.active_is_valid(DEFAULT_SHELL),
+                tree.home.active_is_valid(&published[0]),
                 "the {cycle} cycle is repointed at the derived target"
             );
         }
     }
 
-    /// C-083, corrupt-states row 31 — the shell directory is created **before**
-    /// `active`, so an interrupted render never leaves a link to a directory
-    /// that does not exist.
+    /// C-083, corrupt-states row 31 — `shells/` and the published directory
+    /// exist **before** `active` names one, so an interrupted render never leaves
+    /// a link to a directory that does not exist.
     ///
     /// A lookup through an absent `active` is a **miss**; a lookup through a
     /// link into nothing is an error every reader then has to be careful to
-    /// read as a mismatch. The order is the whole guarantee.
+    /// read as a mismatch. The order is the whole guarantee, and it is driven
+    /// through the fault seam because the finished tree cannot show it.
     ///
-    /// **Driven through the fault seam, because the finished tree cannot show
-    /// it.** With both writes landed the tree is byte-identical either way —
-    /// the swapped order publishes a dangling link and then creates its target
-    /// — so an assertion over the finished state passes with the calls
-    /// reversed. Measured: it did.
-    ///
-    /// RED: swap the two calls in step 6 — `active` is present, and dangling,
-    /// at the abort.
+    /// RED: switch `active` in step 6 — `active` is present, and dangling, at
+    /// the abort.
     #[tokio::test]
     async fn an_interrupted_render_never_leaves_active_pointing_at_an_absent_shell() {
         let tree = Tree::new();
@@ -8288,8 +7585,8 @@ mod tests {
 
         assert!(outcome.is_err(), "precondition: the seam aborted the render");
         assert!(
-            tree.shell_directory().is_dir(),
-            "the shell directory had already landed at the abort: {:?}",
+            shells_root(&tree.home).is_dir(),
+            "`shells/` had already landed at the abort: {:?}",
             read_dir_names(tree.home.root())
         );
         assert!(
@@ -8327,5 +7624,371 @@ mod tests {
 
     fn root_entry(name: &str) -> RenderedArtifact {
         RenderedArtifact::RootEntry(name.to_string())
+    }
+
+    // ── One published directory per content (V-L28, V-L29, V-L35) ──────────
+
+    /// The `shells/default-<16 hex>` children of `home`, sorted; nothing else.
+    fn published_directories(home: &ToolchainHome) -> Vec<String> {
+        read_dir_names(&home.root().join("shells"))
+            .into_iter()
+            .filter(|name| {
+                name.strip_prefix("default-")
+                    .is_some_and(|hex| hex.len() == 16 && hex.bytes().all(|b| b.is_ascii_hexdigit()))
+            })
+            .collect()
+    }
+
+    /// One `render_with` over `tree`'s own home on a case-sensitive probe, the shape most rows take.
+    async fn render_body(
+        tree: &Tree,
+        lock: &ProjectLock,
+        surface: &[ClosureNode],
+        groups: &[String],
+        unrendered: &[String],
+    ) -> RenderReport {
+        let (scope, platform) = (tree.scope(), platform());
+        render_with(
+            &tree.file_structure,
+            RenderRequest {
+                unrendered,
+                home: &tree.home,
+                scope: &scope,
+                lock,
+                surface,
+                groups,
+                pinned: false,
+                platform: &platform,
+                dry_run: false,
+            },
+            false,
+            None,
+        )
+        .await
+        .expect("the render succeeds")
+    }
+
+    /// The `NAME.launch` record in the render directory `active` names under `home`.
+    fn record_path(home: &ToolchainHome, name: &str) -> PathBuf {
+        shell_directory_of(home)
+            .expect("`active` names a render directory")
+            .join("bin")
+            .join(format!("{name}.launch"))
+    }
+
+    /// Render `names` through the public entry and return the `bin/` of the directory it published.
+    async fn published_bin(tree: &Tree, names: &[&str]) -> PathBuf {
+        render_names(tree, names).await;
+        tree.shell_directory()
+            .expect("the render switched `active`")
+            .join("bin")
+    }
+
+    /// The v2 stamp of `tree`'s project.
+    fn stamp_v2(tree: &Tree) -> Option<ocx_store::file_structure::RenderStampV2> {
+        tree.file_structure
+            .state
+            .render_stamp_v2(RenderStampTarget::Project(&tree.key()))
+    }
+
+    /// One render of `names`, all claimed by one default-group root, through the public entry.
+    async fn render_names(tree: &Tree, names: &[&str]) -> RenderReport {
+        let lock = lock_of(vec![locked_tool(
+            "cmake",
+            DEFAULT_GROUP,
+            "ns/cmake",
+            &[(PLATFORM_KEY, 'a')],
+        )]);
+        let groups = groups_of(&[DEFAULT_GROUP]);
+        let platform = platform();
+        tree.manager()
+            .render_toolchain(RenderRequest {
+                unrendered: &[],
+                home: &tree.home,
+                scope: &tree.scope(),
+                lock: &lock,
+                surface: &[node(pinned("ns/cmake", 'a'), Some(names), &[])],
+                groups: &groups,
+                pinned: false,
+                platform: &platform,
+                dry_run: false,
+            })
+            .await
+            .expect("the render succeeds")
+    }
+
+    /// V-L28 — a render with new content publishes exactly one `shells/default-<16 hex>` holding
+    /// the launcher and its `toolchain` record, and `active` names it; a second identical render
+    /// publishes nothing, leaves the stamp bytes alone and touches nothing under `shells/`.
+    ///
+    /// RED: a render that ignores the stamp fingerprint publishes a second directory.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_render_with_new_content_publishes_one_directory_and_a_repeat_writes_nothing() {
+        let tree = Tree::new();
+        render_names(&tree, &["cmake"]).await;
+
+        let published = published_directories(&tree.home);
+        assert_eq!(published.len(), 1, "one render, one directory: {published:?}");
+        let name = &published[0];
+        assert_eq!(tree.home.active_target_name().as_deref(), Some(name.as_str()));
+        let bin = tree.home.render_dir(name).join("bin");
+        assert_eq!(
+            read_dir_names(&bin),
+            vec!["cmake".to_string(), "cmake.launch".to_string()]
+        );
+        let record =
+            ocx_env_apply::launch::LaunchRecord::decode(&std::fs::read(bin.join("cmake.launch")).unwrap(), false)
+                .expect("the record decodes");
+        match record {
+            ocx_env_apply::launch::LaunchRecord::Toolchain(record) => {
+                assert_eq!(record.tier, ocx_env_apply::launch::ToolchainTier::Project);
+                assert_eq!(record.project_root.as_deref(), tree.project_dir.to_str());
+                assert_eq!(record.ocx.as_deref(), tree.ocx_binary.to_str());
+            }
+            other => panic!("a toolchain record, got {other:?}"),
+        }
+        assert!(
+            !tree.home.root().join("shells").join(DEFAULT_SHELL).exists(),
+            "C-132 — the render never creates `shells/default`"
+        );
+        let stamp = stamp_v2(&tree).expect("C-131 — the v2 stamp is written");
+        assert_eq!(&stamp.shell_dir, name);
+        assert!(
+            stamp.previous_shell_dir.is_empty(),
+            "a first render has no previous directory"
+        );
+        assert!(!tree.v1_stamp_file().exists(), "C-132 — the v1 stamp is never written");
+
+        let stamp_file = tree.stamp_file();
+        let stamp_bytes = std::fs::read(&stamp_file).unwrap();
+        let shells_before = snapshot_subtree(&tree.home.root().join("shells"));
+
+        render_names(&tree, &["cmake"]).await;
+
+        assert_eq!(
+            published_directories(&tree.home),
+            published,
+            "V-L28 — no second directory"
+        );
+        assert_eq!(
+            std::fs::read(&stamp_file).unwrap(),
+            stamp_bytes,
+            "…the stamp bytes unchanged"
+        );
+        assert_eq!(
+            snapshot_subtree(&tree.home.root().join("shells")),
+            shells_before,
+            "…and nothing under `shells/` touched"
+        );
+    }
+
+    /// V-L28 / C-131 — changed content publishes another directory, keeps the old one byte-identical,
+    /// and stamps it as `previous_shell_dir`.
+    ///
+    /// RED: render into the existing directory — one child, its bytes changed.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn changed_content_publishes_another_directory_and_keeps_the_old_one() {
+        let tree = Tree::new();
+        render_names(&tree, &["cmake"]).await;
+        let first = tree
+            .home
+            .active_target_name()
+            .expect("the first render switched `active`");
+        let first_tree = snapshot_subtree(&tree.home.render_dir(&first));
+
+        render_names(&tree, &["cmake", "ctest"]).await;
+
+        let second = tree
+            .home
+            .active_target_name()
+            .expect("the second render switched `active`");
+        assert_ne!(first, second, "new content, new directory");
+        let mut both = vec![first.clone(), second.clone()];
+        both.sort();
+        assert_eq!(published_directories(&tree.home), both);
+        assert_eq!(
+            snapshot_subtree(&tree.home.render_dir(&first)),
+            first_tree,
+            "a published directory is never edited"
+        );
+        let stamp = stamp_v2(&tree).expect("the stamp");
+        assert_eq!(stamp.shell_dir, second);
+        assert_eq!(stamp.previous_shell_dir, first);
+    }
+
+    /// § 6.4 step 3 — the stamp's directory intact but `active` healed to `shells/default` by an
+    /// older ocx: the render re-switches to the stamped directory and publishes nothing.
+    ///
+    /// RED: publish whenever `active` does not name the stamped directory — a second directory.
+    #[tokio::test]
+    async fn a_render_re_switches_to_the_intact_stamped_directory_without_publishing() {
+        let tree = Tree::new();
+        render_names(&tree, &["cmake"]).await;
+        let published = tree.home.active_target_name().expect("published");
+
+        std::fs::create_dir_all(tree.home.shell_bin(DEFAULT_SHELL)).unwrap();
+        ocx_util::fs::symlink::replace_atomic(tree.home.expected_active_target(DEFAULT_SHELL), tree.home.active())
+            .unwrap();
+        assert_eq!(tree.home.active_target_name().as_deref(), Some(DEFAULT_SHELL));
+
+        render_names(&tree, &["cmake"]).await;
+
+        assert_eq!(tree.home.active_target_name(), Some(published.clone()), "re-switched");
+        assert_eq!(
+            published_directories(&tree.home),
+            vec![published.clone()],
+            "nothing published"
+        );
+        assert_eq!(stamp_v2(&tree).expect("stamp").shell_dir, published);
+    }
+
+    /// V-L29, render half — an older home (`shells/default/bin` with a script and `.exec`, `active ->
+    /// shells/default`, a v1 `render_stamp.json`, `entrypoints/` and `shims/…`) is byte-identical after
+    /// a new render, except that `active` names the new directory.
+    ///
+    /// RED: render in place into `shells/default`, or rewrite the v1 stamp.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_new_render_leaves_every_directory_an_older_ocx_wrote_byte_identical() {
+        let tree = Tree::new();
+        let old_bin = tree.home.shell_bin(DEFAULT_SHELL);
+        std::fs::create_dir_all(&old_bin).unwrap();
+        std::fs::write(
+            old_bin.join("cmake"),
+            b"#!/bin/sh\n# ocx-toolchain-trampoline\nexec ocx\n",
+        )
+        .unwrap();
+        std::fs::write(old_bin.join("cmake.exec"), b"/proj\n").unwrap();
+        ocx_util::fs::symlink::create(tree.home.expected_active_target(DEFAULT_SHELL), tree.home.active()).unwrap();
+        let v1 = tree.v1_stamp_file();
+        std::fs::create_dir_all(v1.parent().unwrap()).unwrap();
+        std::fs::write(&v1, b"{\"v\":1}").unwrap();
+        let entrypoints = tree
+            .file_structure
+            .root()
+            .join("packages/example.com/sha256/aa/rest/entrypoints");
+        std::fs::create_dir_all(&entrypoints).unwrap();
+        std::fs::write(entrypoints.join("cmake"), b"#!/bin/sh\n").unwrap();
+        let shims = tree.file_structure.root().join("shims/example.com/ns/cmake/bin");
+        std::fs::create_dir_all(&shims).unwrap();
+        std::fs::write(shims.join("cmake"), b"#!/bin/sh\n").unwrap();
+
+        let default_before = snapshot_subtree(&tree.home.render_dir(DEFAULT_SHELL));
+        let v1_before = std::fs::read(&v1).unwrap();
+        let entrypoints_before = snapshot_subtree(&entrypoints);
+        let shims_before = snapshot_subtree(&tree.file_structure.root().join("shims"));
+
+        render_names(&tree, &["cmake"]).await;
+
+        assert_eq!(snapshot_subtree(&tree.home.render_dir(DEFAULT_SHELL)), default_before);
+        assert_eq!(std::fs::read(&v1).unwrap(), v1_before);
+        assert_eq!(snapshot_subtree(&entrypoints), entrypoints_before);
+        assert_eq!(
+            snapshot_subtree(&tree.file_structure.root().join("shims")),
+            shims_before
+        );
+        let active = tree.home.active_target_name().expect("active is a link");
+        assert_eq!(
+            published_directories(&tree.home),
+            vec![active.clone()],
+            "active names the new directory"
+        );
+        assert_eq!(stamp_v2(&tree).expect("stamp").previous_shell_dir, DEFAULT_SHELL);
+    }
+
+    /// C-138, variant A — the Windows `active` switch is `retarget_link` (the junction's mount point set in
+    /// place), never `symlink::replace_atomic`'s remove-then-rename. A source-structure assertion over
+    /// [`heal_active`], the render's one switch; compiled and run on Windows only.
+    ///
+    /// RED: switch `active` with `ocx_util::fs::symlink::replace_atomic` (variant B′).
+    #[cfg(windows)]
+    #[test]
+    fn the_windows_active_switch_is_retarget_link_in_place() {
+        let source = include_str!("render_toolchain.rs");
+        let start = source
+            .find("fn heal_active(")
+            .expect("`heal_active` is defined in this file");
+        let rest = &source[start..];
+        let body: Vec<&str> = rest[..rest.find("\n}\n").expect("the function ends")]
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect();
+        let body = body.join("\n");
+        assert_eq!(
+            body.matches("retarget_link(").count(),
+            1,
+            "one switch, through `retarget_link`:\n{body}"
+        );
+        assert!(!body.contains("replace_atomic"), "never variant B′:\n{body}");
+        assert!(
+            !body.contains("symlink::create"),
+            "an absent `active` is created by the same call:\n{body}"
+        );
+    }
+
+    /// V-L35 — the staging directory is created by an exclusive `mkdir`: an occupied name, a planted
+    /// symlink included, is refused and never followed or reused.
+    ///
+    /// RED: create it with `create_dir_all` or an "existing directory is fine" helper.
+    #[cfg(unix)]
+    #[test]
+    fn the_staging_directory_is_created_exclusively() {
+        let tmp = TempDir::new().unwrap();
+        let shells = tmp.path().join("shells");
+        std::fs::create_dir_all(&shells).unwrap();
+
+        let fresh = shells.join(".staging-0000000000000000");
+        create_staging_directory(&fresh).expect("an absent name is created");
+        assert!(fresh.is_dir());
+        assert_eq!(mode_of(&fresh) & 0o777, 0o700, "owner-only at create");
+        assert!(
+            create_staging_directory(&fresh).is_err(),
+            "an existing directory is never reused"
+        );
+
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let planted = shells.join(".staging-1111111111111111");
+        ocx_util::fs::symlink::create(&outside, &planted).unwrap();
+        assert!(
+            create_staging_directory(&planted).is_err(),
+            "a planted symlink is refused"
+        );
+        assert!(
+            std::fs::symlink_metadata(&planted).unwrap().is_symlink(),
+            "…and left as it is"
+        );
+    }
+
+    /// V-L35 — the symlinked-home refusals run before staging: a symlink at a tree-own leaf refuses
+    /// the whole render and nothing is staged, neither through the link nor beside it.
+    ///
+    /// RED: stage before `refuse_symlinked_home`, or shrink `tree_own_directories` to the root — a
+    /// `.staging-*` or a group directory lands in `outside/`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_symlinked_tree_own_leaf_is_refused_before_anything_is_staged() {
+        for relative in ["links", "shells"] {
+            let tree = Tree::new();
+            std::fs::create_dir_all(tree.home.root()).unwrap();
+            let outside = tree.tmp.path().join(format!("outside-{relative}"));
+            std::fs::create_dir_all(&outside).unwrap();
+            ocx_util::fs::symlink::create(&outside, tree.home.root().join(relative)).unwrap();
+
+            let report = render_names(&tree, &["cmake"]).await;
+
+            assert!(
+                report.items.is_empty() && !report.stamp_written,
+                "`{relative}` refuses: {report:?}"
+            );
+            assert_eq!(
+                read_dir_names(&outside),
+                Vec::<String>::new(),
+                "nothing staged through `{relative}`"
+            );
+            assert!(stamp_v2(&tree).is_none());
+        }
     }
 }
