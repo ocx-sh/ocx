@@ -110,7 +110,7 @@ impl ShimError {
                 )
             }
             ShimError::DirectRefused { reason } | ShimError::DirectArgumentRefused { reason } => {
-                format!("ocx-shim: {reason}")
+                format!("ocx-shim: {}", escape_controls(reason))
             }
             #[cfg(unix)]
             ShimError::DirectExecFailed { program, reason, .. } => {
@@ -754,6 +754,27 @@ mod tests {
         }
         let not_a_spawn = ShimError::DirectRefused { reason: batch };
         assert_eq!(not_a_spawn.length_limit_hint(300), None);
+    }
+
+    /// A refusal names paths from `argv[0]`, the working directory and runfiles manifests, so it cannot drive the
+    /// terminal either.
+    #[test]
+    fn a_refusal_reaches_stderr_with_its_control_characters_escaped() {
+        let refused = ShimError::DirectRefused {
+            reason: "started path /v/to\u{1b}[2Jol is not the running image".to_string(),
+        };
+        assert_eq!(
+            refused.stderr_message(),
+            "ocx-shim: started path /v/to\\u{1b}[2Jol is not the running image"
+        );
+        let argument = ShimError::DirectArgumentRefused {
+            reason: "argument 1 for C:\\t\r.cmd holds a line break".to_string(),
+        };
+        assert!(
+            !argument.stderr_message().contains('\r'),
+            "{:?}",
+            argument.stderr_message()
+        );
     }
 
     #[test]
