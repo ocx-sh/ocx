@@ -82,7 +82,7 @@ Lint tooling setup (one-off): the first `ocx pull` (or `task` invocation) materi
 | `ocx_exit_derive` [internal] | `#[derive(Classify)]`: an error variant declares its exit code and `error.detail` slug (re-exported by `ocx_exit`) |
 | `ocx_env` [ecosystem] | Environment registry: every `OCX_*` / `__OCX_*` variable declared once with its doc, value kind, visibility, secrecy and child propagation, and the one read seam |
 | `ocx_util` [ecosystem] | Domain-free primitives: fs, locking, extension traits, singleflight, TLS roots, archive, compression, path-context errors |
-| `ocx_env_apply` [ecosystem] | Std-only leaf: the environment apply functions (`move_to_front`, `remove_segment`, `append_unique`, `apply_one`) and the `.direct` launcher sidecar decoder |
+| `ocx_env_apply` [ecosystem] | Std-only leaf: the environment apply functions (`move_to_front`, `remove_segment`, `append_unique`, `apply_one`) and the `NAME.launch` launcher record decoder |
 | `ocx_console` [ecosystem] | Presentation vocabulary: rendering, printer, theme, styles, progress, data interface |
 | `ocx_oci` [ecosystem] | Distribution-spec-generic registry work: references, digests, manifests, transport, referrers, SSRF guard, auth |
 | `ocx_trust` [ecosystem] | Signer-identity policy: `[[trust.policy]]`, tiered resolution, compiled identity rules |

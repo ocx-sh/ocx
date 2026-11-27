@@ -12,7 +12,7 @@ One term per concept. The full approved list is the conflict table C1-C46 in `.c
 | snapshot of the environment | "a copy of the environment taken at spawn time". |
 | `--ci` sink | "CI output file(s)"; where GitHub is named, "the runner's `GITHUB_PATH` and `GITHUB_ENV` files". |
 | roles | operator = configures hosts, publishes patches or managed config; publisher = builds and pushes a package; owner = an index `login:id`; "maintainer" only for upstream project maintainers. |
-| Windows executables | launcher = the entry-point executable a package exposes (native `.exe` on Windows); trampoline = the toolchain tree's executable that re-enters `ocx exec`; shim = the placeholder of a deferred package. One blob backs all three: "the shared `ocx-shim` executable blob". |
+| Windows executables | launcher = a generated native executable that starts a program from its record `NAME.launch`, on every OS; its `kind` key names the role: `package` (an entry point), `deferred` (the placeholder of a deferred package, a "shim"), `toolchain` (a "trampoline" in the toolchain tree that re-enters `ocx exec`) or `direct` (a vendored program). One blob backs every launcher: "the shared `ocx-shim` executable blob". |
 | env files | "env file(s)" for `env.sh`, `env.elv`, ...; never "shim". |
 | fixed-project session | "a session fixed to the project it was opened in", defined once where it first appears; no flag named. |
 | integration key | "integration key" in prose; the JSON field is `namespace`, named in code font when meant. |
