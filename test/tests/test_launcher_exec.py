@@ -317,7 +317,7 @@ unix_only = pytest.mark.skipif(
 def test_package_launcher_builds_the_frozen_argv_and_counts_one_hop(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    """V-L07 / C-107: a `package` launcher starts `ocx launcher exec <package_root> -- NAME args…` at depth 1."""
+    """a `package` launcher starts `ocx launcher exec <package_root> -- NAME args…` at depth 1."""
     installed = install_entrypoint_package(ocx, unique_repo, tmp_path)
     stub, log = write_stub_ocx(tmp_path / "stub")
 
@@ -350,7 +350,7 @@ def test_package_launcher_builds_the_frozen_argv_and_counts_one_hop(
 def test_package_launcher_record_is_a_package_record_for_the_installed_root(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    """C-106: the launcher is published with `NAME.launch`, kind `package`, naming the package root."""
+    """the launcher is published with `NAME.launch`, kind `package`, naming the package root."""
     installed = install_entrypoint_package(ocx, unique_repo, tmp_path)
 
     record = json.loads(installed.record.read_text(encoding="utf-8"))
@@ -366,7 +366,7 @@ def test_package_launcher_record_is_a_package_record_for_the_installed_root(
 def test_package_launcher_increments_an_existing_depth_counter(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    """V-L07 / C-107: every home kind adds one to `__OCX_LAUNCHER_DEPTH`."""
+    """every home kind adds one to `__OCX_LAUNCHER_DEPTH`."""
     installed = install_entrypoint_package(ocx, unique_repo, tmp_path)
     stub, log = write_stub_ocx(tmp_path / "stub")
 
@@ -383,7 +383,7 @@ def test_package_launcher_increments_an_existing_depth_counter(
 def test_package_launcher_keeps_the_tier_selectors_in_the_environment(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    """C-107: only the `toolchain` kind removes OCX_GLOBAL and OCX_PROJECT; `package` passes them through."""
+    """only the `toolchain` kind removes OCX_GLOBAL and OCX_PROJECT; `package` passes them through."""
     installed = install_entrypoint_package(ocx, unique_repo, tmp_path)
     stub, log = write_stub_ocx(tmp_path / "stub")
 
@@ -403,7 +403,7 @@ def test_package_launcher_keeps_the_tier_selectors_in_the_environment(
 def test_launcher_depth_of_32_exits_78_naming_the_loop(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    """V-L14 / C-109: a counter of 32 ends the chain with exit 78 and `launcher loop`, starting nothing."""
+    """a counter of 32 ends the chain with exit 78 and `launcher loop`, starting nothing."""
     installed = install_entrypoint_package(ocx, unique_repo, tmp_path)
     stub, log = write_stub_ocx(tmp_path / "stub")
 
@@ -421,7 +421,7 @@ def test_launcher_depth_of_32_exits_78_naming_the_loop(
 def test_launcher_depth_of_31_still_starts_the_program(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    """V-L14 / C-109: the limit is exactly 32; 31 runs and hands on 32."""
+    """the limit is exactly 32; 31 runs and hands on 32."""
     installed = install_entrypoint_package(ocx, unique_repo, tmp_path)
     stub, log = write_stub_ocx(tmp_path / "stub")
 
@@ -447,7 +447,7 @@ def _copied_launcher(installed, destination: Path) -> Path:
 def test_a_relative_pin_exits_78(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    """V-L10 / C-108: `OCX_BINARY_PIN` must be absolute."""
+    """`OCX_BINARY_PIN` must be absolute."""
     installed = install_entrypoint_package(ocx, unique_repo, tmp_path)
 
     result = run_launcher(
@@ -461,7 +461,7 @@ def test_a_relative_pin_exits_78(
 def test_an_empty_pin_counts_as_unset_and_the_path_walk_finds_ocx(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    """V-L10 / C-108: an empty `OCX_BINARY_PIN` falls through to the `PATH` walk."""
+    """an empty `OCX_BINARY_PIN` falls through to the `PATH` walk."""
     installed = install_entrypoint_package(ocx, unique_repo, tmp_path)
     copy = _copied_launcher(installed, tmp_path / "home-bin")
     _, log = write_stub_ocx(tmp_path / "stub-bin")
@@ -479,7 +479,7 @@ def test_an_empty_pin_counts_as_unset_and_the_path_walk_finds_ocx(
 def test_the_path_walk_skips_the_launchers_own_directory_and_other_launchers(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    """V-L10 / C-108: own directory, empty and relative entries, and a sibling `ocx.launch` are skipped.
+    """own directory, empty and relative entries, and a sibling `ocx.launch` are skipped.
 
     Every skipped candidate is a decoy that records itself in `decoy.log`; the
     stub in the last entry must be the one that runs.
@@ -524,7 +524,7 @@ def test_the_path_walk_skips_the_launchers_own_directory_and_other_launchers(
 def test_the_path_walk_with_no_ocx_exits_78(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    """V-L10 / C-108: no pin, no record `ocx`, nothing on `PATH` is exit 78 naming the search."""
+    """no pin, no record `ocx`, nothing on `PATH` is exit 78 naming the search."""
     installed = install_entrypoint_package(ocx, unique_repo, tmp_path)
     copy = _copied_launcher(installed, tmp_path / "home-bin")
 
@@ -542,7 +542,7 @@ def test_the_path_walk_with_no_ocx_exits_78(
 def test_a_launcher_beside_only_a_retired_sidecar_exits_78_naming_the_record(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path, extension: str
 ) -> None:
-    """S-112 / C-106: a launcher with `NAME.<retired sidecar>` and no `NAME.launch` exits 78 naming `NAME.launch`."""
+    """a launcher with `NAME.<retired sidecar>` and no `NAME.launch` exits 78 naming `NAME.launch`."""
     installed = install_entrypoint_package(ocx, unique_repo, tmp_path)
     directory = tmp_path / "retired"
     directory.mkdir()
@@ -562,7 +562,7 @@ def test_a_launcher_beside_only_a_retired_sidecar_exits_78_naming_the_record(
 def test_a_launcher_reached_through_a_symlink_passes_the_targets_name(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    """C-110: the record and `NAME` come from the image path, not from the symlink that named it."""
+    """the record and `NAME` come from the image path, not from the symlink that named it."""
     installed = install_entrypoint_package(ocx, unique_repo, tmp_path)
     alias_dir = tmp_path / "aliases"
     alias_dir.mkdir()

@@ -1133,7 +1133,7 @@ _GENERATION = re.compile(r"[0-9a-f]{16}")
 
 
 def _launcher_dir(ocx: OcxRunner, pkg: PackageInfo) -> Path:
-    """The `<package dir>/launchers/<G>` PATH entry of `pkg`'s composed environment (C-127)."""
+    """The `<package dir>/launchers/<G>` PATH entry of `pkg`'s composed environment."""
     values = [e["value"] for e in ocx.json("package", "env", pkg.short)["items"] if e["key"] == "PATH"]
     dirs = [Path(v) for v in values if _LAUNCHERS_PATH_ENTRY.search(v)]
     assert len(dirs) == 1, f"expected exactly one launchers/<G> PATH entry; PATH values: {values}"
@@ -1184,7 +1184,7 @@ def _bare_path_env(ocx: OcxRunner, *launcher_dirs: Path) -> dict[str, str]:
 def test_entry_point_named_ocx_starts_the_real_ocx_without_a_loop(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    """V-L13: an entry point named `ocx`, started by bare name, skips itself and runs to the end."""
+    """an entry point named `ocx`, started by bare name, skips itself and runs to the end."""
     pkg = make_package_with_entrypoints(ocx, unique_repo, tmp_path, entrypoints=["ocx"], bins=["ocx"])
     ocx.plain("package", "install", pkg.short)
     launchers = _launcher_dir(ocx, pkg)
@@ -1201,7 +1201,7 @@ def test_entry_point_named_ocx_starts_the_real_ocx_without_a_loop(
 def test_two_packages_with_an_ocx_entry_point_on_path_start_the_real_ocx(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    """V-L13: with two `ocx` launchers on PATH the first runs; the other counts as a launcher, not the real ocx."""
+    """with two `ocx` launchers on PATH the first runs; the other counts as a launcher, not the real ocx."""
     pkg_a = make_package_with_entrypoints(
         ocx, f"{unique_repo}_a", tmp_path, entrypoints=["ocx"], bins=["ocx"], file_prefix="a"
     )
@@ -1224,7 +1224,7 @@ def test_two_packages_with_an_ocx_entry_point_on_path_start_the_real_ocx(
 def test_previous_release_install_gains_launchers_dir_at_next_exec_and_keeps_entrypoints(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    """V-L20, C-127, C-128: first use publishes launchers/<G> whole; entrypoints/ is byte-identical."""
+    """first use publishes launchers/<G> whole; entrypoints/ is byte-identical."""
     pkg = make_package_with_entrypoints(ocx, unique_repo, tmp_path, entrypoints=["hello"], bins=["hello"])
     package_dir = _install_with_previous_release(ocx, pkg)
     before = _tree_hash(package_dir / "entrypoints")
@@ -1248,7 +1248,7 @@ def test_previous_release_install_gains_launchers_dir_at_next_exec_and_keeps_ent
 def test_concurrent_first_use_publishes_one_launchers_dir_and_both_succeed(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    """S-104: two `ocx exec` at once on a package without launchers/<G> both exit 0, one complete <G>, no debris."""
+    """two `ocx exec` at once on a package without launchers/<G> both exit 0, one complete <G>, no debris."""
     pkg = make_package_with_entrypoints(ocx, unique_repo, tmp_path, entrypoints=["hello"], bins=["hello"])
     package_dir = _install_with_previous_release(ocx, pkg)
 
@@ -1274,7 +1274,7 @@ def test_concurrent_first_use_publishes_one_launchers_dir_and_both_succeed(
 def test_private_dependency_binary_is_reachable_from_the_program_an_entry_point_starts(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    """C-141 (a): an entry point whose target calls a private dependency's binary succeeds via launchers/<G> on PATH."""
+    """Case (a): an entry point whose target calls a private dependency's binary succeeds via launchers/<G> on PATH."""
     pkg_b = make_package(ocx, f"{unique_repo}_b", "1.0.0", tmp_path, bins=["bsecret"])
     pkg_a = make_package_with_entrypoints(
         ocx, f"{unique_repo}_a", tmp_path, entrypoints=["tool"], bins=["tool"], file_prefix="a",
@@ -1296,7 +1296,7 @@ def test_private_dependency_binary_is_reachable_from_the_program_an_entry_point_
 def test_entry_point_is_started_by_bare_name_through_the_composed_path(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    """C-141 (b): a bare `hello` resolves to <pkg dir>/launchers/<G>/hello, not entrypoints/."""
+    """Case (b): a bare `hello` resolves to <pkg dir>/launchers/<G>/hello, not entrypoints/."""
     pkg = make_package_with_entrypoints(ocx, unique_repo, tmp_path, entrypoints=["hello"], bins=["hello"])
     ocx.plain("package", "install", pkg.short)
     launchers = _launcher_dir(ocx, pkg)

@@ -870,14 +870,14 @@ def test_self_update_renders_the_global_toolchain_into_a_new_directory(
     tmp_path: Path,
     unique_repo: str,
 ) -> None:
-    """V-L42 / C-136 / S-103 -- phase 1.6 of the hand-off's setup renders the global
+    """phase 1.6 of the hand-off's setup renders the global
     home: afterwards `active` names a new `shells/default-<16 hex>` directory.
 
     The older render here is an older `ocx`'s (``active -> shells/default``, a v1
     stamp, ``$OCX_HOME/ocx.lock`` present). The hand-off child is the build
     under test, so the blob does not change between the two; the contract still
     holds because the old render carries no v2 stamp. A render failure that
-    warns and lets setup succeed (S-103's second half) cannot be provoked
+    warns and lets setup succeed (its second half) cannot be provoked
     through the CLI without a new seam, so it stays a unit test.
 
     RED: no phase 1.6 -- `active` still names `shells/default`.

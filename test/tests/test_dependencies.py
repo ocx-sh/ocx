@@ -1491,7 +1491,7 @@ def _list_dep_targets(obj_dir: Path) -> list[Path]:
 def test_public_dep_entrypoints_appear_in_consumer_path(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    """A's env must include B's launchers/<G> in PATH (C-129) when B is a public dependency.
+    """A's env must include B's launchers/<G> in PATH when B is a public dependency.
 
     The visible-package pipeline emits a synthetic `PATH ⊳ <B_pkg_root>/launchers/<G>`
     for every visible package that has non-empty entrypoints.  When A depends on B

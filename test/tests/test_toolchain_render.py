@@ -228,7 +228,7 @@ def test_a_tools_key_is_never_a_bin_entry_and_a_binary_name_is_never_a_link(
 def test_a_hostile_project_path_is_data_in_the_launch_record_and_never_runs(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """Item 2 / C-030 / V-L28 — a project directory whose name carries ``$(...)``
+    """Item 2 — a project directory whose name carries ``$(...)``
     and a backtick is baked into the ``NAME.launch`` record as a JSON string, and
     nothing executes.
 
@@ -1182,7 +1182,7 @@ def test_clean_and_clean_force_leave_the_global_toolchain_tree_alone(
 def test_an_orphan_launcher_never_reaches_the_directory_the_next_render_publishes(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """Item 31, class 1 / C-044 / V-L28, V-L30 — a ``bin/`` name outside the
+    """Item 31, class 1 — a ``bin/`` name outside the
     computed set, planted in a published directory, is not carried into the next
     one, and the directory it was planted in is left as found.
 
@@ -1411,7 +1411,7 @@ def test_an_empty_orphan_group_directory_is_removed_and_a_populated_one_is_only_
 def test_an_orphan_directory_in_bin_is_left_whole_and_absent_from_the_next_directory(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """Item 31, class 4 / RUL-32 / V-L30 — an orphan that is itself a **directory**
+    """Item 31, class 4 — an orphan that is itself a **directory**
     occupying a ``bin/`` name slot of a published directory is never removed and
     never carried over; the render continues into a new directory.
 
@@ -1501,7 +1501,7 @@ def test_the_render_stamp_covers_every_name_body_and_link_target(
 def test_shifting_a_launchers_mtime_perturbs_neither_the_stamp_nor_the_tree(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """Item 32, second half / C-003 / V-L28 — **mtime is not consulted**.
+    """Item 32, second half — **mtime is not consulted**.
 
     No field of the stamp records one, a shifted-but-byte-identical record
     re-renders to the same stamp, and nothing is published (no new directory,
@@ -1572,7 +1572,7 @@ def test_shifting_a_launchers_mtime_perturbs_neither_the_stamp_nor_the_tree(
 
 
 # ---------------------------------------------------------------------------
-# V-L28 / V-L30 / C-131 / C-132 — one new directory per new content
+# one new directory per new content
 # ---------------------------------------------------------------------------
 
 
@@ -1601,7 +1601,7 @@ def _with_another_tool(
 def test_a_render_with_new_content_publishes_a_new_directory_and_switches_active(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """V-L28 / C-131 — the first render publishes ``shells/default-<16 hex>/bin/{NAME,
+    """the first render publishes ``shells/default-<16 hex>/bin/{NAME,
     NAME.launch}`` from a staging directory and ``active`` names it.
 
     RED: render in place into ``shells/default`` (the older layout) — no
@@ -1640,7 +1640,7 @@ def test_a_render_with_new_content_publishes_a_new_directory_and_switches_active
 def test_a_render_writes_the_v2_stamp_naming_the_active_directory_and_no_v1_stamp(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """V-L28 / C-131 / C-132 — the new render's stamp is ``render_stamp.v2.json`` with
+    """the new render's stamp is ``render_stamp.v2.json`` with
     ``v == 2`` and ``shell_dir`` equal to the name ``active`` carries; it writes no
     ``render_stamp.json``.
 
@@ -1666,7 +1666,7 @@ def test_a_render_writes_the_v2_stamp_naming_the_active_directory_and_no_v1_stam
 
 
 def test_a_repeated_render_writes_nothing(ocx: OcxRunner, tmp_path: Path) -> None:
-    """V-L28 / C-131 — a second render with the same content publishes no directory,
+    """a second render with the same content publishes no directory,
     leaves ``active`` and the stamp bytes alone.
 
     RED: a render that ignores the stamp fingerprint — a second ``default-<hex>``
@@ -1701,7 +1701,7 @@ def test_a_repeated_render_writes_nothing(ocx: OcxRunner, tmp_path: Path) -> Non
 def test_a_render_with_changed_content_publishes_another_directory_and_keeps_the_old_one(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """V-L28 / V-L30 (render half) / C-131 — new content means another
+    """Render half — new content means another
     ``default-<hex>``; the v2 stamp's ``previous_shell_dir`` names the directory
     ``active`` named before, and that directory stays byte-identical.
 
@@ -1741,7 +1741,7 @@ def test_a_render_with_changed_content_publishes_another_directory_and_keeps_the
 def test_a_render_never_touches_shells_default_or_the_older_stamp_an_older_ocx_wrote(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """C-132 / V-L29 — after ``ocx-previous`` rendered ``shells/default`` and its v1
+    """after ``ocx-previous`` rendered ``shells/default`` and its v1
     stamp, a new render adds beside them and leaves both byte-identical.
 
     The older render also heals ``active`` to ``shells/default`` (``adr_unified_launcher.md``

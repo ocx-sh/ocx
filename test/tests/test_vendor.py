@@ -293,7 +293,7 @@ def test_vendor_writes_manifest_content_and_launchers(
     tool = _tools(manifest)["hello"]
     assert (out / tool["launcher_path"]).is_file()
     assert (out / tool["target_path"]).is_file()
-    # V-L50: the short layout, every launcher with its record file.
+    # the short layout, every launcher with its record file.
     assert {p.name for p in out.iterdir()} == {"manifest.json", "l", "p"}
     (package,) = manifest["packages"]
     assert package["content_dir"] == f"p/{hex16(package['digest'])}/c"
@@ -306,7 +306,7 @@ def test_vendor_writes_manifest_content_and_launchers(
 
 
 # ---------------------------------------------------------------------------
-# The short layout and the launcher records (V-L50, V-L53)
+# The short layout and the launcher records
 # ---------------------------------------------------------------------------
 
 
@@ -397,7 +397,7 @@ def test_wasm_tool_without_a_launcher_has_no_record_path(
 
 
 # ---------------------------------------------------------------------------
-# Names ocx never writes (V-L27 vendor half, V-L56)
+# Names ocx never writes (vendor half)
 # ---------------------------------------------------------------------------
 
 
@@ -1124,7 +1124,7 @@ def test_vendor_id_is_a_function_of_platform_and_digests(
 
 
 # ---------------------------------------------------------------------------
-# A declared binary the content lacks (V-L52)
+# A declared binary the content lacks
 # ---------------------------------------------------------------------------
 
 
@@ -1180,7 +1180,7 @@ def test_declared_binary_missing_from_content_does_not_stop_a_manifest_only_run(
 
 
 # ---------------------------------------------------------------------------
-# `--index`: lookups recorded (V-L55), the directory untouched (V-L60)
+# `--index`: lookups recorded, the directory untouched
 # ---------------------------------------------------------------------------
 
 

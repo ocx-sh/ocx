@@ -661,7 +661,7 @@ def test_a_tool_in_both_toolchains_resolves_to_the_projects_trampoline(
 def test_env_mode_never_puts_the_project_trampoline_dir_on_path(
     ocx: OcxRunner, arena: Arena, tmp_path: Path
 ) -> None:
-    """C-005: ``shells/default-<hex>/bin`` is ``bin`` mode's, and ``env`` mode composes instead.
+    """``shells/default-<hex>/bin`` is ``bin`` mode's, and ``env`` mode composes instead.
 
     Both halves in one probe: the trampoline directory is **rendered on disk**
     and still absent from ``PATH``, while the composed package directory *is*
@@ -1364,7 +1364,7 @@ def test_a_symlinked_project_home_is_refused_from_the_owned_set(
 def test_a_repointed_link_with_bin_untouched_is_healed_or_withheld(
     ocx: OcxRunner, arena: Arena, tmp_path: Path
 ) -> None:
-    """C-062: ``shells/default-<hex>/bin`` matching its stamp is not enough — the links
+    """``shells/default-<hex>/bin`` matching its stamp is not enough — the links
     must resolve.
 
     The repoint leaves ``shells/default-<hex>/bin`` byte-identical, so a gate that fingerprinted
@@ -1532,7 +1532,7 @@ def _launcher_output(
 def test_two_ocx_versions_alternate_on_one_home_and_every_launcher_starts(
     ocx: OcxRunner, arena: Arena, tmp_path: Path
 ) -> None:
-    """V-L34 / C-134 / S-102 — ``ocx-previous`` and the new ``ocx`` render and prompt
+    """``ocx-previous`` and the new ``ocx`` render and prompt
     alternately on one home.
 
     * the new render names ``shells/default-<hex>`` and the new prompt exposes it;

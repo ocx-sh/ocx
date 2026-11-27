@@ -647,14 +647,14 @@ def test_s004_a_second_invocation_of_the_same_name_does_not_re_enter_the_shim(
 
 
 # ---------------------------------------------------------------------------
-# C-106 / C-107 — the deferred launcher is a `deferred` record plus a native launcher
+# the deferred launcher is a `deferred` record plus a native launcher
 # ---------------------------------------------------------------------------
 
 
 def test_deferred_launcher_is_published_with_a_deferred_record(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    """C-106 / § 4.3: `deferred/<G>/…/l/NAME` sits beside `NAME.launch` of kind `deferred` naming the pinned identifier."""
+    """§ 4.3: `deferred/<G>/…/l/NAME` sits beside `NAME.launch` of kind `deferred` naming the pinned identifier."""
     pkg = make_package(
         ocx,
         unique_repo,
@@ -683,7 +683,7 @@ def test_deferred_launcher_is_published_with_a_deferred_record(
 def test_deferred_launcher_builds_the_frozen_argv_and_keeps_the_tier_selectors(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    """V-L07 / C-107: `ocx launcher shim <identifier> -- NAME args…`, depth +1, OCX_GLOBAL and OCX_PROJECT untouched."""
+    """`ocx launcher shim <identifier> -- NAME args…`, depth +1, OCX_GLOBAL and OCX_PROJECT untouched."""
     pkg = make_package(
         ocx,
         unique_repo,

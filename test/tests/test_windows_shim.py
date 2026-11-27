@@ -263,7 +263,7 @@ def test_launcher_argv0_is_real_target_not_cmd_exe(
 def test_launcher_forwards_args_verbatim(
     shim_entrypoint: dict, recorder_exe: Path, tmp_path: Path
 ) -> None:
-    """Args with spaces and unicode reach the program as single, unchanged arguments (C-107)."""
+    """Args with spaces and unicode reach the program as single, unchanged arguments."""
     pin, _ = recorder_copy(recorder_exe, tmp_path / "pinned", "ocx.exe")
     env = dict(shim_entrypoint["env"])
     env["OCX_BINARY_PIN"] = str(pin)
@@ -351,7 +351,7 @@ def test_launcher_directory_holds_exe_and_launch_only_and_bare_name_reaches_the_
     """V-L38: no extensionless script, `.shim`, `.exec` or `.cmd`; bare `hello` still reaches the launcher.
 
     With no ocx on PATH and no pin the launcher's PATH walk finds none and exits 78
-    "no ocx found on PATH" (C-108 rung 3): reaching that message proves the `.exe` ran.
+    "no ocx found on PATH" (rung 3): reaching that message proves the `.exe` ran.
     """
     ep_dir = shim_entrypoint["ep_dir"]
     assert sorted(p.name for p in ep_dir.iterdir()) == ["hello.exe", "hello.launch"]
@@ -440,7 +440,7 @@ def test_launcher_honours_ocx_binary_pin(
 def test_launcher_refuses_a_batch_file_pin_with_78(
     shim_entrypoint: dict, tmp_path: Path
 ) -> None:
-    """C-108: a pin naming a batch file is refused with 78 on every rung, never started."""
+    """a pin naming a batch file is refused with 78 on every rung, never started."""
     marker = tmp_path / "ran.txt"
     batch = tmp_path / "pinned" / "ocx.cmd"
     batch.parent.mkdir()
@@ -479,7 +479,7 @@ def test_launcher_runs_without_console(
 
 
 # ---------------------------------------------------------------------------
-# Empty OCX_BINARY_PIN - an empty pin is no pin (C-108 rung 1 is "when non-empty")
+# Empty OCX_BINARY_PIN - an empty pin is no pin (rung 1 is "when non-empty")
 # ---------------------------------------------------------------------------
 
 
