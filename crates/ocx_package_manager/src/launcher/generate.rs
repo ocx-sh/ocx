@@ -618,7 +618,7 @@ mod tests {
         assert!(!dest.exists(), "dest must not be created for empty entrypoints");
     }
 
-    /// V-L37: every launcher is a byte copy of the embedded host blob with a link count of 1, mode 0755;
+    /// Every launcher is a byte copy of the embedded host blob with a link count of 1, mode 0755;
     /// rewriting one leaves the others unchanged (no shared inode).
     #[cfg(unix)]
     #[tokio::test]
@@ -656,7 +656,7 @@ mod tests {
         }
     }
 
-    /// V-L38 writer half: a Windows target lists exactly `NAME.exe` and `NAME.launch` per name, on any host.
+    /// Writer half: a Windows target lists exactly `NAME.exe` and `NAME.launch` per name, on any host.
     #[tokio::test]
     async fn a_windows_target_lists_only_exe_and_launch_per_name() {
         let tmp = tempdir().unwrap();
@@ -760,7 +760,7 @@ mod tests {
         assert_eq!(record.package_root, pkg_root.to_str().unwrap());
     }
 
-    /// C-130 / V-L27 home half: a name ending in `.launch` gets no launcher and no record, and does not stop its siblings.
+    /// A name ending in `.launch` gets no launcher and no record, and does not stop its siblings.
     #[tokio::test]
     async fn a_launch_suffixed_name_is_skipped() {
         let tmp = tempdir().unwrap();
@@ -781,7 +781,7 @@ mod tests {
         assert_eq!(listing(tmp.path()), ["bar", "bar.launch"]);
     }
 
-    /// C-140: a second publication over a complete `launchers/<G>` is `AlreadyThere` and rewrites nothing.
+    /// A second publication over a complete `launchers/<G>` is `AlreadyThere` and rewrites nothing.
     #[tokio::test]
     async fn generate_is_idempotent() {
         let tmp = tempdir().unwrap();
@@ -808,7 +808,7 @@ mod tests {
         assert_eq!(listing(&pkg_dir.join("launchers")), [generation.as_str()]);
     }
 
-    /// V-L24 helper half: a removed package directory is neither recreated nor given a `launchers/`.
+    /// Helper half: a removed package directory is neither recreated nor given a `launchers/`.
     #[tokio::test]
     async fn publish_does_not_recreate_a_removed_package_directory() {
         let tmp = tempdir().unwrap();
@@ -836,7 +836,7 @@ mod tests {
         )
     }
 
-    /// V-L21: a fault after the first launcher is written leaves no `launchers/<G>`; a retry yields a complete one.
+    /// A fault after the first launcher is written leaves no `launchers/<G>`; a retry yields a complete one.
     #[tokio::test]
     async fn a_fault_after_the_first_launcher_leaves_no_directory_and_a_retry_completes_it() {
         let tmp = tempdir().unwrap();
@@ -863,7 +863,7 @@ mod tests {
         assert!(super::launchers_complete(&package.launchers(&generation), &entries).await);
     }
 
-    /// V-L22: two concurrent first uses both succeed, one publishing and one finding the winner, on one complete directory.
+    /// Two concurrent first uses both succeed, one publishing and one finding the winner, on one complete directory.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn two_concurrent_first_uses_converge_on_one_complete_directory() {
         let tmp = tempdir().unwrap();
@@ -892,7 +892,7 @@ mod tests {
         );
     }
 
-    /// V-L23: a directory missing one record is retired and republished whole.
+    /// A directory missing one record is retired and republished whole.
     #[tokio::test]
     async fn first_use_republishes_a_directory_missing_a_record() {
         let tmp = tempdir().unwrap();
@@ -909,7 +909,7 @@ mod tests {
         assert!(super::launchers_complete(&dir, &entries).await);
     }
 
-    /// V-L23: a symlink at `launchers/<G>` is removed, never followed, and a real directory published in its place.
+    /// A symlink at `launchers/<G>` is removed, never followed, and a real directory published in its place.
     #[cfg(unix)]
     #[tokio::test]
     async fn first_use_replaces_a_symlinked_directory_and_leaves_its_target_alone() {
@@ -932,7 +932,7 @@ mod tests {
         assert_eq!(snapshot(&elsewhere), before, "the link target is untouched");
     }
 
-    /// V-L24: a package directory removed before first use is not recreated by `launchers/`.
+    /// A package directory removed before first use is not recreated by `launchers/`.
     #[tokio::test]
     async fn first_use_of_a_removed_package_fails_and_creates_nothing() {
         let tmp = tempdir().unwrap();
@@ -964,7 +964,7 @@ mod tests {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
     }
 
-    /// V-L25: a read-only package directory composes a complete older `entrypoints/`.
+    /// A read-only package directory composes a complete older `entrypoints/`.
     #[cfg(unix)]
     #[tokio::test]
     async fn a_read_only_package_directory_falls_back_to_a_complete_older_entrypoints() {
@@ -994,7 +994,7 @@ mod tests {
         );
     }
 
-    /// V-L25: with no complete older `entrypoints/`, the refusal names the path with a permission cause.
+    /// With no complete older `entrypoints/`, the refusal names the path with a permission cause.
     #[cfg(unix)]
     #[tokio::test]
     async fn a_read_only_package_directory_without_entrypoints_fails_naming_the_path() {

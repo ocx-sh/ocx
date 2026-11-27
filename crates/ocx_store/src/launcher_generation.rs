@@ -77,13 +77,13 @@ mod tests {
         assert_eq!(HOME_LAUNCHER_REVISION, 1);
     }
 
-    /// C-124, worked example 1 of the decision record.
+    /// Worked example 1 of the launcher decision record.
     #[test]
     fn contract_generation_of_the_empty_blob_matches_the_golden() {
         assert_eq!(LauncherGeneration::of(b"", 1, 1).as_str(), "d7c9115eb03568da");
     }
 
-    /// C-124, worked example 2 of the decision record.
+    /// Worked example 2 of the launcher decision record.
     #[test]
     fn contract_render_fingerprint_matches_the_golden() {
         let generation = LauncherGeneration::from_hex("0123456789abcdef").unwrap();
@@ -97,7 +97,7 @@ mod tests {
         );
     }
 
-    /// C-124: `host()` is the key of the host blob, and `None` exactly when the host has none.
+    /// `host()` is the key of the host blob, and `None` exactly when the host has none.
     #[test]
     fn contract_host_follows_the_host_blob() {
         let expected = crate::shim::host_blob()

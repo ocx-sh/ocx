@@ -41,7 +41,7 @@ Two shapes the crate split can break without any workflow going red:
   at all — so the predicate keys on `executionInfo.strategy`, and its red and green
   run over real BEP bytes in `test/fixtures/bep/cache_states.json`.
 
-The workflows are read with PyYAML (D11). One YAML 1.1 trap: the bare key
+The workflows are read with PyYAML. One YAML 1.1 trap: the bare key
 `on` loads as the boolean `True`, so `_on` looks it up under both spellings.
 Glob liveness is `git ls-files -- ':(glob)<pattern>'`: git's `:(glob)`
 pathspec is GitHub's filter grammar (`*` stops at `/`, `**` crosses it, a
@@ -420,7 +420,7 @@ _JOB_CLAIM = re.compile(r"`([a-z0-9-]+\.yml)`(?:'s)?\s+`([A-Za-z0-9_-]+)`\s+(?:j
 # line to add.
 #
 # The one member is not a defect awaiting repair. `plan_crate_split_workspace.md`
-# records that ruling D5 DELETED `smoke-windows`, and quotes the ADR sentence
+# records the ruling that deleted `smoke-windows`, and quotes the ADR sentence
 # that outlived it as the finding under repair — naming a job the workflow
 # lacks is that document's correct content, and this needle cannot tell a
 # deletion record from an assertion of coverage.
@@ -549,7 +549,7 @@ def _off_linux(workflow: Path, inputs: dict | None = None) -> tuple[int, dict[st
 #: The basic tier's only jobs off a literal `ubuntu-*` runner: the native smoke legs. `unit-native` is the
 #: unit bundle on macOS and Windows; `acceptance.yml:shard` is read through `acceptance-native`, whose
 #: `os` is a matrix expression, so it reads as non-Linux. Anything else is a cost every push pays.
-#: `junction-proof` is the Windows-only proof of DP-41 (V-L31, V-L32): it executes two cases of the cross-built bundle.
+#: `junction-proof` is the Windows-only proof of DP-41: it executes two cases of the cross-built bundle.
 BASIC_NATIVE_JOBS = frozenset({"basic-repo.yml:unit-native", "basic-repo.yml:junction-proof", "acceptance.yml:shard"})
 
 

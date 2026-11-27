@@ -534,7 +534,7 @@ mod tests {
             "TempAcquireResult.lock must be a LockedFile over the sentinel .lock file"
         );
     }
-    /// C-126: `scratch` is removed with its lock file when it drops.
+    /// `scratch` is removed with its lock file when it drops.
     #[tokio::test(flavor = "multi_thread")]
     async fn scratch_is_removed_with_its_lock_file() {
         let home = tempfile::tempdir().unwrap();
@@ -551,7 +551,7 @@ mod tests {
         assert!(leftovers.is_empty(), "{leftovers:?}");
     }
 
-    /// C-126: a held scratch is never offered to the cleaner; a dropped one is gone.
+    /// A held scratch is never offered to the cleaner; a dropped one is gone.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_held_scratch_is_not_offered_to_the_cleaner_and_a_dropped_one_is_gone() {
         let home = tempfile::tempdir().unwrap();

@@ -543,9 +543,9 @@ pub mod tests {
         assert_eq!(g.reachable(), set(&["pkg"]));
     }
 
-    // ── index-manifest probe (F5: large index must not be truncated) ────────
+    // ── index-manifest probe (a large index must not be truncated) ────────
 
-    /// F5 regression: an image-index manifest **larger than the old 16 KiB
+    /// Regression: an image-index manifest **larger than the old 16 KiB
     /// probe bound** must still produce its `child_leaf_blob → index_blob`
     /// retention edge. The previous code read only a 16 KiB prefix, so a large
     /// valid index parsed as truncated JSON → was skipped → its parent index
@@ -980,7 +980,7 @@ pub mod tests {
 
     /// The shim root is keyed on the **logical** pinned identity — the one
     /// `ocx.lock` stores and `prepare_lazy` publishes under (`resolved.pinned`,
-    /// Decision C2) — never on the physical transport identity an index-routed
+    /// the logical-identity decision) — never on the physical transport identity an index-routed
     /// package resolves through.
     ///
     /// `ocx.sh/ocx/cli` is exactly that case: a logical name the published
@@ -1027,7 +1027,7 @@ pub mod tests {
 
     // ── the deferred tier of this ocx's generation ────────────────────────
 
-    /// C-137: `deferred/<G>/…` is walked like `shims/`: a `CasTier::Shim` entry, rooted from the lock pin, with its
+    /// `deferred/<G>/…` is walked like `shims/`: a `CasTier::Shim` entry, rooted from the lock pin, with its
     /// `refs/blobs/` edge. A walk of `shims/` alone leaves the tree unrooted and collectable.
     #[tokio::test(flavor = "multi_thread")]
     async fn reachability_graph_walks_and_roots_a_deferred_generation_tree() {

@@ -3142,8 +3142,8 @@ mod tests {
         files
     }
 
-    /// Placing a digest-addressed package over a seeded, writable index leaves the index directory as it was
-    /// (C-119): resolving an image index through a writable chain persists a dispatch object, so this fails
+    /// Placing a digest-addressed package over a seeded, writable index leaves the index directory as it was:
+    /// resolving an image index through a writable chain persists a dispatch object, so this fails
     /// when `place_package` resolves with the manager it was given.
     #[tokio::test(flavor = "multi_thread")]
     async fn placing_a_package_writes_nothing_into_the_index_directory() {
@@ -3188,7 +3188,7 @@ mod tests {
         assert_eq!(after, before, "the index directory is byte-identical");
     }
 
-    /// The refusal names the package with its tag, the claim, the program and who must act (C-121).
+    /// The refusal names the package with its tag, the claim, the program and who must act.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_declared_binary_the_content_lacks_names_the_package_and_the_claim() {
         let (_dir, layout, manifest) = staged_tool(&[]).await;
