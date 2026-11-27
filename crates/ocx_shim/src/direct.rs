@@ -280,19 +280,46 @@ pub(super) fn started_path_unix(
         .ok_or(ShimError::SelfPathFailure)
 }
 
+/// The lookup from the process's own `argv[0]` and `PATH`; a missing `argv0` is the same own-path failure as a name
+/// that resolves nowhere.
+#[cfg(unix)]
+pub(super) fn lookup_unix(
+    argv0: Option<&str>,
+    context: &LookupContext<'_>,
+    path_var: Option<&str>,
+    fs: &dyn LookupFs,
+) -> Result<Probed, ShimError> {
+    locate_with(
+        || started_path_unix(argv0.ok_or(ShimError::SelfPathFailure)?, context.cwd, path_var, fs),
+        context,
+        fs,
+    )
+}
+
 /// Reads `path` as a record file: `Ok(None)` when absent, the refusal naming `path` when it cannot be read.
 fn read_record(path: &str, fs: &dyn LookupFs) -> Result<Option<Vec<u8>>, ShimError> {
     fs.read_sidecar(path)
         .map_err(|err| refuse(format!("cannot read sidecar {path}: {err}")))
 }
 
+/// [`locate_with`] over a started path that is already known.
+#[cfg(test)]
+pub(super) fn locate(started: &str, context: &LookupContext<'_>, fs: &dyn LookupFs) -> Result<Probed, ShimError> {
+    locate_with(|| Ok(started.to_string()), context, fs)
+}
+
 /// Decides the kind from the record beside the loaded image, then runs the started-path rules for kind `direct`.
 ///
-/// A record of a home kind beside the image runs from it, whatever path the launcher was started by. Kind `direct`
+/// A record of a home kind beside the image runs from it, whatever path the launcher was started by, so `started` is
+/// called only once the record is absent or of kind `direct` and its failure never reaches a home launcher. Kind `direct`
 /// (no record beside the image, or one of that kind) keeps the started path, because a runfiles tree reaches the
 /// launcher through links. Its root is the first candidate, in candidate order, whose own `<self>.launch` is
 /// byte-identical to the record beside the started path, so a stale tree holding another `vendor_id` is never taken.
-pub(super) fn locate(started: &str, context: &LookupContext<'_>, fs: &dyn LookupFs) -> Result<Probed, ShimError> {
+pub(super) fn locate_with(
+    started: impl FnOnce() -> Result<String, ShimError>,
+    context: &LookupContext<'_>,
+    fs: &dyn LookupFs,
+) -> Result<Probed, ShimError> {
     let windows = context.windows;
     let image = fs.image_path()?;
     let image_record = record_path_for(&image, windows);
@@ -307,6 +334,8 @@ pub(super) fn locate(started: &str, context: &LookupContext<'_>, fs: &dyn Lookup
         }
     }
 
+    let started = started()?;
+    let started = started.as_str();
     let (_, file_name) = split_file_name(started, windows);
     if (if windows { strip_exe(file_name) } else { file_name }).is_empty() {
         return Err(ShimError::SelfPathFailure);
@@ -503,14 +532,22 @@ impl LookupFs for RealFs {
             let target = std::fs::read_link("/proc/self/exe").map_err(|_| ShimError::SelfPathFailure)?;
             checked_image_link(target.to_str().ok_or(ShimError::SelfPathFailure)?)
         }
-        // shortcut: macOS (`proc_pidpath`) and Windows (the mapped file by handle) still read `current_exe`, which
-        // names the started path there; the next launcher step replaces it.
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "macos")]
         {
-            std::env::current_exe()
-                .ok()
-                .and_then(|path| path.into_os_string().into_string().ok())
-                .ok_or(ShimError::SelfPathFailure)
+            let mut buffer = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+            // SAFETY: `buffer` holds `buffer.len()` writable bytes and that length is passed as the size; the call
+            // writes at most that many and returns the byte count of the path, or 0 on failure.
+            let written =
+                unsafe { libc::proc_pidpath(libc::getpid(), buffer.as_mut_ptr().cast(), buffer.len() as u32) };
+            if written <= 0 {
+                return Err(ShimError::SelfPathFailure);
+            }
+            buffer.truncate(written as usize);
+            String::from_utf8(buffer).map_err(|_| ShimError::SelfPathFailure)
+        }
+        #[cfg(windows)]
+        {
+            mapped_image_path()
         }
     }
 
@@ -543,6 +580,137 @@ impl LookupFs for RealFs {
         };
         std::fs::metadata(path).is_ok_and(|started| started.dev() == image.dev() && started.ino() == image.ino())
     }
+}
+
+/// A wide string from `buffer[..length]` as UTF-8, or the refusal naming `step`.
+#[cfg(windows)]
+fn wide_to_string(buffer: &[u16], step: &str) -> Result<String, ShimError> {
+    use std::os::windows::ffi::OsStringExt;
+
+    OsString::from_wide(buffer)
+        .into_string()
+        .map_err(|_| refuse(format!("the launcher image path from {step} is not valid Unicode")))
+}
+
+/// The refusal for a failed Win32 step of the image path.
+#[cfg(windows)]
+fn image_step_failed(step: &str) -> ShimError {
+    // SAFETY: no arguments; reads thread-local last-error.
+    let code = unsafe { windows_sys::Win32::Foundation::GetLastError() };
+    refuse(format!(
+        "cannot resolve the launcher image: {step} failed (error {code})"
+    ))
+}
+
+/// The image path on Windows: the file mapped at the executable's module base, resolved by handle.
+///
+/// `GetModuleFileNameW` returns the path the process was started by, which is the `active` junction when the launcher
+/// is reached through one. The mapped file is the one the loader opened, so its final path names the render
+/// directory behind the junction; no `stat` is compared with a later `open`.
+#[cfg(windows)]
+fn mapped_image_path() -> Result<String, ShimError> {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, GetFinalPathNameByHandleW, OPEN_EXISTING, VOLUME_NAME_DOS,
+    };
+    use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows_sys::Win32::System::ProcessStatus::GetMappedFileNameW;
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+    const MAX_UNITS: usize = 64 * 1024;
+    const STEP_MAPPED: &str = "GetMappedFileNameW";
+    const STEP_OPEN: &str = "opening the mapped file";
+    const STEP_FINAL: &str = "GetFinalPathNameByHandleW";
+
+    // SAFETY: a null name asks for the module the process was created from; the returned base is only an address.
+    let module = unsafe { GetModuleHandleW(std::ptr::null()) };
+    if module.is_null() {
+        return Err(image_step_failed("GetModuleHandleW"));
+    }
+
+    // The device path (`\Device\HarddiskVolumeN\…`), grown until it fits: a full buffer means a truncated name.
+    let mut capacity: usize = 512;
+    let mut device = loop {
+        let mut buffer = vec![0u16; capacity];
+        // SAFETY: `buffer` holds `capacity` u16s and `capacity` is passed as `nsize`; `module` lies inside this image.
+        let written =
+            unsafe { GetMappedFileNameW(GetCurrentProcess(), module.cast(), buffer.as_mut_ptr(), capacity as u32) };
+        if written == 0 {
+            return Err(image_step_failed(STEP_MAPPED));
+        }
+        if (written as usize) < capacity {
+            buffer.truncate(written as usize);
+            break buffer;
+        }
+        capacity = capacity
+            .checked_mul(2)
+            .filter(|&doubled| doubled <= MAX_UNITS)
+            .ok_or_else(|| {
+                refuse(format!(
+                    "the launcher image path from {STEP_MAPPED} is longer than 64K units"
+                ))
+            })?;
+    };
+
+    // `\\?\GLOBALROOT` + the device path names the object by its NT path, which `CreateFileW` accepts.
+    let mut name: Vec<u16> = r"\\?\GLOBALROOT".encode_utf16().collect();
+    name.append(&mut device);
+    name.push(0);
+    // SAFETY: `name` is NUL-terminated; zero access (attributes only) and full sharing keep this open from blocking
+    // anything; the backup flag lets `CreateFileW` open a directory-like object.
+    let handle = unsafe {
+        CreateFileW(
+            name.as_ptr(),
+            FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(image_step_failed(STEP_OPEN));
+    }
+
+    let resolved = (|| {
+        let mut capacity: usize = 512;
+        loop {
+            let mut buffer = vec![0u16; capacity];
+            // SAFETY: `handle` is open and `buffer` holds `capacity` u16s, passed as `cchfilepath`.
+            let length = unsafe {
+                GetFinalPathNameByHandleW(
+                    handle,
+                    buffer.as_mut_ptr(),
+                    capacity as u32,
+                    FILE_NAME_NORMALIZED | VOLUME_NAME_DOS,
+                )
+            } as usize;
+            if length == 0 {
+                return Err(image_step_failed(STEP_FINAL));
+            }
+            // Below the capacity the length excludes the NUL; at or above it, it is the size to retry with.
+            if length < capacity {
+                buffer.truncate(length);
+                return wide_to_string(&buffer, STEP_FINAL);
+            }
+            capacity = length
+                .checked_add(1)
+                .filter(|&needed| needed <= MAX_UNITS)
+                .ok_or_else(|| {
+                    refuse(format!(
+                        "the launcher image path from {STEP_FINAL} is longer than 64K units"
+                    ))
+                })?;
+        }
+    })();
+    // SAFETY: `handle` is the valid handle opened above and is closed once.
+    unsafe { CloseHandle(handle) };
+
+    // `\\?\C:\…` and `\\?\UNC\…` lose their verbatim prefix where an ordinary path names the same file, so a
+    // comparison with a `PATH` entry is not defeated by the prefix.
+    Ok(dunce::simplified(Path::new(&resolved?)).to_string_lossy().into_owned())
 }
 
 impl core::ProgramFs for RealFs {
@@ -703,23 +871,19 @@ pub(super) fn run() -> Result<i32, ShimError> {
     let variable = |name: &str| std::env::var_os(name).map(|value| value.to_string_lossy().into_owned());
 
     let mut arguments = std::env::args_os();
-    let argv0 = arguments
-        .next()
-        .and_then(|argument| argument.into_string().ok())
-        .ok_or(ShimError::SelfPathFailure)?;
+    let argv0 = arguments.next().and_then(|argument| argument.into_string().ok());
     let cwd = std::env::current_dir()
         .ok()
         .and_then(|dir| dir.into_os_string().into_string().ok())
         .ok_or(ShimError::SelfPathFailure)?;
 
-    let started = started_path_unix(&argv0, &cwd, variable("PATH").as_deref(), &RealFs)?;
     let runfiles_dir = variable("RUNFILES_DIR");
     let context = LookupContext {
         cwd: &cwd,
         runfiles_dir: runfiles_dir.as_deref(),
         windows: false,
     };
-    let located = match locate(&started, &context, &RealFs)? {
+    let located = match lookup_unix(argv0.as_deref(), &context, variable("PATH").as_deref(), &RealFs)? {
         Probed::Direct(located) => located,
         Probed::Home(found) => return run_home(&found.home, &found.image, arguments.collect()),
     };
@@ -753,7 +917,7 @@ pub(super) fn run_windows(started: &str) -> Result<i32, ShimError> {
         runfiles_dir: runfiles_dir.as_deref(),
         windows: true,
     };
-    let located = match locate(started, &context, &RealFs)? {
+    let located = match locate_with(|| Ok(started.to_string()), &context, &RealFs)? {
         Probed::Direct(located) => located,
         Probed::Home(found) => {
             let stem = core::derive_stem(OsStr::new(&found.image))?;
@@ -1316,6 +1480,34 @@ mod tests {
         assert!(message.contains(started), "{message}");
     }
 
+    /// A home launcher needs no started path: `execve("/abs/launcher", ["cmake"])` with `cmake` off `PATH` runs it.
+    #[test]
+    #[cfg(unix)]
+    fn a_home_launcher_started_by_a_bare_argv0_off_path_runs_its_record() {
+        let image = "/store/render/bin/cmake";
+        let fs = FakeFs {
+            image: Some(image.to_string()),
+            ..FakeFs::default()
+        }
+        .with_file(
+            &format!("{image}.launch"),
+            br#"{"kind":"package","schema_version":1,"package_root":"/p"}"#,
+        );
+        let found = found(lookup_unix(Some("cmake"), &unix(None), Some(""), &fs));
+        assert_eq!(found.image, image);
+    }
+
+    /// A direct launcher still needs its started path, and refuses when the name resolves nowhere.
+    #[test]
+    #[cfg(unix)]
+    fn a_direct_launcher_started_by_an_unresolvable_argv0_is_an_own_path_failure() {
+        let fs = FakeFs::default().with_file("/store/render/bin/cmake.launch", &sidecar_json(VENDOR_A, SELF_PATH));
+        let err = lookup_unix(Some("cmake"), &unix(None), Some("/nowhere"), &fs).unwrap_err();
+        assert_eq!(err.exit_code(), 74);
+        let err = lookup_unix(None, &unix(None), Some("/nowhere"), &fs).unwrap_err();
+        assert_eq!(err.exit_code(), 74);
+    }
+
     #[test]
     #[cfg(unix)]
     fn a_bare_argv0_with_no_path_hit_is_an_own_path_failure() {
@@ -1734,6 +1926,90 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("ocx-shim-{label}-{}-{nanos}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    // ── V-L19: the kernel's image path, through a link ──────────────────
+
+    /// What this test binary reports when the next test starts a copy of it through a directory link.
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    fn probe_child_reports_its_image_and_started_paths() {
+        let image = RealFs.image_path().expect("an image path");
+        println!("IMAGE={image}");
+        println!("STARTED={}", std::env::args_os().next().unwrap_or_default().display());
+        println!("MODULE={}", std::env::current_exe().unwrap_or_default().display());
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    fn make_directory_link(target: &Path, link: &Path) {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, link).unwrap();
+        // A junction needs no privilege, unlike a symlink; it is what the `active` link is on Windows.
+        #[cfg(windows)]
+        {
+            #[expect(clippy::disallowed_types, reason = "a test starting its own copy")]
+            let output = std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(link)
+                .arg(target)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "mklink /J: {output:?}");
+        }
+    }
+
+    /// The launcher is started through `active` and loads from the render directory behind it: the image path names
+    /// the render directory, where the started path (and, on Windows, `GetModuleFileNameW`) names the link.
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    fn vl19_an_image_started_through_a_link_names_the_directory_behind_it() {
+        let base = canonicalize(&scratch_dir("image-link")).unwrap();
+        let render = base.join("render");
+        std::fs::create_dir(&render).unwrap();
+        let name = if cfg!(windows) { "probe.exe" } else { "probe" };
+        let binary = render.join(name);
+        std::fs::copy(std::env::current_exe().unwrap(), &binary).unwrap();
+        let link = base.join("active");
+        make_directory_link(&render, &link);
+
+        #[expect(clippy::disallowed_types, reason = "a test starting its own copy")]
+        let output = std::process::Command::new(link.join(name))
+            .args(["--nocapture", "probe_child_reports"])
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        assert!(
+            output.status.success(),
+            "{stdout}{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let reported = |key: &str| {
+            stdout
+                .lines()
+                .find_map(|line| line.strip_prefix(key))
+                .unwrap_or_else(|| panic!("no {key} line in {stdout}"))
+                .to_string()
+        };
+        let (image, started) = (reported("IMAGE="), reported("STARTED="));
+
+        let expected = binary.to_str().unwrap();
+        assert!(
+            if cfg!(windows) {
+                image.eq_ignore_ascii_case(expected)
+            } else {
+                image == expected
+            },
+            "image path {image} is not {expected}"
+        );
+        assert!(
+            started.contains("active"),
+            "the control did not go through the link: {started}"
+        );
+        assert!(!image.contains("active"), "{image}");
+        #[cfg(windows)]
+        assert!(reported("MODULE=").contains("active"));
+
+        std::fs::remove_dir_all(&base).unwrap();
     }
 
     #[test]
