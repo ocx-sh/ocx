@@ -8,7 +8,7 @@
 - **Tier-grammar:** 5
 - **Updated:** 2026-11-27
 - **Active phase:** 0 — second run planned (§ Second run); first run landed (ocx `9c9e32d4`, rules_ocx `401c9c4`)
-- **Step:** /hex-execute → wave 5 (PF), then X2
+- **Step:** /hex-execute → wave 6 (X2); PF merged, dev build D2 dispatched at `d9009ff6`
 - **Feature branch:** ocx `hex/bazel-rbe-rules-ocx` (pipelines on `hex/bazel-rbe-rules-ocx--<pipeline>`, worktrees under `.agents/worktrees/`); rules_ocx one branch `hex/bazel-rbe-rules-ocx`, its worktree `/home/mherwig/dev/ocx-sh/rules_ocx/.agents/worktrees/hex-bazel-rbe-rules-ocx` shared by the rules_ocx pipelines of a wave (DP-43)
 - **Last update:** 2026-11-27 (after edb7d754: merge pipeline I2; added fix pipelines LF, LF3, LF4, FXA, FXB, FXC before the second launcher rebuild)
 - **Next:** /hex-execute .claude/artifacts/plan_vendor_rules_ocx.md
@@ -1545,7 +1545,7 @@ on PF, IR, and act D2. Must not touch: code in either repository.
 | TD | . | C-135; V-L39 | `crates/ocx_config/src/env.rs` | 2 | LA | | merged |
 | TR | . | C-131…C-134, C-136, C-138; V-L28, V-L29 (render), V-L33, V-L34, V-L35, V-L42; DP-42 | § TR | 3 | EP, GC, PB; act M2 (variant) | hard | merged |
 | I2 | . | hub files; V-L41 and V-L53 gate halves | § Run 2 — hub files (ocx) | 4 | LA, VF, IX, PB, CI2, VA, HA1, HA2, DOC2, EP, GC, TD, TR | | merged |
-| PF | . | every local V-L row green, `mut` rows red/green | § PF | 5 | I2; act B | | pending |
+| PF | . | every local V-L row green, `mut` rows red/green | § PF | 5 | I2; act B | | merged |
 | RM | rules_ocx | C-RO-21…C-RO-23; MR-1…MR-4, MR-10, MR-11 | § RM | 1 | CW-R2 | | merged |
 | RL | rules_ocx | C-RO-18…C-RO-20, C-RO-26, C-RO-31; MR-5…MR-9, MR-12; goal rules item 4 (`--remote`) | § RL | 1 | CW-R2 | hard | merged |
 | RU | rules_ocx | C-RO-24, C-RO-25, C-RO-30; MR-14; DP-44 guard | § RU | 1 | CW-R2 | | merged |
