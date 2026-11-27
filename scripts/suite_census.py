@@ -137,7 +137,10 @@ SUITE = REPO_ROOT / "test"
 #: -> 3803 / 157 with three `test_lazy_loading.py` cases for deferred-tool launchers of an older release or another
 #: launcher generation: `tests` +3, `skipped` +2 (the older release's launcher is a POSIX shell script, so two of the
 #: three skip on `win32`).
-PINNED = {"tests": 3803, "skipped": 157, "xfailed": 2, "parametrized": 268}
+#: -> 3806 / 158 with three more `test_lazy_loading.py` cases (a deferred tool surviving `ocx clean`, the refusal of a
+#: hand-removed manifest, the re-exec loop guard through an older tree): `tests` +3, `skipped` +1 (the last skips on
+#: `win32`).
+PINNED = {"tests": 3806, "skipped": 158, "xfailed": 2, "parametrized": 268}
 
 #: Which way each number may move on its own. DEC-38 pinned all four to
 #: equality for the duration of the crate split, so that a refactor could not

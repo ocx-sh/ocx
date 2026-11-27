@@ -221,7 +221,9 @@ async fn write_shim_launchers(
     Ok(())
 }
 
-/// Links the closure's config blobs into the staged tree's `refs/blobs/`, their only GC root.
+/// Links the blobs the offline claim check reads into the staged tree's `refs/blobs/`, their only GC root: each
+/// node's config blob, its manifest, and the manifest each declared dependency edge names (an image index for an
+/// index dependency).
 ///
 /// Not `ReferenceManager::link_blobs`: a shim tree is neither in `packages/` nor has a `content/`.
 ///
@@ -238,12 +240,23 @@ async fn link_closure_config_blobs(
         .await
         .map_err(|e| PackageErrorKind::Internal(crate::error::file_error(&refs_blobs, e)))?;
 
-    for node in nodes {
-        let target = file_structure
-            .blobs
-            .data(node.identifier.registry(), &node.config_digest);
-        let link = refs_blobs.join(ocx_store::file_structure::cas_ref_name(&node.config_digest));
-        // `update`, not `create`: two nodes may share one config blob, or the second write fails `EEXIST`.
+    let edges = nodes
+        .iter()
+        .flat_map(|node| &node.dependencies)
+        .map(|edge| &edge.identifier);
+    let blobs = nodes
+        .iter()
+        .flat_map(|node| {
+            [
+                (node.identifier.registry(), node.config_digest.clone()),
+                (node.identifier.registry(), node.identifier.digest()),
+            ]
+        })
+        .chain(edges.map(|identifier| (identifier.registry(), identifier.digest())));
+    for (registry, digest) in blobs {
+        let target = file_structure.blobs.data(registry, &digest);
+        let link = refs_blobs.join(ocx_store::file_structure::cas_ref_name(&digest));
+        // `update`, not `create`: two nodes may share one blob, or the second write fails `EEXIST`.
         ocx_util::fs::symlink::update(&target, &link).map_err(|error| PackageErrorKind::Internal(error.into()))?;
     }
     Ok(())
