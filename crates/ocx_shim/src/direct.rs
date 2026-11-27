@@ -1296,7 +1296,7 @@ pub(super) fn run_windows(started: &str) -> Result<i32, ShimError> {
         core::append_quoted_arg(&mut command_line, text);
     }
     let block = environment_block(&launch.env);
-    super::spawn_child(Some(&launch.program), &command_line, Some(&block)).map_err(|win32| ShimError::SpawnFailure {
+    super::spawn_child(&launch.program, &command_line, Some(&block)).map_err(|win32| ShimError::SpawnFailure {
         win32,
         program: launch.program.clone(),
     })

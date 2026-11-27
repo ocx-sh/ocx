@@ -278,7 +278,7 @@ fn run_home(home: &core::HomeLaunch, image: &str, stem: &str) -> Result<i32, Shi
 
     // The program is absolute and passed as `lpApplicationName`, so `CreateProcessW` neither parses it out of the
     // command line (CWE-428: `C:\Program Files\…` → `C:\Program.exe`) nor searches any directory for it (CWE-427).
-    spawn_child(Some(&start.program), &command_line, Some(&block)).map_err(|last| match last {
+    spawn_child(&start.program, &command_line, Some(&block)).map_err(|last| match last {
         ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND => ShimError::OcxNotFound {
             program: start.program.clone(),
         },
@@ -334,9 +334,11 @@ fn create_kill_on_close_job() -> windows_sys::Win32::Foundation::HANDLE {
 /// Starts the child with `CreateProcessW` inside a kill-on-close job and returns its exit code, or the Win32 error of
 /// the failed spawn.
 ///
-/// `environment` is a complete `CREATE_UNICODE_ENVIRONMENT` block; `None` inherits this process's.
+/// `application_name` is required: a NULL one makes `CreateProcessW` search the application directory and the working
+/// directory for the program named on the command line (CWE-427). `environment` is a complete
+/// `CREATE_UNICODE_ENVIRONMENT` block; `None` inherits this process's.
 #[cfg(windows)]
-fn spawn_child(application_name: Option<&str>, command_line: &str, environment: Option<&[u16]>) -> Result<i32, u32> {
+fn spawn_child(application_name: &str, command_line: &str, environment: Option<&[u16]>) -> Result<i32, u32> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, INVALID_HANDLE_VALUE, WAIT_FAILED};
     use windows_sys::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE};
@@ -353,14 +355,14 @@ fn spawn_child(application_name: Option<&str>, command_line: &str, environment: 
         .collect();
     // A plain path past MAX_PATH fails with ERROR_PATH_NOT_FOUND (3); its `\\?\` form starts. The command line keeps
     // the path as given, so the child's `argv[0]` is unchanged.
-    let app_name_w: Option<Vec<u16>> = application_name.map(|p| {
-        let name = ocx_env_apply::windows_path::extended_length_path(p);
-        std::ffi::OsStr::new(name.as_deref().unwrap_or(p))
+    let app_name_w: Vec<u16> = {
+        let name = ocx_env_apply::windows_path::extended_length_path(application_name);
+        std::ffi::OsStr::new(name.as_deref().unwrap_or(application_name))
             .encode_wide()
             .chain(Some(0))
             .collect()
-    });
-    let app_name_ptr = app_name_w.as_ref().map_or(std::ptr::null(), |b| b.as_ptr());
+    };
+    let app_name_ptr = app_name_w.as_ptr();
     let environment_ptr = environment.map_or(std::ptr::null(), |block| block.as_ptr().cast());
     let environment_flag = if environment.is_some() {
         CREATE_UNICODE_ENVIRONMENT
@@ -501,7 +503,7 @@ fn spawn_child(application_name: Option<&str>, command_line: &str, environment: 
         }
     }
 
-    // SAFETY: `app_name_ptr` is NULL or a NUL-terminated buffer, `command_line_w` is mutable and NUL-terminated, and
+    // SAFETY: `app_name_ptr` is a NUL-terminated buffer, `command_line_w` is mutable and NUL-terminated, and
     // `startup_ex`'s attribute list is backed by `attr_list_buf`, `unique_handles` and `job_handle`; all outlive it.
     let mut created = unsafe {
         CreateProcessW(
