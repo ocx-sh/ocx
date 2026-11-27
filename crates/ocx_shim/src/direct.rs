@@ -2201,7 +2201,13 @@ mod tests {
 
     #[test]
     fn a_wide_name_of_any_length_up_to_the_nt_limit_fills_in_every_short_buffer_form() {
-        for form in ["more-data", "insufficient", "truncate", "truncate-minus-one", "required-size"] {
+        for form in [
+            "more-data",
+            "insufficient",
+            "truncate",
+            "truncate-minus-one",
+            "required-size",
+        ] {
             for units in [1usize, 511, 512, 513, 1024, 5000, 32767] {
                 let name: Vec<u16> = (0..units).map(|i| 0x41 + (i % 26) as u16).collect();
                 let filled = fill_wide(64 * 1024, fake_call(&name, form));
