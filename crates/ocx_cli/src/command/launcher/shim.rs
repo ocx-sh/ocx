@@ -113,7 +113,7 @@ impl LauncherShim {
         // Strip every deferred launcher directory of this package first (this release's, another
         // generation's, an older release's `shims/`), or an unshipped claimed name resolves into one of
         // them and `execvp(2)` re-enters forever at 100% CPU; an older script never bumps the depth.
-        let launcher_dirs = existing_launcher_dirs(context.file_structure(), &self.identifier).await;
+        let launcher_dirs = existing_launcher_dirs(context.file_structure(), &self.identifier).await?;
         if let Some(path) = process_env.get("PATH") {
             let pruned = launcher_dirs.iter().fold(path.to_os_string(), |path, dir| {
                 ocx_env_apply::remove_segment(&path, dir.as_os_str())
@@ -209,34 +209,48 @@ fn shim_claim_unfulfilled(package: &PinnedPackageRef, name: BinaryName) -> anyho
 /// `deferred/<G>/<id>/l` for every generation directory.
 ///
 /// Existing directories only: [`resolves_inside`] fails closed on a path it cannot canonicalize, so a
-/// missing candidate would make every answer "inside".
+/// missing candidate would make every answer "inside". An absent `deferred/` or candidate is empty; any other
+/// listing error is returned, since a shortened list would let the re-exec loop guard fail open.
 async fn existing_launcher_dirs(
     file_structure: &ocx_store::file_structure::FileStructure,
     package: &PinnedPackageRef,
-) -> Vec<std::path::PathBuf> {
+) -> anyhow::Result<Vec<std::path::PathBuf>> {
+    use anyhow::Context as _;
+
     let mut candidates = vec![file_structure.shims.shim_dir(package).bin()];
-    if let Ok(mut generations) = tokio::fs::read_dir(file_structure.deferred_root()).await {
-        while let Ok(Some(entry)) = generations.next_entry().await {
-            let generation = entry
-                .file_name()
-                .to_str()
-                .and_then(ocx_store::launcher_generation::LauncherGeneration::from_hex);
-            if let Some(generation) = generation {
-                candidates.push(file_structure.deferred(&generation).shim_dir(package).bin());
+    let root = file_structure.deferred_root();
+    match tokio::fs::read_dir(&root).await {
+        Ok(mut generations) => {
+            while let Some(entry) = generations
+                .next_entry()
+                .await
+                .with_context(|| format!("listing '{}'", root.display()))?
+            {
+                let generation = entry
+                    .file_name()
+                    .to_str()
+                    .and_then(ocx_store::launcher_generation::LauncherGeneration::from_hex);
+                if let Some(generation) = generation {
+                    candidates.push(file_structure.deferred(&generation).shim_dir(package).bin());
+                }
             }
         }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(anyhow::Error::new(error).context(format!("listing '{}'", root.display()))),
     }
     let mut existing = Vec::new();
     for candidate in candidates {
-        if tokio::fs::metadata(&candidate)
-            .await
-            .is_ok_and(|metadata| metadata.is_dir())
-        {
-            existing.push(candidate);
+        match tokio::fs::metadata(&candidate).await {
+            Ok(metadata) if metadata.is_dir() => existing.push(candidate),
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(anyhow::Error::new(error).context(format!("inspecting '{}'", candidate.display())));
+            }
         }
     }
     existing.sort();
-    existing
+    Ok(existing)
 }
 
 /// [`resolves_inside`] over every directory in `launcher_dirs`.
@@ -716,7 +730,10 @@ mod tests {
 
         let mut expected = vec![old, deferred];
         expected.sort();
-        assert_eq!(existing_launcher_dirs(&file_structure, &package).await, expected);
+        assert_eq!(
+            existing_launcher_dirs(&file_structure, &package).await.expect("lists"),
+            expected
+        );
 
         let inside = expected[0].join("cmake");
         std::fs::write(&inside, b"x").expect("seed launcher");
@@ -729,6 +746,29 @@ mod tests {
         assert!(
             !resolves_inside_any(&outside, &expected).await.expect("canonicalizes"),
             "a path outside every launcher directory is not"
+        );
+    }
+
+    /// An absent `deferred/` is an empty list; a `deferred/` that cannot be listed is an error naming the path.
+    #[tokio::test]
+    async fn the_launcher_dirs_treat_an_absent_deferred_root_as_empty_and_refuse_an_unlistable_one() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let file_structure = ocx_store::file_structure::FileStructure::with_root(home.path().to_path_buf());
+        assert!(
+            existing_launcher_dirs(&file_structure, &pinned())
+                .await
+                .expect("absent is empty")
+                .is_empty()
+        );
+
+        // A file where the directory belongs: listing fails with something other than "not found".
+        std::fs::write(file_structure.deferred_root(), b"x").expect("seed file");
+        let error = existing_launcher_dirs(&file_structure, &pinned())
+            .await
+            .expect_err("an unlistable root must not shorten the list");
+        assert!(
+            format!("{error:#}").contains("deferred"),
+            "the error names the path: {error:#}"
         );
     }
 

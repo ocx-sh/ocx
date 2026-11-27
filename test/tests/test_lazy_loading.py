@@ -1692,11 +1692,18 @@ def _publish_deferred_tree(
     ocx: OcxRunner, project: Path, pkg: PackageInfo
 ) -> tuple[Path, Path, str]:
     """Compose `pkg` lazily; return its `deferred/<G>` directory, the `l/` below it and the pinned identifier its launchers bake."""
+    return _publish_deferred_tree_named(ocx, project, pkg, "hello")
+
+
+def _publish_deferred_tree_named(
+    ocx: OcxRunner, project: Path, pkg: PackageInfo, name: str
+) -> tuple[Path, Path, str]:
+    """[`_publish_deferred_tree`] for a package whose launcher is called `name`."""
     export = _run(ocx, project, "env", "--shell=sh")
     assert export.returncode == EXIT_SUCCESS, f"ocx env --shell=sh failed:\n{export.stderr}"
     launcher_dir = assert_shim_dir_exists(ocx, pkg.repo, "the compose deferred the tool")
     generation = ocx.ocx_home / "deferred" / launcher_dir.relative_to(ocx.ocx_home / "deferred").parts[0]
-    identifier = json.loads((launcher_dir / "hello.launch").read_text())["identifier"]
+    identifier = json.loads((launcher_dir / f"{name}.launch").read_text())["identifier"]
     return generation, launcher_dir, identifier
 
 
@@ -1781,7 +1788,11 @@ def test_a_launcher_of_another_generation_still_runs_through_the_current_ocx(
 def test_a_name_the_package_does_not_declare_is_refused_through_an_older_tree(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    """An undeclared name through an older tree first on `PATH` exits 65 before any download, never a loop."""
+    """An undeclared name through an older tree first on `PATH` exits 65 before any download.
+
+    The name check in `validate_argv0` refuses it before the PATH strip and the containment guard run,
+    so this test does not reach the re-exec loop guard; the test below does.
+    """
     pkg, project = _lazy_hello(ocx, unique_repo, tmp_path)
     generation, launcher_dir, identifier = _publish_deferred_tree(ocx, project, pkg)
     old_bin = _seed_older_release_tree(ocx, generation, launcher_dir, identifier, ["hello", "ghost"])
@@ -1798,3 +1809,82 @@ def test_a_name_the_package_does_not_declare_is_refused_through_an_older_tree(
     )
     assert "ghost" in result.stderr and pkg.repo in result.stderr, result.stderr
     assert not _is_materialized(ocx, project, pkg), "an undeclared name must not download the package"
+
+
+def test_a_deferred_tool_never_started_survives_ocx_clean_and_then_starts(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """`ocx clean` keeps every blob the launcher's claim check reads, so a never-started tool still starts."""
+    pkg, project = _lazy_hello(ocx, unique_repo, tmp_path)
+    _, launcher_dir, _ = _publish_deferred_tree(ocx, project, pkg)
+    assert _run(ocx, project, "--format", "json", "clean").returncode == EXIT_SUCCESS
+
+    # No store probe before the start: `package which` would read the manifest back into the blob store.
+    result = _trigger_the_shim(ocx, project, launcher_dir, "hello")
+
+    assert result.returncode == EXIT_SUCCESS, (
+        f"rc={result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    assert pkg.marker in result.stdout, f"the tool's output must reach the caller: {result.stdout!r}"
+    assert _is_materialized(ocx, project, pkg), "the first start materializes the package"
+
+
+def test_a_deferred_launcher_whose_manifest_blob_was_removed_by_hand_refuses_and_downloads_nothing(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """A home that lost the metadata for another reason still refuses (79, `package_not_found`) before any download."""
+    pkg, project = _lazy_hello(ocx, unique_repo, tmp_path)
+    _, launcher_dir, identifier = _publish_deferred_tree(ocx, project, pkg)
+    hex_digest = identifier.rsplit("sha256:", 1)[1]
+    manifests = [
+        blob
+        for blob in (ocx.ocx_home / "blobs").rglob("data")
+        if "".join(blob.parent.parts[-2:]) == hex_digest[:32]
+    ]
+    assert len(manifests) == 1, f"precondition: one manifest blob for {hex_digest}: {manifests}"
+    manifests[0].unlink()
+
+    result = _trigger_the_shim(ocx, project, launcher_dir, "hello")
+
+    assert result.returncode == EXIT_NOT_FOUND, (
+        f"rc={result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    detailed = subprocess.run(
+        [str(ocx.binary), "--format", "json", "launcher", "shim", identifier, "--", "hello"],
+        cwd=project, capture_output=True, text=True, env=_shell_env(ocx), check=False,
+    )
+    assert detailed.returncode == EXIT_NOT_FOUND, detailed.stderr
+    error = json.loads(detailed.stdout)["error"]
+    assert error["detail"] == "package_not_found", error
+    # The refusal names the pinned digest; it carries no `ocx install` remedy text today.
+    assert hex_digest in error["message"], error
+    assert not _is_materialized(ocx, project, pkg), "a refused start must not download the package"
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32" or not hasattr(os, "killpg"),
+    reason="the older release's launcher is a POSIX shell script here, and the deadline kills the whole "
+    "process group; without killpg an execve loop would outlive the timeout",
+)
+def test_a_declared_name_the_package_lacks_ends_when_started_through_an_older_tree_still_on_path(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """The loop guard strips the older `shims/<id>/bin` from `PATH`, finds nothing and refuses (65); it never re-enters."""
+    pkg = make_package(
+        ocx, unique_repo, "1.0.0", tmp_path, bins=["real"], binaries=["ghost"], no_bin_scan=True, env=PUBLIC_BIN_PATH
+    )
+    project = _lazy_project(ocx, tmp_path, _toolchain_lazy(pkg, binding="ghost"))
+    generation, launcher_dir, identifier = _publish_deferred_tree_named(ocx, project, pkg, "ghost")
+    old_bin = _seed_older_release_tree(ocx, generation, launcher_dir, identifier, ["ghost"])
+
+    result = _run_in_its_own_process_group(
+        [str(old_bin / "ghost")],
+        cwd=project,
+        env=_shell_env(ocx, PATH=f"{old_bin}{os.pathsep}{os.environ['PATH']}"),
+        timeout=90,
+    )
+
+    assert result.returncode == EXIT_DATA_ERROR, (
+        f"rc={result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    assert "ghost" in result.stderr and pkg.repo in result.stderr, result.stderr
