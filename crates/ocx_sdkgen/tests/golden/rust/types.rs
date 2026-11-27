@@ -1456,10 +1456,12 @@ impl Unknowns for ClaimReport {
     }
 }
 
-/// Objects, temp directories and consent stamps a clean removed, or would remove in a dry run.
+/// Objects, temp directories, consent stamps and launcher directories a clean removed, or would
+/// remove in a dry run.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Clean {
-    /// One entry per resource: objects, then temp directories, then consent stamps.
+    /// One entry per resource: objects, then temp directories, then consent stamps, then launcher
+    /// directories.
     pub items: Vec<CleanEntry>,
 }
 
@@ -1502,6 +1504,8 @@ pub enum CleanKind {
     Temp,
     /// A `state/projects/<key>/` directory whose consent stamp was swept.
     Consent,
+    /// A superseded launcher generation directory.
+    Launchers,
     /// A value this SDK was not generated for, kept as sent.
     Unknown(String),
 }
@@ -1513,6 +1517,7 @@ impl CleanKind {
             Self::Object => "object",
             Self::Temp => "temp",
             Self::Consent => "consent",
+            Self::Launchers => "launchers",
             Self::Unknown(value) => value,
         }
     }
@@ -1523,6 +1528,7 @@ impl CleanKind {
             "object" => Self::Object,
             "temp" => Self::Temp,
             "consent" => Self::Consent,
+            "launchers" => Self::Launchers,
             _ => Self::Unknown(value),
         }
     }
@@ -7837,7 +7843,7 @@ impl Unknowns for PatchesView {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum PathKind {
-    /// The package root: the parent of `content/` and `entrypoints/`.
+    /// The package root: the parent of `content/` and `launchers/`.
     Package,
     /// The generated shim directory of a deferred tool. Its `bin/` holds one launcher per declared
     /// name; the package directory does not exist yet.

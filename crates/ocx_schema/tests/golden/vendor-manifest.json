@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "VendorManifest",
-  "description": "The vendor manifest, `https://ocx.sh/schemas/vendor-manifest/v1.json`.\n\nEvery path field is relative to `DIR`, `/`-separated; every list is sorted by its stated key so the bytes are stable.",
+  "description": "The vendor manifest, `https://ocx.sh/schemas/vendor-manifest/v2.json`.\n\nEvery path field is relative to `DIR`, `/`-separated; every list is sorted by its stated key so the bytes are stable.",
   "type": "object",
   "properties": {
     "schema_version": {
@@ -9,7 +9,7 @@
       "type": "integer",
       "format": "uint32",
       "minimum": 0,
-      "const": 1
+      "const": 2
     },
     "content": {
       "description": "`absent` after `--manifest-only`.",
@@ -49,7 +49,7 @@
       }
     },
     "selections": {
-      "description": "One entry in v1.",
+      "description": "One entry in v2.",
       "type": "array",
       "items": {
         "$ref": "#/$defs/Selection"
@@ -60,6 +60,13 @@
       "type": "array",
       "items": {
         "$ref": "#/$defs/Tool"
+      }
+    },
+    "index_lookups": {
+      "description": "Present only when the run had `--index`: every path under that directory that resolution read; sorted by\n`path`, each once.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/IndexLookup"
       }
     }
   },
@@ -103,12 +110,16 @@
           "description": "Platform-manifest digest.",
           "type": "string"
         },
+        "index_digest": {
+          "description": "Roots only: the image index digest the root was selected from; omitted for a platform-manifest identifier and\nfor every dependency.",
+          "type": "string"
+        },
         "package_dir": {
-          "description": "`packages/<registry>/<algorithm>/<2 hex>/<30 hex>`.",
+          "description": "`p/<HEX16>`.",
           "type": "string"
         },
         "content_dir": {
-          "description": "`<package_dir>/content`.",
+          "description": "`<package_dir>/c`.",
           "type": "string"
         },
         "dependencies": {
@@ -145,7 +156,7 @@
       ]
     },
     "EntryPoint": {
-      "description": "A launcher of the package under `<package_dir>/entrypoints/`.",
+      "description": "A launcher of the package under `<package_dir>/e/`.",
       "type": "object",
       "properties": {
         "name": {
@@ -154,6 +165,10 @@
         },
         "launcher_path": {
           "description": "Ends in `.exe` for a Windows platform.",
+          "type": "string"
+        },
+        "record_path": {
+          "description": "`<package_dir>/e/<name>.launch`, the record the launcher reads; present exactly when `launcher_path` is.",
           "type": "string"
         },
         "environment": {
@@ -388,7 +403,7 @@
           "type": "string"
         },
         "launcher_dir": {
-          "description": "`selections/<id>/shells/default/bin`.",
+          "description": "`l`.",
           "type": "string"
         }
       },
@@ -430,7 +445,11 @@
           "type": "string"
         },
         "launcher_path": {
-          "description": "`<launcher_dir>/<name>[.exe]`; omitted when no launcher blob exists for the platform.",
+          "description": "`l/<name>[.exe]`; omitted when no launcher blob exists for the platform.",
+          "type": "string"
+        },
+        "record_path": {
+          "description": "`l/<name>.launch`, the record the launcher reads; present exactly when `launcher_path` is.",
           "type": "string"
         }
       },
@@ -457,7 +476,25 @@
           "const": "entrypoint"
         }
       ]
+    },
+    "IndexLookup": {
+      "description": "One index document resolution read.",
+      "type": "object",
+      "properties": {
+        "path": {
+          "description": "Relative to the `--index` directory, `/`-separated.",
+          "type": "string"
+        },
+        "found": {
+          "description": "`false` when the document was absent.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "path",
+        "found"
+      ]
     }
   },
-  "$id": "https://ocx.sh/schemas/vendor-manifest/v1.json"
+  "$id": "https://ocx.sh/schemas/vendor-manifest/v2.json"
 }
