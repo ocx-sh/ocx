@@ -256,17 +256,17 @@ fn run() -> Result<i32, ShimError> {
                 .ok_or(ShimError::SelfPathFailure)?;
         }
     };
-    let stem = core::derive_stem(&module_path)?;
     let started = module_path.to_str().ok_or(ShimError::SelfPathFailure)?;
-    direct::run_windows(started, &stem)
+    direct::run_windows(started)
 }
 
-/// Starts `ocx` for a home-kind record: `home` picks the wire verb, `stem` is the tool name passed after `--`.
+/// Starts `ocx` for a home-kind record: `home` picks the wire verb, `stem` is the tool name passed after `--`, `image`
+/// is the launcher's image path.
 #[cfg(windows)]
-fn run_home(home: &core::HomeLaunch, started: &str, stem: &str) -> Result<i32, ShimError> {
+fn run_home(home: &core::HomeLaunch, image: &str, stem: &str) -> Result<i32, ShimError> {
     use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND};
 
-    let start = direct::prepare_home(home, started, true)?;
+    let start = direct::prepare_home(home, image, true)?;
     let mut caller_args: Vec<String> = Vec::new();
     for argument in std::env::args_os().skip(1) {
         caller_args.push(argument.into_string().map_err(|_| ShimError::DirectArgumentRefused {

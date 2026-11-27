@@ -46,6 +46,8 @@ impl std::fmt::Display for ReadError {
 
 /// The filesystem questions the lookup asks.
 pub(super) trait LookupFs {
+    /// The kernel's record of the loaded image, resolved once; the refusal when the platform names none.
+    fn image_path(&self) -> Result<String, ShimError>;
     /// The bytes of the sidecar at `path`; `Ok(None)` when nothing is there.
     fn read_sidecar(&self, path: &str) -> Result<Option<Vec<u8>>, ReadError>;
     /// The entry names of directory `dir`; empty when it is missing or unreadable.
@@ -74,7 +76,14 @@ pub(super) enum Probed {
     /// A decoded `direct` record and the root it was found for.
     Direct(Located),
     /// A `package`, `deferred` or `toolchain` record.
-    Home(core::HomeLaunch),
+    Home(HomeFound),
+}
+
+/// A home-kind record and the image path it was read beside: the launcher's own directory and `NAME` come from it.
+#[derive(Debug)]
+pub(super) struct HomeFound {
+    pub home: core::HomeLaunch,
+    pub image: String,
 }
 
 /// A decoded `.launch` sidecar bound to its vendor root.
@@ -253,8 +262,6 @@ fn accepts(root: &str, self_path: &str, raw: &[u8], windows: bool, fs: &dyn Look
 }
 
 /// The started path on Unix: `argv[0]` joined onto the working directory, or the first `PATH` hit for a bare name.
-///
-/// The result must be the running image: a `PATH` search can land on a file the process never started from.
 #[cfg(unix)]
 pub(super) fn started_path_unix(
     argv0: &str,
@@ -262,49 +269,73 @@ pub(super) fn started_path_unix(
     path_var: Option<&str>,
     fs: &dyn LookupFs,
 ) -> Result<String, ShimError> {
-    let started = if argv0.contains('/') {
-        absolutize(argv0, cwd, false)
-    } else {
-        path_var
-            .unwrap_or_default()
-            .split(':')
-            .map(|entry| join_path(&absolutize(entry, cwd, false), argv0, false))
-            .find(|candidate| fs.is_executable_file(candidate))
-            .ok_or(ShimError::SelfPathFailure)?
-    };
-    if !fs.is_running_image(&started) {
-        return Err(refuse(format!("started path {started} is not the running image")));
+    if argv0.contains('/') {
+        return Ok(absolutize(argv0, cwd, false));
     }
-    Ok(started)
+    path_var
+        .unwrap_or_default()
+        .split(':')
+        .map(|entry| join_path(&absolutize(entry, cwd, false), argv0, false))
+        .find(|candidate| fs.is_executable_file(candidate))
+        .ok_or(ShimError::SelfPathFailure)
 }
 
-/// Reads the record beside `started` and dispatches on its kind; for kind `direct`, also finds the vendor root.
+/// Reads `path` as a record file: `Ok(None)` when absent, the refusal naming `path` when it cannot be read.
+fn read_record(path: &str, fs: &dyn LookupFs) -> Result<Option<Vec<u8>>, ShimError> {
+    fs.read_sidecar(path)
+        .map_err(|err| refuse(format!("cannot read sidecar {path}: {err}")))
+}
+
+/// Decides the kind from the record beside the loaded image, then runs the started-path rules for kind `direct`.
 ///
-/// The root is the first candidate, in candidate order, whose own `<self>.launch` is byte-identical to the record
-/// beside the started path, so a stale tree holding another `vendor_id` is never taken.
+/// A record of a home kind beside the image runs from it, whatever path the launcher was started by. Kind `direct`
+/// (no record beside the image, or one of that kind) keeps the started path, because a runfiles tree reaches the
+/// launcher through links. Its root is the first candidate, in candidate order, whose own `<self>.launch` is
+/// byte-identical to the record beside the started path, so a stale tree holding another `vendor_id` is never taken.
 pub(super) fn locate(started: &str, context: &LookupContext<'_>, fs: &dyn LookupFs) -> Result<Probed, ShimError> {
     let windows = context.windows;
+    let image = fs.image_path()?;
+    let image_record = record_path_for(&image, windows);
+    let beside_image = read_record(&image_record, fs)?;
+    if let Some(raw) = &beside_image {
+        let record = LaunchRecord::decode(raw, windows)
+            .map_err(|err| refuse(format!("malformed sidecar {image_record}: {err}")))?;
+        if !matches!(record, LaunchRecord::Direct(_)) {
+            return core::HomeLaunch::from_record(record)
+                .map(|home| Probed::Home(HomeFound { home, image }))
+                .ok_or_else(|| refuse(format!("malformed sidecar {image_record}: not a runnable record")));
+        }
+    }
+
     let (_, file_name) = split_file_name(started, windows);
     if (if windows { strip_exe(file_name) } else { file_name }).is_empty() {
         return Err(ShimError::SelfPathFailure);
     }
+    // The image serves kind `direct` for this check only: a home kind never compares a `stat` with a later `open`.
+    #[cfg(unix)]
+    if !fs.is_running_image(started) {
+        return Err(refuse(format!("started path {started} is not the running image")));
+    }
 
     let record_path = record_path_for(started, windows);
-    let raw = match fs.read_sidecar(&record_path) {
-        Ok(Some(raw)) => raw,
-        Ok(None) => {
+    let raw = match if record_path == image_record {
+        Ok(beside_image)
+    } else {
+        read_record(&record_path, fs)
+    }? {
+        Some(raw) => raw,
+        None => {
             return Err(refuse(format!(
                 "sidecar not found: none of {record_path}; keep the launcher beside its .launch sidecar"
             )));
         }
-        Err(err) => return Err(refuse(format!("cannot read sidecar {record_path}: {err}"))),
     };
     let record =
         LaunchRecord::decode(&raw, windows).map_err(|err| refuse(format!("malformed sidecar {record_path}: {err}")))?;
     let LaunchRecord::Direct(sidecar) = record else {
-        return core::HomeLaunch::from_record(record)
-            .map(Probed::Home)
-            .ok_or_else(|| refuse(format!("malformed sidecar {record_path}: not a runnable record")));
+        return Err(refuse(format!(
+            "sidecar {record_path} is not of kind direct; a home kind runs from the record beside the launcher's image"
+        )));
     };
     let mut rejected: Vec<String> = Vec::new();
     for stage in 0..3 {
@@ -450,10 +481,39 @@ pub(super) fn plan_launch(
     }
 }
 
+/// The image path from the target of `/proc/self/exe`; the kernel appends ` (deleted)` once the file is unlinked, and
+/// the record beside a path that no longer exists would be another directory's.
+#[cfg(any(target_os = "linux", test))]
+fn checked_image_link(target: &str) -> Result<String, ShimError> {
+    if target.ends_with(" (deleted)") {
+        return Err(refuse(format!(
+            "the launcher image {target} was deleted after it started"
+        )));
+    }
+    Ok(target.to_string())
+}
+
 /// The real filesystem.
 struct RealFs;
 
 impl LookupFs for RealFs {
+    fn image_path(&self) -> Result<String, ShimError> {
+        #[cfg(target_os = "linux")]
+        {
+            let target = std::fs::read_link("/proc/self/exe").map_err(|_| ShimError::SelfPathFailure)?;
+            checked_image_link(target.to_str().ok_or(ShimError::SelfPathFailure)?)
+        }
+        // shortcut: macOS (`proc_pidpath`) and Windows (the mapped file by handle) still read `current_exe`, which
+        // names the started path there; the next launcher step replaces it.
+        #[cfg(not(target_os = "linux"))]
+        {
+            std::env::current_exe()
+                .ok()
+                .and_then(|path| path.into_os_string().into_string().ok())
+                .ok_or(ShimError::SelfPathFailure)
+        }
+    }
+
     fn read_sidecar(&self, path: &str) -> Result<Option<Vec<u8>>, ReadError> {
         read_regular_bounded(Path::new(path))
     }
@@ -579,12 +639,13 @@ fn check_containment(home: &core::HomeLaunch, ocx_home: Option<&OsStr>) -> Resul
     }
 }
 
-/// The containment check and the plan of a home launch over the process environment; `started` names the launcher.
-pub(super) fn prepare_home(home: &core::HomeLaunch, started: &str, windows: bool) -> Result<HomeStart, ShimError> {
+/// The containment check and the plan of a home launch over the process environment; `image` is the launcher's
+/// image path, whose directory the program search skips.
+pub(super) fn prepare_home(home: &core::HomeLaunch, image: &str, windows: bool) -> Result<HomeStart, ShimError> {
     #[expect(clippy::disallowed_methods, reason = "no ocx_env edge: the shim's size budget")]
     let inherited: Vec<(OsString, OsString)> = std::env::vars_os().collect();
     check_containment(home, core::environment_value(&inherited, "OCX_HOME", windows))?;
-    plan_home(home, split_file_name(started, windows).0, inherited, windows, &RealFs)
+    plan_home(home, split_file_name(image, windows).0, inherited, windows, &RealFs)
 }
 
 /// The refusal for a batch target whose path holds `%`: `cmd.exe` expands `%NAME%` inside the quoted script path,
@@ -616,10 +677,10 @@ fn exec_program(program: &str, args: &[OsString], env: Vec<(OsString, OsString)>
 
 /// Starts `ocx` for a home-kind record by replacing this process with it; returns only the failure.
 #[cfg(unix)]
-fn run_home(home: &core::HomeLaunch, started: &str, caller_args: Vec<OsString>) -> Result<i32, ShimError> {
-    let start = prepare_home(home, started, false)?;
+fn run_home(home: &core::HomeLaunch, image: &str, caller_args: Vec<OsString>) -> Result<i32, ShimError> {
+    let start = prepare_home(home, image, false)?;
     let mut args: Vec<OsString> = home
-        .arguments(split_file_name(started, false).1)
+        .arguments(split_file_name(image, false).1)
         .into_iter()
         .map(OsString::from)
         .collect();
@@ -660,7 +721,7 @@ pub(super) fn run() -> Result<i32, ShimError> {
     };
     let located = match locate(&started, &context, &RealFs)? {
         Probed::Direct(located) => located,
-        Probed::Home(home) => return run_home(&home, &started, arguments.collect()),
+        Probed::Home(found) => return run_home(&found.home, &found.image, arguments.collect()),
     };
 
     #[expect(clippy::disallowed_methods, reason = "no ocx_env edge: the shim's size budget")]
@@ -680,7 +741,7 @@ pub(super) fn run() -> Result<i32, ShimError> {
 /// A batch target goes through `std::process::Command`, whose batch-file escaping refuses what it cannot quote
 /// safely (BatBadBut, CVE-2024-24576), and anything else through the existing `CreateProcessW` path.
 #[cfg(windows)]
-pub(super) fn run_windows(started: &str, stem: &str) -> Result<i32, ShimError> {
+pub(super) fn run_windows(started: &str) -> Result<i32, ShimError> {
     #[expect(clippy::disallowed_methods, reason = "no ocx_env edge: the shim's size budget")]
     let runfiles_dir = std::env::var_os("RUNFILES_DIR").map(|value| value.to_string_lossy().into_owned());
     let cwd = std::env::current_dir()
@@ -694,7 +755,10 @@ pub(super) fn run_windows(started: &str, stem: &str) -> Result<i32, ShimError> {
     };
     let located = match locate(started, &context, &RealFs)? {
         Probed::Direct(located) => located,
-        Probed::Home(home) => return super::run_home(&home, started, stem),
+        Probed::Home(found) => {
+            let stem = core::derive_stem(OsStr::new(&found.image))?;
+            return super::run_home(&found.home, &found.image, &stem);
+        }
     };
 
     #[expect(clippy::disallowed_methods, reason = "no ocx_env edge: the shim's size budget")]
@@ -844,6 +908,8 @@ mod tests {
 
     const SELF_PATH: &str = "selections/default/shells/default/bin/cmake";
     const VENDOR_A: &str = "sha256:0b5f2a4e9c7d3b1a0b5f2a4e9c7d3b1a0b5f2a4e9c7d3b1a0b5f2a4e9c7d3b1a";
+    /// The image of a `FakeFs` that sets none: nothing is recorded beside it.
+    const NO_IMAGE: &str = "/nowhere/image";
     const VENDOR_B: &str = "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
 
     fn sidecar_json(vendor_id: &str, self_path: &str) -> Vec<u8> {
@@ -860,8 +926,14 @@ mod tests {
         dirs: HashMap<String, Vec<String>>,
         #[cfg(unix)]
         executables: HashSet<String>,
-        #[cfg(unix)]
+        /// The loaded image; `None` is an image with no record beside it.
         image: Option<String>,
+        /// Started paths that `stat` as the image (a symlink to it).
+        #[cfg(unix)]
+        links: HashSet<String>,
+        /// How many times the lookup asked whether a started path is the running image.
+        #[cfg(unix)]
+        identity_checks: std::cell::Cell<usize>,
     }
 
     impl FakeFs {
@@ -877,6 +949,9 @@ mod tests {
     }
 
     impl LookupFs for FakeFs {
+        fn image_path(&self) -> Result<String, ShimError> {
+            Ok(self.image.clone().unwrap_or_else(|| NO_IMAGE.to_string()))
+        }
         fn read_sidecar(&self, path: &str) -> Result<Option<Vec<u8>>, ReadError> {
             if self.unreadable.contains(path) {
                 return Err(ReadError::NotRegular);
@@ -892,7 +967,11 @@ mod tests {
         }
         #[cfg(unix)]
         fn is_running_image(&self, path: &str) -> bool {
-            self.image.as_deref() == Some(path)
+            self.identity_checks.set(self.identity_checks.get() + 1);
+            match self.image.as_deref() {
+                None => true,
+                Some(image) => image == path || self.links.contains(path),
+            }
         }
     }
 
@@ -907,7 +986,7 @@ mod tests {
     fn direct(probed: Probed) -> Located {
         match probed {
             Probed::Direct(located) => located,
-            Probed::Home(home) => panic!("expected a direct record, found {home:?}"),
+            Probed::Home(found) => panic!("expected a direct record, found {found:?}"),
         }
     }
 
@@ -1223,17 +1302,18 @@ mod tests {
         );
     }
 
-    /// The `PATH` hit is a different file than the running image.
+    /// A direct launcher started by a path that is not the loaded image.
     #[test]
     #[cfg(unix)]
-    fn v61_a_path_hit_that_is_not_the_running_image_is_refused() {
+    fn v61_a_direct_launcher_whose_started_path_is_not_the_image_is_refused() {
+        let started = "/shadow/cmake";
         let fs = FakeFs {
-            executables: HashSet::from(["/shadow/cmake".to_string()]),
             image: Some("/real/cmake".to_string()),
             ..FakeFs::default()
-        };
-        let err = started_path_unix("cmake", "/work", Some("/shadow"), &fs).unwrap_err();
-        assert_eq!(err.exit_code(), 78, "{}", err.stderr_message());
+        }
+        .with_file(&format!("{started}.launch"), &sidecar_json(VENDOR_A, SELF_PATH));
+        let message = refusal(locate(started, &unix(None), &fs));
+        assert!(message.contains(started), "{message}");
     }
 
     #[test]
@@ -1257,7 +1337,11 @@ mod tests {
         } else {
             "/vendor/bin/cmake.launch"
         };
-        locate(started, context, &FakeFs::default().with_file(record_path, raw))
+        let fs = FakeFs {
+            image: Some(started.to_string()),
+            ..FakeFs::default()
+        };
+        locate(started, context, &fs.with_file(record_path, raw))
     }
 
     #[test]
@@ -1281,7 +1365,7 @@ mod tests {
         use super::core::{HomeLaunch, ToolchainHome};
         let pinned = "ocx.sh/tool/cmake:3.28@sha256:0000000000000000000000000000000000000000000000000000000000000001";
         let home = |json: String| match locate_record(json.as_bytes(), &unix(None)).unwrap() {
-            Probed::Home(home) => home,
+            Probed::Home(found) => found.home,
             Probed::Direct(_) => panic!("a home record located as direct"),
         };
 
@@ -1313,6 +1397,137 @@ mod tests {
             matches!(&global, HomeLaunch::ToolchainHome(ToolchainHome::Global, None)),
             "{global:?}"
         );
+    }
+
+    // ── V-L15…V-L18: home kinds read the record beside the loaded image ───────
+
+    fn package_record(root: &str) -> Vec<u8> {
+        format!(r#"{{"kind":"package","schema_version":1,"package_root":"{root}"}}"#).into_bytes()
+    }
+
+    fn found(probed: Result<Probed, ShimError>) -> HomeFound {
+        match probed.expect("a home record") {
+            Probed::Home(found) => found,
+            Probed::Direct(located) => panic!("a home record located as direct: {located:?}"),
+        }
+    }
+
+    fn package_root(found: &HomeFound) -> &str {
+        match &found.home {
+            core::HomeLaunch::PackageRoot(root) => root,
+            other => panic!("not a package record: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn vl15_a_home_launcher_started_through_a_link_reads_the_record_beside_its_image() {
+        let image = "/store/render/bin/cmake";
+        let started = "/links/elsewhere/alias";
+        let fs = FakeFs {
+            image: Some(image.to_string()),
+            ..FakeFs::default()
+        }
+        .with_file(&format!("{image}.launch"), &package_record("/o/packages/p"));
+        let found = found(locate(started, &unix(None), &fs));
+        assert_eq!(found.image, image);
+        assert_eq!(package_root(&found), "/o/packages/p");
+        assert_eq!(split_file_name(&found.image, false), ("/store/render/bin/", "cmake"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn vl15_a_record_beside_the_started_link_alone_is_not_read_for_a_home_kind() {
+        let fs = FakeFs {
+            image: Some("/store/render/bin/cmake".to_string()),
+            links: HashSet::from(["/links/elsewhere/alias".to_string()]),
+            ..FakeFs::default()
+        }
+        .with_file("/links/elsewhere/alias.launch", &package_record("/o/packages/p"));
+        let message = refusal(locate("/links/elsewhere/alias", &unix(None), &fs));
+        assert!(message.contains("alias.launch"), "{message}");
+    }
+
+    #[test]
+    fn vl15_a_windows_home_launcher_reads_the_record_beside_its_image() {
+        let image = "C:\\store\\render\\bin\\cmake.exe";
+        let fs = FakeFs {
+            image: Some(image.to_string()),
+            ..FakeFs::default()
+        }
+        .with_file(
+            "C:\\store\\render\\bin\\cmake.launch",
+            &package_record("C:/o/packages/p"),
+        );
+        let found = found(locate("C:\\links\\alias.exe", &windows_context(), &fs));
+        assert_eq!(found.image, image);
+    }
+
+    /// Two render directories hold byte-identical launchers; `active` now names the other one.
+    #[test]
+    fn vl16_a_switched_active_link_does_not_change_the_record_the_loaded_image_reads() {
+        let fs = FakeFs {
+            image: Some("/home/shells/old/bin/cmake".to_string()),
+            ..FakeFs::default()
+        }
+        .with_file("/home/shells/old/bin/cmake.launch", &package_record("/o/packages/old"))
+        .with_file("/home/shells/new/bin/cmake.launch", &package_record("/o/packages/new"));
+        let found = found(locate("/home/active/bin/cmake", &unix(None), &fs));
+        assert_eq!(package_root(&found), "/o/packages/old");
+    }
+
+    /// A home kind is never paired with another directory by comparing a `stat` with a later `open`.
+    #[test]
+    #[cfg(unix)]
+    fn vl17_a_home_kind_makes_no_identity_check_between_the_started_path_and_the_image() {
+        let fs = FakeFs {
+            image: Some("/home/shells/old/bin/cmake".to_string()),
+            ..FakeFs::default()
+        }
+        .with_file("/home/shells/old/bin/cmake.launch", &package_record("/o/packages/old"));
+        // `/home/active/bin/cmake` is not the image's file: an identity compare would refuse it.
+        assert_eq!(
+            package_root(&found(locate("/home/active/bin/cmake", &unix(None), &fs))),
+            "/o/packages/old"
+        );
+        assert_eq!(fs.identity_checks.get(), 0);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn vl17_a_direct_kind_keeps_the_identity_check() {
+        let started = format!("/vendor/{SELF_PATH}");
+        let fs = FakeFs::default().with_file(&format!("{started}.launch"), &sidecar_json(VENDOR_A, SELF_PATH));
+        direct(locate(&started, &unix(None), &fs).unwrap());
+        assert_eq!(fs.identity_checks.get(), 1);
+    }
+
+    #[test]
+    fn vl18_an_image_path_the_kernel_marks_deleted_is_refused() {
+        let err = checked_image_link("/store/render/bin/cmake (deleted)").unwrap_err();
+        assert_eq!(err.exit_code(), 78, "{}", err.stderr_message());
+        assert!(err.stderr_message().contains("deleted"), "{}", err.stderr_message());
+        assert_eq!(
+            checked_image_link("/store/render/bin/cmake").unwrap(),
+            "/store/render/bin/cmake"
+        );
+    }
+
+    /// A runfiles tree reaches a vendored launcher through a link: kind `direct` keeps the started path.
+    #[test]
+    #[cfg(unix)]
+    fn a_direct_launcher_reached_through_a_link_reads_the_record_at_the_started_path() {
+        let started = format!("/runfiles/_main/{SELF_PATH}");
+        let image = format!("/external/vendor/{SELF_PATH}");
+        let bytes = sidecar_json(VENDOR_A, SELF_PATH);
+        let fs = FakeFs {
+            image: Some(image.clone()),
+            links: HashSet::from([started.clone()]),
+            ..FakeFs::default()
+        }
+        .with_file(&format!("{started}.launch"), &bytes)
+        .with_file(&format!("{image}.launch"), &bytes);
+        let located = direct(locate(&started, &unix(None), &fs).unwrap());
+        assert_eq!(located.root, "/runfiles/_main");
     }
 
     /// A NUL in a value ends its `KEY=VALUE` entry in a Windows environment block, so the rest would be a new entry.
