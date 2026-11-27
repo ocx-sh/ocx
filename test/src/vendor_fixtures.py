@@ -188,7 +188,7 @@ def assert_short_layout(out: Path, manifest: dict) -> None:
             assert f"p/{parts[1]}" in shorts, f"unknown package directory {rel}"
             if len(parts) >= 3:
                 assert parts[2] in ("c", "e"), f"unexpected entry {rel}"
-            if len(parts) >= 4 and parts[2] == "e":
+            if len(parts) >= 5 and parts[2] == "e":
                 raise AssertionError(f"nested entry under e/: {rel}")
 
 
