@@ -1589,7 +1589,7 @@ mod tests {
         assert_eq!(located.sidecar.vendor_id, VENDOR_A);
     }
 
-    // ── V-L08: the launcher reads only NAME.launch ─────────────────────────
+    // ── the launcher reads only NAME.launch ─────────────────────────
 
     fn windows_context() -> LookupContext<'static> {
         LookupContext {
@@ -2035,7 +2035,7 @@ mod tests {
         );
     }
 
-    // ── V-L15…V-L18: home kinds read the record beside the loaded image ───────
+    // ── home kinds read the record beside the loaded image ───────
 
     fn package_record(root: &str) -> Vec<u8> {
         format!(r#"{{"kind":"package","schema_version":1,"package_root":"{root}"}}"#).into_bytes()
@@ -2433,7 +2433,7 @@ mod tests {
         dir
     }
 
-    // ── V-L19: the kernel's image path, through a link ──────────────────
+    // ── the kernel's image path, through a link ──────────────────
 
     /// What this test binary reports when the next test starts a copy of it through a directory link.
     #[test]

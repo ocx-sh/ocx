@@ -819,7 +819,7 @@ mod tests {
         ]
     }
 
-    /// V-L02: `encode` is compact JSON, `kind` first, then a newline, byte-equal to the specified examples.
+    /// `encode` is compact JSON, `kind` first, then a newline, byte-equal to the specified examples.
     #[test]
     fn contract_encode_is_byte_equal_to_the_four_examples() {
         for (text, record) in goldens() {
@@ -827,7 +827,7 @@ mod tests {
         }
     }
 
-    /// V-L01: one valid record per kind decodes to the record that encodes to it.
+    /// One valid record per kind decodes to the record that encodes to it.
     #[test]
     fn contract_decode_accepts_one_valid_record_per_kind() {
         for (text, record) in goldens() {
@@ -840,7 +840,7 @@ mod tests {
         }
     }
 
-    /// V-L01: a key the kind's struct lacks is refused, whether unknown or a sibling kind's.
+    /// A key the kind's struct lacks is refused, whether unknown or a sibling kind's.
     #[test]
     fn contract_decode_refuses_extra_key() {
         let extra = GOLDEN_PACKAGE.replace('}', r#","extra":1}"#);
@@ -886,7 +886,7 @@ mod tests {
         }
     }
 
-    /// V-L01: the struct's `kind` must equal the peek; a direct record whose own `kind` says otherwise is refused.
+    /// The struct's `kind` must equal the peek; a direct record whose own `kind` says otherwise is refused.
     #[test]
     fn contract_validate_refuses_a_struct_kind_other_than_the_peek() {
         let LaunchRecord::Direct(mut record) = golden_direct() else {
@@ -933,7 +933,7 @@ mod tests {
         }
     }
 
-    /// V-L03: `tier = project` holds exactly when `project_root` is present and absolute.
+    /// `tier = project` holds exactly when `project_root` is present and absolute.
     #[test]
     fn contract_toolchain_tier_mismatch_is_refused() {
         let project_without_root = toolchain(ToolchainTier::Project, None, None);
@@ -951,7 +951,7 @@ mod tests {
         assert_eq!(toolchain(ToolchainTier::Global, None, None).validate(false), Ok(()));
     }
 
-    /// V-L03: `ocx`, when present, is absolute and not a batch file.
+    /// `ocx`, when present, is absolute and not a batch file.
     #[test]
     fn contract_toolchain_ocx_is_absolute_and_not_a_batch_file() {
         let relative = toolchain(ToolchainTier::Global, None, Some("bin/ocx"));
@@ -960,7 +960,7 @@ mod tests {
         assert!(batch.validate(true).is_err());
     }
 
-    /// V-L04: the vendor token is refused in every kind but `direct`.
+    /// The vendor token is refused in every kind but `direct`.
     #[test]
     fn contract_token_outside_direct_is_refused() {
         let package = PackageRecord {
@@ -989,7 +989,7 @@ mod tests {
         ));
     }
 
-    /// V-L04: `package_root` is absolute on any host; `deferred.identifier` is pinned.
+    /// `package_root` is absolute on any host; `deferred.identifier` is pinned.
     #[test]
     fn contract_package_root_is_absolute_and_identifier_is_pinned() {
         let relative = PackageRecord {
@@ -1009,7 +1009,7 @@ mod tests {
         assert_eq!(golden_deferred().validate(false), Ok(()));
     }
 
-    /// V-L05: the record path drops one `.exe` (any case) on Windows only.
+    /// The record path drops one `.exe` (any case) on Windows only.
     #[test]
     fn contract_record_path_for_windows_drops_the_exe() {
         assert_eq!(record_path_for("C:\\a\\cmake.exe", true), "C:\\a\\cmake.launch");
@@ -1025,7 +1025,7 @@ mod tests {
         assert_eq!(record_path_for("/a.exe/foo", false), "/a.exe/foo.launch");
     }
 
-    /// V-L39: `peek_kind` reads the `kind` of any object holding a valid one and validates nothing else.
+    /// `peek_kind` reads the `kind` of any object holding a valid one and validates nothing else.
     #[test]
     fn contract_peek_kind_ignores_every_other_key() {
         for (text, record) in goldens() {
