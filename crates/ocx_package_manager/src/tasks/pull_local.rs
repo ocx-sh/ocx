@@ -655,21 +655,22 @@ mod tests {
         let result = mgr.pull_local(&identifier, info, &[], Some(&dest)).await;
         let _install_info = result.expect("pull_local with dest_override must succeed");
 
-        // Launchers are written to `{dest}/entrypoints/`. Scan any launcher
-        // script and assert its body contains the override root path.
-        let entrypoints_dir = dest.join("entrypoints");
+        // Launchers are written to `{dest}/launchers/<G>/`, each record naming the override root.
+        let generation = ocx_store::launcher_generation::LauncherGeneration::host().unwrap();
+        let launchers_dir = dest.join("launchers").join(generation.as_str());
         assert!(
-            entrypoints_dir.exists(),
-            "entrypoints dir must exist when entrypoints are declared"
+            launchers_dir.exists(),
+            "launchers dir must exist when entrypoints are declared"
         );
-        let launcher_contains_override =
-            std::fs::read_dir(&entrypoints_dir)
-                .unwrap()
-                .filter_map(|e| e.ok())
-                .any(|entry| {
-                    let contents = std::fs::read_to_string(entry.path()).unwrap_or_default();
-                    contents.contains(dest.to_str().unwrap())
-                });
+        assert!(!dest.join("entrypoints").exists(), "entrypoints/ is never written");
+        let launcher_contains_override = std::fs::read_dir(&launchers_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "launch"))
+            .any(|entry| {
+                let contents = std::fs::read_to_string(entry.path()).unwrap_or_default();
+                contents.contains(&serde_json::to_string(dest.to_str().unwrap()).unwrap())
+            });
         assert!(
             launcher_contains_override,
             "at least one launcher script must contain the override dest path '{}'",

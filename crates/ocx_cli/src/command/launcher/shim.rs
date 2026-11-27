@@ -112,8 +112,15 @@ impl LauncherShim {
 
         // Strip the shim `bin/` first, or an unshipped claimed name resolves back here and `execvp(2)`
         // re-enters forever at 100% CPU. `prepare_lazy` cannot catch that claim: no content exists yet.
-        let shim_bin = context.file_structure().shims.shim_dir(&self.identifier).bin();
-        if let Some(path) = process_env.get("PATH") {
+        // No launcher blob for this host means no tree was ever published: nothing to prune.
+        let shim_bin = ocx_store::launcher_generation::LauncherGeneration::host().map(|generation| {
+            context
+                .file_structure()
+                .deferred(&generation)
+                .shim_dir(&self.identifier)
+                .bin()
+        });
+        if let (Some(shim_bin), Some(path)) = (&shim_bin, process_env.get("PATH")) {
             let pruned = ocx_env_apply::remove_segment(path, shim_bin.as_os_str());
             process_env.set("PATH", pruned);
         }
@@ -121,11 +128,14 @@ impl LauncherShim {
         // Two signals, since `remove_segment` compares exactly: a name `PATH` lacks, and an answer that
         // resolves back inside the shim tree. Neither may reach `exec`.
         let resolved = resolve_claimed(&process_env, &self.identifier, name.clone())?;
-        if resolves_inside(resolved.clone(), shim_bin.clone()).await? {
+        if let Some(shim_bin) = shim_bin
+            && resolves_inside(resolved.clone(), shim_bin).await?
+        {
             return Err(shim_claim_unfulfilled(&self.identifier, name));
         }
 
         // Resolved once for record and launch, or the audit trail could name a binary that did not run.
+        let deferred_root = context.file_structure().deferred_root();
         let launch = Launch::recording(
             process_env,
             RecordInputs {
@@ -133,7 +143,7 @@ impl LauncherShim {
                 admitted: &admitted,
                 executable: &resolved,
                 store_root: context.file_structure().packages.root(),
-                shim_root: context.file_structure().shims.root(),
+                shim_root: &deferred_root,
                 argv: &self.argv,
                 config: context.recorded_config(),
                 insecure_registries: context.insecure_hosts(),
