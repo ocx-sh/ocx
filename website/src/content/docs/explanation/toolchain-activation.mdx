@@ -114,7 +114,7 @@ A trampoline is the native launcher plus a record `<name>.launch` of kind `toolc
 {"kind":"toolchain","schema_version":1,"tier":"project","project_root":"/home/dana/work/api","ocx":"/home/dana/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx"}
 ```
 
-The launcher removes `OCX_GLOBAL` and `OCX_PROJECT` from the child environment. It then runs `ocx --project <project_root> exec -- <name>`, or `ocx --global exec -- <name>` for the global toolchain. Two values are stored and nothing else: the toolchain tier with its project root, and the absolute path to `ocx`. No tool path, no digest, no environment. The exec it runs layers over the environment the caller already has, like any explicit [`ocx exec`][cmd-run].
+The launcher removes `OCX_GLOBAL` and `OCX_PROJECT` from the child environment. It then runs `ocx --project <project_root> exec -- <name>`, or `ocx --global exec -- <name>` for the global toolchain. Two values are stored and nothing else: which toolchain it serves, project or global, with its project root, and the absolute path to `ocx`. No tool path, no digest, no environment. The exec it runs layers over the environment the caller already has, like any explicit [`ocx exec`][cmd-run].
 
 Two consequences follow directly. A config edit takes effect with no re-render: change `[env]`, add a binding, flip [`pinned`][config-pinned], and the next invocation composes against the new file. The trampoline record is byte-identical either way. And there is no stored value that can drift. The lock decides at call time which package a name resolves to, not what the renderer saw.
 
