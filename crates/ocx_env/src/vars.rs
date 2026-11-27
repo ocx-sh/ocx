@@ -6,18 +6,15 @@
 crate::env_vars! {
     // ── Core configuration ──
 
-    /// Absolute path to the running `ocx`, set on every spawn so a child OCX runs the
-    /// same binary, not whatever `$PATH` resolves.
+    /// Absolute path to the running `ocx`, set on every spawn so a child OCX runs the same
+    /// binary, not whatever `$PATH` resolves.
     ///
-    /// Set by OCX on every subprocess it spawns, so the inner `ocx launcher exec` of a generated
-    /// launcher runs the binary that installed the package. Unset or empty, a launcher falls
-    /// back to the `ocx` its record names (toolchain launchers only), else the first `ocx` on
-    /// `PATH`; set it by hand only to pin a specific binary.
-    ///
-    /// An empty value counts as unset on every platform. The `PATH` walk takes absolute entries
-    /// only and skips the launcher's own directory and any other launcher. The value is the
-    /// installed `ocx` path when the running binary is that one and the path is safely owned,
-    /// else the running binary; never empty.
+    /// Set it by hand only to pin a specific `ocx`; the pin must be an absolute path. Unset, or
+    /// empty (empty counts as unset on every platform), a launcher falls back to the `ocx` its
+    /// record names (toolchain launchers only), else the first `ocx` on `PATH`. That walk takes
+    /// absolute entries only and skips the launcher's own directory and any other launcher.
+    /// OCX sets the installed `ocx` path when the running binary is that one and the path is
+    /// safely owned, else the running binary; never empty.
     pub OCX_BINARY_PIN: Path, Public, propagation = BinaryPin;
     /// The OCX data root — `$OCX_HOME`, else `~/.ocx`.
     ///
