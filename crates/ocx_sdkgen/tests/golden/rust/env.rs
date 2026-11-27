@@ -61,7 +61,7 @@ pub const PUBLIC: &[EnvVar] = &[
     EnvVar {
         name: "OCX_BINARY_PIN",
         value: "path",
-        summary: "Absolute path to the running `ocx`, set on every spawn so a child OCX runs the",
+        summary: "Absolute path to the running `ocx`, set on every spawn so a child OCX runs the same",
         secret: false,
     },
     EnvVar {
