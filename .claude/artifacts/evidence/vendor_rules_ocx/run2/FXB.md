@@ -1,0 +1,16 @@
+# FXB evidence (test, script and docs fixes)
+
+| Item | Commit | Red | Green |
+|---|---|---|---|
+| 1 helpers | 1881454d | helpers walked `shims/…/bin` | helpers glob `deferred/*/<registry>/<repo>/*/*/*/l`; the duplicate local copy in `test_lazy_loading.py` is deleted. `exists` still demands exactly one tree and `absent` is paired with a prior `exists` in every caller. Not run (needs an `ocx` binary): acceptance modules. `shell_bin` in `test_trampoline_exec.py` is kept: the `toolchain_fixtures` one falls back to `shells/default` and does not assert the `default-<16 hex>` spelling, so dropping it would lose a guard. |
+| 2 windows shim | none | no 69 or "ocx not found" remains in `test_windows_shim.py`; it already expects 78 and `no ocx found on PATH`, which matches `crates/ocx_shim/src/core.rs:298` and the launcher record | no change needed |
+| 3 tag guard | 1881454d | `test_bazel_tag_guard.py`: 5 failed, 7 passed (`tag-uncached-unlisted`, `//test:test_clean reads ['ocx.toml']`) | 12 passed. Cause: `src/toolchain_fixtures.py` now imports `previous_release`, which reads root `ocx.toml`; 15 importing modules declare `_PROJECT_TOOLCHAIN`, `test_trampoline_exec` extends its list. `buildifier` over `test/BUILD.bazel` not run. |
+| 4 OCX_GLOBAL | 97161d24 | `test_deprecated_spellings.py`: 9 hits in 4 files | 6 passed. `OCX_GLOBAL` is withdrawn (selects nothing); the launcher tests export it to prove the `toolchain` kind removes it from the child, so the four files join `ENV_FROZEN_BODIES`. |
+| 5 ratchet | f53481f0, 98cc7455 | `test_code_docs_ratchet`: LEN-03 rises in `launcher_fixtures.py`, `test_self_update.py`, `test_toolchain_activate.py`, `test_toolchain_render.py`; bare-id-test and short-label rises in 15 test modules | every rise inside the file set is gone; the test still fails on rises in `crates/**` and `.claude/tests/test_workflows.py` (outside the file set) |
+| 6 docs lints | 478f9521 | 2 failed (cmake, unreal identifier) | `test_docs_real_packages.py`: 25 passed; example now `node.launch` with `ocx.sh/nodejs/node:24` |
+| 7 old names | 54e7c2b0, 0802c611 | `.direct` sidecar, `shells/default/bin` trampolines, three glossary entries and the vocabulary row named the old forms | `.claude/tests`: 697 passed, 21 skipped. `subsystem-file-structure.md` and `subsystem-package-manager.md` already describe the current layout. |
+| 8 scoped_gate | none | `scoped_gate.py --plan` exits 0 under scratch `HOME` and `OCX_HOME`; the error came from the interactive shell's per-prompt `ocx` hook reading `$OCX_HOME/ocx.toml`, not from the script | no change needed |
+| 9 other rows | none | the lint and script rows of the CI table are items 3 to 6 | n/a |
+| 10 final | | `ruff check` over the 18 touched Python files: passed. `test/lint`: 808 passed, 2 failed (below). | `ruff format --check` is not a repo gate and wants 88 columns on files that never had it. |
+
+Open reds outside the file set: `test_code_docs_ratchet.py` (rises in `crates/ocx_env_apply`, `ocx_package_manager`, `ocx_shim`, `ocx_store`, `ocx_cli/command/clean.rs`, and `.claude/tests/test_workflows.py`); `test_testing_marker.py` (`__OCX_TESTING_SHIM_LOST_PUBLISH_RACE` is declared in `crates/ocx_env/src/vars.rs` and read by no Rust code).
