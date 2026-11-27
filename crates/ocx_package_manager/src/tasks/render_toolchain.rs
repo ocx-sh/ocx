@@ -773,7 +773,7 @@ fn is_render_dir_name(name: &str) -> bool {
 }
 
 /// Whether `directory` is a real directory whose `bin/` holds exactly `expected`, entry for entry. Blocking.
-fn directory_matches(directory: &Path, expected: &BTreeMap<String, BinEntryStamp>) -> bool {
+pub(crate) fn directory_matches(directory: &Path, expected: &BTreeMap<String, BinEntryStamp>) -> bool {
     let bin = directory.join(TRAMPOLINE_BIN_DIR);
     // `symlink_metadata`: a linked directory is never trusted, it may resolve anywhere.
     let real_directory = |path: &Path| std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir());
