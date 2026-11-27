@@ -39,7 +39,7 @@ tasks:
           project-lock/v4.json
           project/v1.json
           reports/v1.json
-          vendor-manifest/v1.json'
+          vendor-manifest/v2.json'
           expected=$(printf '%s\n' "$expected" | sort)
           err=$(mktemp)
           trap 'rm -f "$err" "{{.SCHEMA_DIR}}"/*/*.new' EXIT
