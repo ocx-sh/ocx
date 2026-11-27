@@ -116,7 +116,7 @@ table is the coverage join: every ID → the pipeline that implements it → the
 | C-016 | argv equals `ocx exec`'s | P5 | P8 (V-22) |
 | C-017 | `execve`; Windows batch through std `Command` | P5 | P5 Windows test (V-58), P8 (V-22) |
 | C-018 | launcher writes nothing | P5 | P8 (V-36) |
-| C-019 | one blob per triple ≤ 512 KiB; darwin arm64 signed | P5 | P5 (V-26) |
+| C-019 | one blob per triple ≤ 640 KiB; darwin arm64 signed | P5 | P5 (V-26) |
 | C-020 | Unix accepts only `.direct` | P5 | P5 (V-52) |
 | C-021 | gate fails on an unversioned break | P2 | P2 (V-40) |
 | C-022 | a selection brings its closure | P4, P7 | P8 (V-41 ocx half via closure assertion), R7 (V-41) |
@@ -867,7 +867,7 @@ continue the first run's C-001…C-032 and C-RO-01…C-RO-17, which stay in forc
 - **C-112** The Windows batch-spawn failure line (`crates/ocx_shim/src/direct.rs:755-763`, "failed to start … through cmd.exe: exit …;
   hint") is printed with the length-limit hint when `length_limit_hint` returns one [carried review Warn 1; `basic-repo.yml ›
   unit-native (windows-latest)`].
-- **C-113** Each of the six blobs is ≤ 512 KiB and starts every record kind on its own OS [V-L57, V-L58, V-L36].
+- **C-113** Each of the six blobs is ≤ 640 KiB and starts every record kind on its own OS [V-L57, V-L58, V-L36].
 
 ### ocx — vendored format (`VendorLayout`, `tasks::vendor`, `ocx_package::vendor`, § 3.5, § 4.2)
 

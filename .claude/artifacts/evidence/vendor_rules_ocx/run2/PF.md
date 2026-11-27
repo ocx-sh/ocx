@@ -95,12 +95,12 @@ V-L22, V-L24 and V-L41 (constant G, `clean` generations) and V-L60 are in the ta
    inside `index_platforms` is extracted into `offered_platforms` so the `any` offer is observable without a registry. Red by
    making a flat manifest offer an empty set; green restored.
 
-## Rows not proven
+## Rows proven after the first pass
 
-- V-L43c, key `\s` unescape (`Some(b's') if key => out.push(b' ')` changed to `b'_'` in `ocx_shim/src/direct.rs`): stays green
-  (164 passed, rc=0). The key is only suffix-checked against `/<self path>.launch` and the self path used by every fixture has no
-  space, so no test can observe the key unescape. A test needs `split_manifest_line(b" a\\sb/x t") == Some((b"a b/x", b"t"))`. It
-  belongs in `crates/ocx_shim/src/direct.rs`, outside the PFB file set. Not proven.
+- V-L43c, key `\s` unescape. Test `vl43_an_escaped_key_reads_backslash_s_as_a_space` in `crates/ocx_shim/src/direct.rs` calls
+  `split_manifest_line` directly, because the lookup only suffix-checks a key. Green: `cargo test -p ocx_shim
+  vl43_an_escaped_key` gives 1 passed (filtered run). Mutation `Some(b's') if key => out.extend([b'\\', b's'])` landed
+  (grep line 388): the test reds with left `a\sb/x`, right `a b/x`. File restored from its copy, test green again.
 
 ## CI only, or another pipeline
 

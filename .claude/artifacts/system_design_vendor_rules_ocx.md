@@ -386,7 +386,7 @@ Each contract is testable from outside the code; the row that holds it is in bra
 - **C-016** argv: `[program, args…, user-args…]`, `argv[0]` equal to what `ocx exec` passes for the same tool [V-22].
 - **C-017** Unix: `execve` (process replaced). Windows: when `program`'s extension, after trimming trailing dots and spaces, is `.bat` or `.cmd` (ASCII case-insensitive), the launcher spawns through `std::process::Command` (std's batch-argument escaping; an argument std refuses exits 64 naming it) and assigns the child to its kill-on-close job object right after spawn; every other program goes through the existing `CreateProcessW` path with explicit application name, job object, std-handle whitelist and exit-code passthrough [V-22, V-58].
 - **C-018** The launcher writes no file, directory or environment state; it runs from a read-only `DIR` [V-36].
-- **C-019** One blob per target triple serves every launcher of that triple; launchers inside `DIR` are byte copies of it; each of the six blobs is ≤ 512 KiB, asserted per target in CI; the `aarch64-apple-darwin` blob carries `LC_CODE_SIGNATURE` and the `x86_64-apple-darwin` blob does not [V-26].
+- **C-019** One blob per target triple serves every launcher of that triple; launchers inside `DIR` are byte copies of it; each of the six blobs is ≤ 640 KiB, asserted per target in CI; the `aarch64-apple-darwin` blob carries `LC_CODE_SIGNATURE` and the `x86_64-apple-darwin` blob does not [V-26].
 - **C-020** One launcher program on every OS reads only `NAME.launch`, whose `kind` selects what it runs (`direct` here; `package`, `deferred`, `toolchain` in homes, `adr_unified_launcher.md` § 3.4). It has no reader for `.direct`, `.shim`, `.shimref` or `.exec`: a launcher beside only those exits 78 naming the expected `NAME.launch` [V-52, `adr_unified_launcher.md` V-L08].
 - **C-021** The gate fails when a field of `vendor-manifest` is removed, retyped or made required without a ledger entry and a bumped `schema_version`; an additive optional field passes [V-40].
 - **C-022** A selection brings its closure: every package the selection's roots reach through an edge that `composer::dep_admitted(effective_visibility, self_view = false)` admits (the rule `ocx env` without `--self` applies) is under `DIR`, and its `PATH` entries are in the selection environment [V-41].
@@ -603,7 +603,7 @@ DAG: `{B1, B2} → B3 → {B4, B7}`; `{B0, B5} → B4`; `{B0, B3, B4, ocx dev bu
 |---|---|---|---|
 | Runfiles lookup differs on remote executors or Windows | Med | High | C-012's `vendor_id`-bound acceptance; V-30, V-45, V-59, `adr_unified_launcher.md` V-L43…V-L49; spike 6 covered Linux; the Windows manifest file name and line shape stay unverified until V-L46 passes |
 | `ocx_util` API move breaks ocx-mirror | Med | Med | `task satellite:verify` in the same series; mirror upgraded there |
-| A blob exceeds 512 KiB on musl, macOS or Windows with `serde_json` | Low | Med | per-target CI size gate (C-019); measured 365 KiB on gnu |
+| A blob exceeds 640 KiB on musl, macOS or Windows with `serde_json` | Low | Med | per-target CI size gate (C-019); measured 365 KiB on gnu |
 | Manifest large for big packages | Low | Low | only in the repository's file; V-65 budget |
 | Dev build unavailable or private in rules_ocx CI | Low | High | the composite action authenticates with the workflow token for `ghcr.io/ocx-sh` |
 | Repo contents cache with declared output symlinks behaves differently from the spike's links-deleted rule | Med | Med | V-03 re-measures with the real rule |

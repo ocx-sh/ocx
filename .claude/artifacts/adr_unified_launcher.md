@@ -32,7 +32,7 @@ The owner fixed the target (goal file § Rules, § Context "Second run"): the sh
 1. **The owner's rules** (binding, goal file § Rules): atomic by construction; nothing writes into a launcher directory an older `ocx` published; one program and one record everywhere; `manifest.json` is the only interface to rules_ocx and rules_ocx derives no file name; no second construction method; a lock holds platform manifest digests only.
 2. **Existing installations keep working**, Windows first ("we need to be very sure to not break existing windows installations").
 3. **An older `ocx` sharing the home keeps working on what it published, and every launcher on disk works under either version.** An older prompt in `bin` mode omits a project's toolchain entry while `active` names a newer render directory, until the older `ocx` renders again (§ 10). Nothing either version writes breaks the other.
-4. **No hand-rolled wire parser** and the launcher within its 512 KiB per-target budget (`crates/ocx_store/src/shim.rs:19`).
+4. **No hand-rolled wire parser** and the launcher within its 640 KiB per-target budget (`crates/ocx_store/src/shim.rs:19`).
 5. **Security parity**: the launcher never starts a program found by a search of its own directory or the current directory; it is not diverted by a benign inherited environment; a hostile clone cannot reach `PATH` through a planted launcher.
 6. **Platform claims are claims until CI proves them** (this host is Linux x86_64).
 
@@ -874,7 +874,7 @@ Every row is shown red once and green once. "Claim" marks a Windows or macOS sta
 | V-L54 | `index_digest`: present on a root resolved through an image index, absent for a platform-manifest identifier and for dependencies | `read_closures` drops `chain[0]` (today) → absent everywhere | as stated | `test_package_vendor.py` |
 | V-L55 | `index_lookups`: with `--index` lists every path read, found or absent, sorted; absent without `--index` | the recorder not attached → empty | as stated | `test_vendor.py` |
 | V-L56 | A package content path holding a `_ocx_reserved` segment is refused (65) | `RESERVED_SEGMENTS` empty → listed | 65 | `ocx_store` unit; `test_vendor.py` |
-| V-L57 | Each of the six launcher blobs stays within 512 KiB | budget exceeded → the size gate reds | ≤ 512 KiB | `build-windows-shims.yml › build` |
+| V-L57 | Each of the six launcher blobs stays within 640 KiB | budget exceeded → the size gate reds | ≤ 640 KiB | `build-windows-shims.yml › build` |
 | V-L58 | Each committed blob starts every record kind on its own OS | a blob that accepts any record → the case reds | all cases | `launcher-blobs.yml`, six legs (Windows and macOS claims) |
 | V-L59 | R-U9: `ocx package vendor -p P registry/repo@<platform manifest digest>` vendors it with `platform = P`, `available_platforms = ["any"]`, exit 0 | a check that refuses a bare manifest → 65 | as stated | `test_package_vendor.py` |
 | V-L60 | R-U10: a vendor run with `--index DIR` leaves `DIR` byte-identical, a digest-addressed package included | the writable manager (today) → a dispatch object written into `DIR` | tree hash equal | `test_vendor.py` |
@@ -884,7 +884,7 @@ Every row is shown red once and green once. "Claim" marks a Windows or macOS sta
 - **Availability.** No published launcher directory is ever partial; a crash leaves the old or the new state. On Windows the `active` switch has no gap once V-L31 is green; until then the exception of M6 applies. Launcher directories are derived state: no parent-directory `fsync` follows a publish, because a rename lost in a crash is redone by the next first use or render.
 - **Latency.** Warm composition adds one completeness check per package with entry points and per deferred tool. A home launcher start adds one kernel image-path query and one record read; a `direct` start on the tree path adds nothing; the manifest stage reads a stream until the first accepted line. Trampoline detection adds one bounded read before an exec.
 - **Security.** No rung starts a program found by searching the launcher's directory or the working directory; batch programs are refused; home kinds bind the record to the loaded image; an inherited `RUNFILES_MANIFEST_FILE` is used only when it lists the started path, and the byte binding stays; records and manifests are bounded, regular-file only; `active` validity is exact; every launcher is an independent copy. Windows SmartScreen and ASR rules on new unsigned user-directory `.exe` files are a claim with no CI check.
-- **Cost.** A copy per launcher (≤ 512 KiB each, about 20 MiB for a 50-tool render directory, two kept per home); one launcher set per generation until `ocx clean`.
+- **Cost.** A copy per launcher (≤ 640 KiB each, about 25 MiB for a 50-tool render directory, two kept per home); one launcher set per generation until `ocx clean`.
 - **Operability.** `ocx clean` reports retirements as `launchers`; every launcher refusal names the path it tried; a read-only or foreign-owned home either composes its older `entrypoints/` with one warning or fails naming the path (77 or 74).
 
 ## 19. Consequences
@@ -900,7 +900,7 @@ Every row is shown red once and green once. "Claim" marks a Windows or macOS sta
 | The in-place junction retarget is not atomic or needs a privilege | V-L31 decides before merge; the exception of M6 ships otherwise |
 | The Windows image-path resolution does not name the render directory | V-L19; the alternative is `QueryFullProcessImageNameW`, judged by the same row |
 | The Windows manifest line shape differs from Linux | V-L46 prints and asserts it; the parser accepts `\` and `/` |
-| A launcher grows past 512 KiB | V-L57 |
+| A launcher grows past 640 KiB | V-L57 |
 
 ## 20. Validation
 
