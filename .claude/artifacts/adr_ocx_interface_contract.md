@@ -269,7 +269,7 @@ Component contracts and sketches: system design. This section fixes the rules.
 
 1. Every command declares its output modes in `cli.json`: `report(<Root>)`, `report_then_fail(<Root>)` (a valid report and a non-zero exit, e.g. partial sign, mixed sweep), `empty`, `passthrough` (`exec`: the child owns stdout), `shell_stream` (`--shell`, `--ci` emitters). A lint ties every registered root to at least one mode and every mode to a registered root.
 2. Under `--format json`: a `report*` mode prints exactly one pretty JSON document; any failure before a report prints exactly one error document (including context-init and clap usage errors, when `--format json` or `--json` appears in argv before any `--`); `--quiet` suppresses reports, never error documents; `passthrough` prints nothing of its own once the child starts.
-3. Every report root is an object whose first field is `schema_version` (starts at 1; the 6 formerly wrapped roots start at 2). The version is a property of the **published root**, not of the Rust type: root schemas are separate wrapper entries, never referenced from another `$def`.
+3. Every report root is an object whose first field is `schema_version` (starts at 1, or at 2 when a ledger entry lists it; the 6 formerly wrapped roots start at 2). The version is a property of the **published root**, not of the Rust type: root schemas are separate wrapper entries, never referenced from another `$def`.
 4. No report root has a top-level `error` property, so `error` distinguishes the error document from a `report_then_fail` report.
 5. Consumers ignore unknown properties. Producers never use `additionalProperties: false`.
 

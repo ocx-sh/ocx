@@ -57,7 +57,7 @@ Each rule names the lint that enforces it. A rule with no lint is held by the se
 | A report field or root | the schema golden under `crates/ocx_schema/tests/golden/` | golden byte test |
 | An error slug or exit code | the `error.detail` docs and the registry | registry tests, `ocx_exit` tests |
 | A command's stdout | its `CONTRACT` entry (`command/contract.rs`) | the `CONTRACT` consistency test |
-| The `vendor-manifest` document (`crates/ocx_package/src/vendor.rs`), the fourth gated document beside `reports`, `errors` and `cli.json` | `crates/ocx_schema/tests/golden/vendor-manifest.json`, its baseline, `reference/vendor-manifest.md`; a break needs a ledger entry and a bumped `schema_version` | the compat gate, golden byte test |
+| The `vendor-manifest` document (`crates/ocx_package/src/vendor.rs`), the fourth gated document beside `reports`, `errors` and `cli.json` | `crates/ocx_schema/tests/golden/vendor-manifest.json`, its baseline, `reference/vendor-manifest.md`; a break needs a ledger entry and a bumped `schema_version`; a version above 1 on an item the baseline does not hold needs a ledger entry that lists it | the compat gate, golden byte test |
 | `VendorReport` or the slugs `vendor_output_not_empty`, `vendor_value_unrepresentable`, `vendor_path_unrepresentable` | the `reports` golden and the slug registry | golden byte test, registry tests |
 | A deliberate exception | `crates/ocx_schema/contract/exemptions.toml` (cites a decision record) or a `waivers/<area>.toml` entry | the ratchet: a stale entry reds |
 
@@ -67,7 +67,7 @@ Each rule names the lint that enforces it. A rule with no lint is held by the se
 
 ## Semantic-break checklist
 
-- Does this change what an existing value, field or description *means* under the same name? Then it is a `semantic` ledger entry and a bumped version, not an edit. An `OCX_*` variable is the exception, next item.
+- Does this change what an existing value, field or description *means* under the same name? Then it is a `semantic` ledger entry and a bumped version, not an edit. A version above 1 on an item the baseline does not hold needs a ledger entry that lists it. An `OCX_*` variable is the exception, next item.
 - Does it change what an `OCX_*` variable's value means? Move the `cli.json` field that carries the change (`value`, `choices`, `on_invalid`, `secret`, `accepts_reference`, `propagation`, or a reworded `summary` (ungated)), and write a `!` commit subject that names the variable and the new reading. Write no ledger entry: a variable has no version, and the gate sees only G13 and G14. If no field moves, stop: that is the ADR § Env contract revisit condition.
 - Does it add an enum value or union variant? Additive, but every success check on it must still fail closed.
 - Does it rename or remove a flag, env name, slug or field? It is a break: the retired name goes into the registry, and an in-flight spelling into `deprecated.rs`.
