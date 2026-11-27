@@ -9,14 +9,16 @@ frozen argv for ``ocx`` and replaces itself with it. The stub here is the
 so a test asserts the argv and environment the launcher built without running
 a real ``ocx``.
 
-POSIX only: the stub is a ``/bin/sh`` script that execs the test interpreter.
-Windows cannot use it because a batch file is refused by the launcher.
+POSIX only (``write_stub_ocx``): the stub is a ``/bin/sh`` script that execs the test interpreter.
+Windows cannot use it because a batch file is refused by the launcher; ``build_recorder``
+compiles a native ``.exe`` with the same job there.
 """
 
 from __future__ import annotations
 
 import json
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -106,18 +108,96 @@ class InstalledLauncher:
 
     @property
     def record(self) -> Path:
-        return self.launcher.with_name(self.launcher.name + ".launch")
+        return self.launcher.with_suffix(".launch")
 
 
 def install_entrypoint_package(
-    ocx: OcxRunner, repo: str, tmp_path: Path, name: str = "hello"
+    ocx: OcxRunner,
+    repo: str,
+    tmp_path: Path,
+    name: str = "hello",
+    *,
+    entrypoint: dict | None = None,
 ) -> InstalledLauncher:
-    """Publish and install a package with one entry point; return its launcher file."""
+    """Publish and install a package with one entry point; return its launcher file.
+
+    ``entrypoint`` is the entry point's value object (``command``, ``args``); omitted, it
+    dispatches to the package binary of the same name.
+    """
     pkg = make_package_with_entrypoints(
-        ocx, repo, tmp_path, entrypoints=[name], bins=[name]
+        ocx,
+        repo,
+        tmp_path,
+        entrypoints={name: entrypoint} if entrypoint is not None else [name],
+        bins=[name],
     )
     ocx.plain("package", "install", "--select", pkg.short)
     root = Path(ocx.json("package", "which", pkg.short)["paths"][pkg.short]["path"])
-    launcher = only_generation(root / "launchers") / name
+    launcher = only_generation(root / "launchers") / (
+        name + ".exe" if sys.platform == "win32" else name
+    )
     assert launcher.is_file(), f"the package must publish a launcher at {launcher}"
     return InstalledLauncher(launcher=launcher, package_root=root)
+
+
+_RECORDER_RS = r'''
+use std::io::Write;
+fn q(s: &str) -> String {
+    let mut o = String::from("\"");
+    for c in s.chars() {
+        match c {
+            '"' => o.push_str("\\\""),
+            '\\' => o.push_str("\\\\"),
+            c if (c as u32) < 0x20 => o.push_str(&format!("\\u{:04x}", c as u32)),
+            c => o.push(c),
+        }
+    }
+    o.push('"');
+    o
+}
+fn main() {
+    let argv: Vec<String> = std::env::args_os().skip(1).map(|a| q(&a.to_string_lossy())).collect();
+    let env: Vec<String> = std::env::vars_os()
+        .map(|(k, v)| (k.to_string_lossy().to_uppercase(), v.to_string_lossy().into_owned()))
+        .filter(|(k, _)| k.starts_with("OCX_") || k.starts_with("__OCX_"))
+        .map(|(k, v)| format!("{}:{}", q(&k), q(&v)))
+        .collect();
+    let log = std::env::current_exe().unwrap().with_extension("log");
+    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(log).unwrap();
+    writeln!(f, "{{\"argv\":[{}],\"env\":{{{}}}}}", argv.join(","), env.join(",")).unwrap();
+    let code = std::env::var("RECORDER_EXIT").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+    std::process::exit(code);
+}
+'''
+
+
+def build_recorder(directory: Path) -> Path:
+    """Compile the argv recorder to ``directory/recorder.exe``; the Windows stand-in for ``write_stub_ocx``.
+
+    Each start appends one JSON line (``argv``, and the ``OCX_*`` / ``__OCX_*`` environment
+    with upper-cased names) to ``<exe>.log`` beside the file it ran as, so copies of one build
+    keep separate logs, then exits with ``$RECORDER_EXIT`` (default 0). Needs ``rustc`` on ``PATH``; absent, the test fails naming it.
+    """
+    rustc = shutil.which("rustc")
+    assert rustc, "the Windows argv recorder is compiled with rustc, which is not on PATH"
+    directory.mkdir(parents=True, exist_ok=True)
+    source = directory / "recorder.rs"
+    source.write_text(_RECORDER_RS, encoding="utf-8")
+    exe = directory / "recorder.exe"
+    built = subprocess.run(
+        [rustc, "--edition", "2021", "-O", "-o", str(exe), str(source)],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    assert built.returncode == 0, f"compiling the recorder failed:\n{built.stderr}"
+    return exe
+
+
+def recorder_copy(recorder: Path, directory: Path, name: str = "ocx.exe") -> tuple[Path, Path]:
+    """Copy the recorder to ``directory/name``; return ``(exe, its log)``."""
+    directory.mkdir(parents=True, exist_ok=True)
+    exe = directory / name
+    shutil.copy2(recorder, exe)
+    return exe, exe.with_suffix(".log")

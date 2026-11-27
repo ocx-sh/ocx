@@ -52,7 +52,9 @@ a second, non-shared one for that reason — do not fold them together.
 They need no registry and no ``ocx`` binary (a ``toolchain`` record carries no
 containment path, so the launcher never consults ``OCX_HOME``), which is what lets
 them run on the one Windows job that exists — ``build-windows-shims.yml``,
-whose pytest invocation names this module alongside ``test_windows_shim.py``.
+whose pytest invocation names this module alongside ``test_windows_shim.py``. The ``ocx``
+they start is a native argv recorder compiled with ``rustc`` (``launcher_fixtures.build_recorder``):
+a batch program is refused on every rung (C-108), so no ``.cmd`` stand-in exists.
 """
 
 from __future__ import annotations
@@ -78,7 +80,9 @@ from src.helpers import (
 )
 from src.launcher_fixtures import (
     DEPTH_VAR,
+    build_recorder,
     launcher_env,
+    recorder_copy,
     run_launcher,
     stub_calls,
     write_stub_ocx,
@@ -1226,38 +1230,27 @@ def _install_deferred_slot(bin_dir: Path, stem: str, identifier: str) -> Path:
     return exe
 
 
-def _pin_recorder(directory: Path, log: Path, *, echo_env: bool = False) -> Path:
-    """An ``ocx.cmd`` that records the argv the shim built, then exits 0.
+@pytest.fixture(scope="module")
+def recorder_exe(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A native argv recorder, compiled once: a ``.cmd`` program is refused by the launcher on every rung (C-108)."""
+    if sys.platform != "win32":
+        pytest.skip("the recorder is the Windows stand-in for write_stub_ocx")
+    return build_recorder(tmp_path_factory.mktemp("recorder"))
 
-    Pinned through ``OCX_BINARY_PIN``, which the shim resolves via an explicit
-    ``lpApplicationName`` — the same branch ``test_windows_shim.py`` uses to
-    observe forwarded argv, and the only way to see the wire line without an
-    ``ocx`` on the machine.
 
-    V-9 gave it a second role: the ``toolchain`` record's **baked** ``ocx`` key
-    reaches the same explicit ``lpApplicationName`` branch, so this recorder is
-    equally what a trampoline spawns with no pin defined at all.
+def _pin_recorder(recorder: Path, directory: Path) -> Path:
+    """A copy of the recorder named ``ocx.exe``; every start appends its argv and ``OCX_*`` environment to ``ocx.log``."""
+    exe, _log = recorder_copy(recorder, directory)
+    return exe
 
-    With ``echo_env``, it also dumps every ``OCX_*`` name the child inherited
-    (``SET OCX_``), which prints one ``NAME=value`` line per **defined**
-    variable and nothing at all for an undefined one. That is the only spelling
-    that separates C-033's three candidate states — deleted, inherited, or set
-    to the empty string — because ``SET`` prints ``NAME=`` for a defined-empty
-    variable and omits the name entirely for a deleted one.
 
-    Deliberately not ``ECHO [%OCX_GLOBAL%]``: an undefined variable is echoed
-    as its own literal ``%NAME%`` only at cmd's **interactive prompt**. Inside
-    a batch file — which is how this recorder is always run — percent expansion
-    substitutes the empty string instead, so the literal never appears and
-    ``[]`` cannot be told from a defined-but-empty variable.
-    """
-    directory.mkdir(parents=True, exist_ok=True)
-    script = directory / "ocx.cmd"
-    body = "@ECHO off\r\n" + f'>"{log}" ECHO %*\r\n'
-    if echo_env:
-        body += f'>>"{log}" SET OCX_\r\n'
-    script.write_text(body + "EXIT /B 0\r\n", encoding="utf-8")
-    return script
+def _recorded(pin: Path) -> dict:
+    """The one start the recorder at ``pin`` logged: ``{"argv": [...], "env": {...}}``."""
+    log = pin.with_suffix(".log")
+    assert log.is_file(), f"the recorder at {pin} never ran"
+    lines = log.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1, f"expected exactly one recorded start; got {lines}"
+    return json.loads(lines[0])
 
 
 def _dispatch(exe: Path, *args: str, env: dict[str, str], cwd: Path) -> subprocess.CompletedProcess[str]:
@@ -1274,7 +1267,7 @@ def _dispatch(exe: Path, *args: str, env: dict[str, str], cwd: Path) -> subproce
 
 @windows_only
 def test_item15_dispatch_the_committed_blob_builds_the_project_wire_line(
-    tmp_path: Path,
+    tmp_path: Path, recorder_exe: Path
 ) -> None:
     """C-032, on the committed blob: the root flag comes **first**, then the verb.
 
@@ -1294,8 +1287,7 @@ def test_item15_dispatch_the_committed_blob_builds_the_project_wire_line(
     root = tmp_path / "project"
     root.mkdir()
     exe = _install_trampoline_slot(tmp_path / "bin", stem, str(root))
-    log = tmp_path / "argv.txt"
-    pin = _pin_recorder(tmp_path / "fake_ocx", log)
+    pin = _pin_recorder(recorder_exe, tmp_path / "fake_ocx")
 
     result = _dispatch(
         exe,
@@ -1308,19 +1300,21 @@ def test_item15_dispatch_the_committed_blob_builds_the_project_wire_line(
     assert result.returncode == EXIT_SUCCESS, (
         f"the pinned recorder must run; rc={result.returncode} stderr={result.stderr!r}"
     )
-    recorded = log.read_text(encoding="utf-8").strip()
-    # Ordered, not anchored: `append_quoted_arg` quotes only what needs it, so
-    # what is contractual is the token ORDER — root flag, root, verb, `--`,
-    # stem, then the user's argv verbatim — never a fixed quoting spelling.
-    assert re.search(
-        rf'--project\s+"?{re.escape(str(root))}"?\s+exec\s+--\s+"?{stem}"?\s+--flag\s+"value with space"',
-        recorded,
-    ), f"C-032's project wire line; got {recorded!r}"
+    # The argv is a list, so the contract is the token order: root flag, root, verb, `--`, stem, user argv.
+    assert _recorded(pin)["argv"] == [
+        "--project",
+        str(root),
+        "exec",
+        "--",
+        stem,
+        "--flag",
+        "value with space",
+    ], "C-032's project wire line"
 
 
 @windows_only
 def test_item15_dispatch_the_committed_blob_builds_the_global_wire_line(
-    tmp_path: Path,
+    tmp_path: Path, recorder_exe: Path
 ) -> None:
     """C-032's global arm: ``--global`` carries **no value token**.
 
@@ -1335,28 +1329,22 @@ def test_item15_dispatch_the_committed_blob_builds_the_global_wire_line(
     """
     stem = "gtool"
     exe = _install_trampoline_slot(tmp_path / "bin", stem, "global")
-    log = tmp_path / "argv.txt"
-    pin = _pin_recorder(tmp_path / "fake_ocx", log)
+    pin = _pin_recorder(recorder_exe, tmp_path / "fake_ocx")
 
     result = _dispatch(exe, "--version", env={**os.environ, "OCX_BINARY_PIN": str(pin)}, cwd=tmp_path)
 
     assert result.returncode == EXIT_SUCCESS, (
         f"the pinned recorder must run; rc={result.returncode} stderr={result.stderr!r}"
     )
-    recorded = log.read_text(encoding="utf-8").strip()
-    # `exec` follows `--global` directly: nothing — not even `""` — sits in the
-    # value slot. That adjacency is the whole assertion.
-    assert re.search(rf'--global\s+exec\s+--\s+"?{stem}"?\s+--version', recorded), (
-        f"`--global` takes no value token; got {recorded!r}"
-    )
-    assert "global global" not in recorded and '--global ""' not in recorded, (
-        f"`--global` must emit no value token at all; got {recorded!r}"
+    # `exec` follows `--global` directly: nothing, not even an empty string, sits in the value slot.
+    assert _recorded(pin)["argv"] == ["--global", "exec", "--", stem, "--version"], (
+        "`--global` takes no value token"
     )
 
 
 @windows_only
 def test_item38_the_committed_blob_strips_ocx_global_and_ocx_project_before_the_spawn(
-    tmp_path: Path,
+    tmp_path: Path, recorder_exe: Path
 ) -> None:
     """Item 38 / C-033 on Windows: the shim deletes both tier selectors.
 
@@ -1390,8 +1378,7 @@ def test_item38_the_committed_blob_strips_ocx_global_and_ocx_project_before_the_
     root = tmp_path / "project"
     root.mkdir()
     exe = _install_trampoline_slot(tmp_path / "bin", stem, str(root))
-    log = tmp_path / "argv.txt"
-    pin = _pin_recorder(tmp_path / "fake_ocx", log, echo_env=True)
+    pin = _pin_recorder(recorder_exe, tmp_path / "fake_ocx")
 
     result = _dispatch(
         exe,
@@ -1407,24 +1394,18 @@ def test_item38_the_committed_blob_strips_ocx_global_and_ocx_project_before_the_
     assert result.returncode == EXIT_SUCCESS, (
         f"the pinned recorder must run; rc={result.returncode} stderr={result.stderr!r}"
     )
-    recorded = log.read_text(encoding="utf-8")
-    assert "OCX_BINARY_PIN=" in recorded, (
-        f"the SET OCX_ dump must have run and must show a defined OCX_* name, "
-        f"or the two absences below prove nothing; got {recorded!r}"
+    seen = _recorded(pin)["env"]
+    assert "OCX_BINARY_PIN" in seen, (
+        f"the recorder's environment dump must show a live OCX_* name, or the two absences below prove nothing; got {seen!r}"
     )
-    assert "OCX_GLOBAL=" not in recorded, (
-        f"OCX_GLOBAL must be deleted, not emptied, from the child's block; got {recorded!r}"
-    )
-    assert "OCX_PROJECT=" not in recorded, (
-        f"OCX_PROJECT must be deleted, not emptied, from the child's block; got {recorded!r}"
-    )
-    assert "leaked" not in recorded, (
-        f"an exported selector must not reach the child; got {recorded!r}"
-    )
+    assert "OCX_GLOBAL" not in seen, f"OCX_GLOBAL must be deleted, not emptied; got {seen!r}"
+    assert "OCX_PROJECT" not in seen, f"OCX_PROJECT must be deleted, not emptied; got {seen!r}"
 
 
 @windows_only
-def test_v20_a_deferred_record_does_not_strip_the_tier_selectors(tmp_path: Path) -> None:
+def test_v20_a_deferred_record_does_not_strip_the_tier_selectors(
+    tmp_path: Path, recorder_exe: Path
+) -> None:
     """RUL-14 / D-V20 on the committed blob — and the RED for the case above.
 
     The launcher removes the tier selectors for the ``toolchain`` kind and **only**
@@ -1448,8 +1429,7 @@ def test_v20_a_deferred_record_does_not_strip_the_tier_selectors(tmp_path: Path)
     stem = "deferred"
     identifier = "example.test/pkg@sha256:" + "0" * 64
     exe = _install_deferred_slot(tmp_path / "bin", stem, identifier)
-    log = tmp_path / "argv.txt"
-    pin = _pin_recorder(tmp_path / "fake_ocx", log, echo_env=True)
+    pin = _pin_recorder(recorder_exe, tmp_path / "fake_ocx")
 
     result = _dispatch(
         exe,
@@ -1465,20 +1445,22 @@ def test_v20_a_deferred_record_does_not_strip_the_tier_selectors(tmp_path: Path)
     assert result.returncode == EXIT_SUCCESS, (
         f"the pinned recorder must run; rc={result.returncode} stderr={result.stderr!r}"
     )
-    recorded = log.read_text(encoding="utf-8")
-    assert "launcher shim" in recorded, (
-        f"the dispatch must have taken the deferred record route, not another grammar; got {recorded!r}"
+    recorded = _recorded(pin)
+    assert recorded["argv"][:2] == ["launcher", "shim"], (
+        f"the dispatch must have taken the deferred record route; got {recorded['argv']!r}"
     )
-    assert "OCX_GLOBAL=leaked-global" in recorded, (
-        f"a deferred dispatch must pass an exported OCX_GLOBAL through untouched; got {recorded!r}"
+    assert recorded["env"].get("OCX_GLOBAL") == "leaked-global", (
+        "a deferred dispatch must pass an exported OCX_GLOBAL through untouched"
     )
-    assert "OCX_PROJECT=C:\\leaked\\project" in recorded, (
-        f"a deferred dispatch must pass an exported OCX_PROJECT through untouched; got {recorded!r}"
+    assert recorded["env"].get("OCX_PROJECT") == r"C:\leaked\project", (
+        "a deferred dispatch must pass an exported OCX_PROJECT through untouched"
     )
 
 
 @windows_only
-def test_v9_a_co_resident_ocx_exe_cannot_capture_a_trampoline_spawn(tmp_path: Path) -> None:
+def test_v9_a_co_resident_ocx_exe_cannot_capture_a_trampoline_spawn(
+    tmp_path: Path, recorder_exe: Path
+) -> None:
     """V-9: a trampoline spawns the **baked** ocx, never ``bin\\ocx.exe``.
 
     ``CreateProcessW`` with a NULL ``lpApplicationName`` begins its search at
@@ -1516,10 +1498,9 @@ def test_v9_a_co_resident_ocx_exe_cannot_capture_a_trampoline_spawn(tmp_path: Pa
     decoy_root = tmp_path / "decoy-project"
     decoy_root.mkdir()
 
-    baked_log = tmp_path / "baked-argv.txt"
-    decoy_log = tmp_path / "decoy-argv.txt"
-    baked = _pin_recorder(tmp_path / "real_ocx", baked_log)
-    decoy = _pin_recorder(tmp_path / "decoy_ocx", decoy_log)
+    baked = _pin_recorder(recorder_exe, tmp_path / "real_ocx")
+    decoy = _pin_recorder(recorder_exe, tmp_path / "decoy_ocx")
+    baked_log, decoy_log = baked.with_suffix(".log"), decoy.with_suffix(".log")
 
     bin_dir = tmp_path / "bin"
     exe = _install_trampoline_slot(bin_dir, "tcbin", str(root), baked_ocx=baked)
@@ -1539,14 +1520,15 @@ def test_v9_a_co_resident_ocx_exe_cannot_capture_a_trampoline_spawn(tmp_path: Pa
         "the co-resident bin\\ocx.exe captured the spawn — R-W12's self-resolution loop: "
         f"{decoy_log.read_text(encoding='utf-8')!r}"
     )
-    recorded = baked_log.read_text(encoding="utf-8").strip()
-    assert re.search(rf'--project\s+"?{re.escape(str(root))}"?\s+exec\s+--\s+"?tcbin"?\s+--version', recorded), (
-        f"and it is still C-032's wire line, unchanged by the second sidecar line; got {recorded!r}"
+    assert _recorded(baked)["argv"] == ["--project", str(root), "exec", "--", "tcbin", "--version"], (
+        "and it is still C-032's wire line, unchanged by the baked key"
     )
 
 
 @windows_only
-def test_v9_a_toolchain_record_without_ocx_still_dispatches(tmp_path: Path) -> None:
+def test_v9_a_toolchain_record_without_ocx_still_dispatches(
+    tmp_path: Path, recorder_exe: Path
+) -> None:
     """The degraded arm stays valid: a sidecar with no baked line still runs.
 
     The positive control for the row above. Without it a reader could satisfy
@@ -1564,12 +1546,11 @@ def test_v9_a_toolchain_record_without_ocx_still_dispatches(tmp_path: Path) -> N
     root = tmp_path / "project"
     root.mkdir()
     exe = _install_trampoline_slot(tmp_path / "bin", "onlyline", str(root))
-    log = tmp_path / "argv.txt"
-    pin = _pin_recorder(tmp_path / "fake_ocx", log)
+    pin = _pin_recorder(recorder_exe, tmp_path / "fake_ocx")
 
     result = _dispatch(exe, env={**os.environ, "OCX_BINARY_PIN": str(pin)}, cwd=tmp_path)
 
     assert result.returncode == EXIT_SUCCESS, (
         f"a one-line sidecar is still the frozen grammar; rc={result.returncode} stderr={result.stderr!r}"
     )
-    assert log.is_file(), f"the pinned recorder must run; stderr={result.stderr!r}"
+    assert pin.with_suffix(".log").is_file(), f"the pinned recorder must run; stderr={result.stderr!r}"
