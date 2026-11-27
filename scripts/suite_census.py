@@ -134,7 +134,10 @@ SUITE = REPO_ROOT / "test"
 #: `test_lazy_loading.py` the `/bin/sh` stub ocx on `win32`); two skips were renamed, none hide a red.
 #: This pin counts static skip markers on every platform; `test/SKIP_CEILING` counts runtime skips on Linux, so the
 #: pin moved by 8 where the ceiling moved by 3.
-PINNED = {"tests": 3800, "skipped": 155, "xfailed": 2, "parametrized": 268}
+#: -> 3803 / 157 with three `test_lazy_loading.py` cases for deferred-tool launchers of an older release or another
+#: launcher generation: `tests` +3, `skipped` +2 (the older release's launcher is a POSIX shell script, so two of the
+#: three skip on `win32`).
+PINNED = {"tests": 3803, "skipped": 157, "xfailed": 2, "parametrized": 268}
 
 #: Which way each number may move on its own. DEC-38 pinned all four to
 #: equality for the duration of the crate split, so that a refactor could not
