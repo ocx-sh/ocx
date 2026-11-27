@@ -13,12 +13,24 @@ use ocx_env_apply::launch::{
     record_path_for,
 };
 use ocx_env_apply::{ApplyKind, KeyFold, apply_one};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
 
 /// At most this many directory entries of a runfiles tree are examined, in name order.
 const MAX_RUNFILES_ENTRIES: usize = 4096;
+
+/// A runfiles manifest may hold this many bytes.
+const MAX_MANIFEST_BYTES: u64 = 64 * 1024 * 1024;
+
+/// A runfiles manifest line may hold this many bytes, its line feed not counted.
+const MAX_MANIFEST_LINE: usize = 64 * 1024;
+
+/// At most this many distinct roots are taken from the runfiles manifests, in file order.
+const MAX_MANIFEST_CANDIDATES: usize = 4096;
+
+/// The candidate records read from manifest roots add up to at most this many bytes.
+const MAX_CANDIDATE_RECORD_BYTES: u64 = 16 * 1024 * 1024;
 
 /// How many root candidates the "no root found" line names.
 const NAMED_CANDIDATES: usize = 8;
@@ -30,6 +42,10 @@ pub(super) enum ReadError {
     NotRegular,
     /// The file holds more than [`MAX_RECORD_BYTES`].
     TooLarge,
+    /// A streamed file holds more bytes than the bound the caller named.
+    StreamTooLarge,
+    /// A streamed line is longer than the bound the caller named.
+    LineTooLong,
     /// Any other I/O failure, `NotFound` excepted.
     Io(std::io::Error),
 }
@@ -39,10 +55,15 @@ impl std::fmt::Display for ReadError {
         match self {
             ReadError::NotRegular => f.write_str("not a regular file"),
             ReadError::TooLarge => write!(f, "larger than {MAX_RECORD_BYTES} bytes"),
+            ReadError::StreamTooLarge => f.write_str("larger than the stream bound"),
+            ReadError::LineTooLong => f.write_str("a line is longer than the line bound"),
             ReadError::Io(err) => write!(f, "{err}"),
         }
     }
 }
+
+/// The lines of a file, each without its line feed, read on demand.
+pub(super) type LineStream = Box<dyn Iterator<Item = Result<Vec<u8>, ReadError>>>;
 
 /// The filesystem questions the lookup asks.
 pub(super) trait LookupFs {
@@ -50,6 +71,10 @@ pub(super) trait LookupFs {
     fn image_path(&self) -> Result<String, ShimError>;
     /// The bytes of the sidecar at `path`; `Ok(None)` when nothing is there.
     fn read_sidecar(&self, path: &str) -> Result<Option<Vec<u8>>, ReadError>;
+    /// The lines of the file at `path`, read as a stream: `Ok(None)` when nothing is there. The stream yields
+    /// `Err` once the file passes `max_bytes` or a line passes `max_line` bytes (the line feed is not part of a
+    /// line), and ends after its first `Err`.
+    fn read_lines(&self, path: &str, max_bytes: u64, max_line: usize) -> Result<Option<LineStream>, ReadError>;
     /// The entry names of directory `dir`; empty when it is missing or unreadable.
     fn list_dir(&self, dir: &str) -> Vec<String>;
     /// Whether `path` is a regular executable file.
@@ -66,6 +91,8 @@ pub(super) struct LookupContext<'a> {
     pub cwd: &'a str,
     /// The launcher's own `RUNFILES_DIR`.
     pub runfiles_dir: Option<&'a str>,
+    /// The launcher's own `RUNFILES_MANIFEST_FILE`; read only when it lists the started path.
+    pub manifest_file: Option<&'a str>,
     /// The target platform: separators, case folding and the path-list separator.
     pub windows: bool,
 }
@@ -98,10 +125,10 @@ pub(super) fn refuse(reason: String) -> ShimError {
     ShimError::DirectRefused { reason }
 }
 
-/// Reads the file at `path`: opened non-blocking, required to be a regular file, at most [`MAX_RECORD_BYTES`].
-pub(super) fn read_regular_bounded(path: &Path) -> Result<Option<Vec<u8>>, ReadError> {
-    use std::io::Read;
-
+/// Opens `path` non-blocking and requires a regular file; `Ok(None)` when nothing is there.
+///
+/// The check runs on the opened handle, so a path swapped for a FIFO after the open changes nothing.
+fn open_regular(path: &Path) -> Result<Option<(std::fs::File, std::fs::Metadata)>, ReadError> {
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -130,11 +157,20 @@ pub(super) fn read_regular_bounded(path: &Path) -> Result<Option<Vec<u8>>, ReadE
         }
         Err(err) => return Err(ReadError::Io(err)),
     };
-    // The check runs on the opened handle, so a path swapped for a FIFO after the open changes nothing.
     let metadata = file.metadata().map_err(ReadError::Io)?;
     if !metadata.is_file() {
         return Err(ReadError::NotRegular);
     }
+    Ok(Some((file, metadata)))
+}
+
+/// Reads the file at `path`: opened non-blocking, required to be a regular file, at most [`MAX_RECORD_BYTES`].
+pub(super) fn read_regular_bounded(path: &Path) -> Result<Option<Vec<u8>>, ReadError> {
+    use std::io::Read;
+
+    let Some((file, metadata)) = open_regular(path)? else {
+        return Ok(None);
+    };
     if metadata.len() > MAX_RECORD_BYTES {
         return Err(ReadError::TooLarge);
     }
@@ -147,6 +183,71 @@ pub(super) fn read_regular_bounded(path: &Path) -> Result<Option<Vec<u8>>, ReadE
         return Err(ReadError::TooLarge);
     }
     Ok(Some(bytes))
+}
+
+/// The lines of `reader` split at `\n`, with the two bounds of [`LookupFs::read_lines`] enforced as it reads.
+///
+/// A line is capped while it is still being read, so a file with no line feed never grows a buffer past `max_line`.
+pub(super) fn bounded_lines(reader: impl std::io::BufRead + 'static, max_bytes: u64, max_line: usize) -> LineStream {
+    struct Lines<R> {
+        reader: R,
+        read: u64,
+        max_bytes: u64,
+        max_line: usize,
+        done: bool,
+    }
+
+    impl<R: std::io::BufRead> Lines<R> {
+        fn fail(&mut self, error: ReadError) -> Option<Result<Vec<u8>, ReadError>> {
+            self.done = true;
+            Some(Err(error))
+        }
+    }
+
+    impl<R: std::io::BufRead> Iterator for Lines<R> {
+        type Item = Result<Vec<u8>, ReadError>;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            if self.done {
+                return None;
+            }
+            let mut line = Vec::new();
+            loop {
+                let buffer = match self.reader.fill_buf() {
+                    Ok(buffer) => buffer,
+                    Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(err) => return self.fail(ReadError::Io(err)),
+                };
+                if buffer.is_empty() {
+                    self.done = true;
+                    return (!line.is_empty()).then_some(Ok(line));
+                }
+                let feed = buffer.iter().position(|&byte| byte == b'\n');
+                let take = feed.unwrap_or(buffer.len());
+                let used = take + usize::from(feed.is_some());
+                if line.len() + take > self.max_line {
+                    return self.fail(ReadError::LineTooLong);
+                }
+                if self.read + used as u64 > self.max_bytes {
+                    return self.fail(ReadError::StreamTooLarge);
+                }
+                line.extend_from_slice(&buffer[..take]);
+                self.read += used as u64;
+                self.reader.consume(used);
+                if feed.is_some() {
+                    return Some(Ok(line));
+                }
+            }
+        }
+    }
+
+    Box::new(Lines {
+        reader,
+        read: 0,
+        max_bytes,
+        max_line,
+        done: false,
+    })
 }
 
 pub(super) fn is_absolute(path: &str, windows: bool) -> bool {
@@ -248,17 +349,218 @@ fn environment_runfiles_roots(started: &str, context: &LookupContext<'_>, fs: &d
     entry_roots(&directory, context.windows, fs)
 }
 
-/// Whether `<root>/<self>.launch` is there and byte-identical to the sidecar beside the started path.
-fn accepts(root: &str, self_path: &str, raw: &[u8], windows: bool, fs: &dyn LookupFs) -> Result<bool, ShimError> {
+/// The record at `<root>/<self>.launch`, read under the same bounds as the one beside the started path.
+fn candidate_record(
+    root: &str,
+    self_path: &str,
+    windows: bool,
+    fs: &dyn LookupFs,
+) -> Result<Option<Vec<u8>>, ShimError> {
     let path = format!(
         "{}/{self_path}.{}",
         root.trim_end_matches(separators(windows)),
         RECORD_EXTENSION
     );
-    match fs.read_sidecar(&path) {
-        Ok(found) => Ok(found.is_some_and(|bytes| bytes == raw)),
-        Err(err) => Err(refuse(format!("cannot read sidecar {path}: {err}"))),
+    fs.read_sidecar(&path)
+        .map_err(|err| refuse(format!("cannot read sidecar {path}: {err}")))
+}
+
+/// Whether `<root>/<self>.launch` is there and byte-identical to the sidecar beside the started path.
+fn accepts(root: &str, self_path: &str, raw: &[u8], windows: bool, fs: &dyn LookupFs) -> Result<bool, ShimError> {
+    Ok(candidate_record(root, self_path, windows, fs)?.is_some_and(|bytes| bytes == raw))
+}
+
+/// `line` split into its manifest key and target, both unescaped; `None` when it holds no space.
+///
+/// A line starting with a space is escaped (Bazel 7.4.0 and later): the key reads `\s`, `\n` and `\b`, the target
+/// `\n` and `\b`, and any other `\x` stays two characters. An unescaped line keeps its backslashes.
+fn split_manifest_line(line: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
+    fn unescape(text: &[u8], key: bool) -> Vec<u8> {
+        let mut out = Vec::with_capacity(text.len());
+        let mut bytes = text.iter().copied();
+        while let Some(byte) = bytes.next() {
+            if byte != b'\\' {
+                out.push(byte);
+                continue;
+            }
+            match bytes.next() {
+                Some(b's') if key => out.push(b' '),
+                Some(b'n') => out.push(b'\n'),
+                Some(b'b') => out.push(b'\\'),
+                Some(other) => out.extend([b'\\', other]),
+                None => out.push(b'\\'),
+            }
+        }
+        out
     }
+
+    let (escaped, body) = match line.strip_prefix(b" ") {
+        Some(rest) => (true, rest),
+        None => (false, line),
+    };
+    let space = body.iter().position(|&byte| byte == b' ')?;
+    let (key, target) = (&body[..space], &body[space + 1..]);
+    Some(if escaped {
+        (unescape(key, true), unescape(target, false))
+    } else {
+        (key.to_vec(), target.to_vec())
+    })
+}
+
+/// The root a manifest `target` names for `<self>.launch`, or `None` when the key and target do not both end with it.
+///
+/// On Windows both ends are compared ASCII case-insensitively and the target's `\` reads as `/`.
+fn manifest_root_bytes(key: &[u8], target: &[u8], self_path: &str, windows: bool) -> Option<Vec<u8>> {
+    let suffix = format!("/{self_path}.{RECORD_EXTENSION}");
+    let suffix = suffix.as_bytes();
+    let ends_with = |text: &[u8]| {
+        text.len() >= suffix.len() && {
+            let tail = &text[text.len() - suffix.len()..];
+            if windows {
+                tail.eq_ignore_ascii_case(suffix)
+            } else {
+                tail == suffix
+            }
+        }
+    };
+    let target = if windows {
+        target
+            .iter()
+            .map(|&byte| if byte == b'\\' { b'/' } else { byte })
+            .collect()
+    } else {
+        target.to_vec()
+    };
+    if !ends_with(key) || !ends_with(&target) {
+        return None;
+    }
+    Some(target[..target.len() - suffix.len()].to_vec())
+}
+
+/// Whether the manifest `target` is the started path (ASCII case and separators folded on Windows).
+fn lists_started_path(target: &[u8], started: &str, windows: bool) -> bool {
+    if windows {
+        fold(&String::from_utf8_lossy(target), true) == fold(started, true)
+    } else {
+        target == started.as_bytes()
+    }
+}
+
+/// A manifest root as a path string, or the name of the rejection when its shape is not one the launcher follows:
+/// absolute, UTF-8, free of NUL, CR and LF, no `.` or `..` segment and no path-list separator.
+fn checked_manifest_root(root: &[u8], windows: bool) -> Result<String, String> {
+    let Ok(text) = std::str::from_utf8(root) else {
+        return Err(String::from_utf8_lossy(root).into_owned());
+    };
+    let text = if text.is_empty() && !windows { "/" } else { text };
+    let list_separator = if windows { ';' } else { ':' };
+    let hygienic = is_absolute(text, windows)
+        && !text.contains(['\0', '\r', '\n', list_separator])
+        && !text
+            .split(separators(windows))
+            .any(|segment| segment == "." || segment == "..");
+    if hygienic {
+        Ok(text.to_string())
+    } else {
+        Err(text.to_string())
+    }
+}
+
+/// Distinct roots in first-seen order, at most [`MAX_MANIFEST_CANDIDATES`].
+#[derive(Default)]
+struct RootSet {
+    seen: BTreeSet<Vec<u8>>,
+    roots: Vec<Vec<u8>>,
+}
+
+impl RootSet {
+    fn push(&mut self, root: Vec<u8>) {
+        if self.roots.len() < MAX_MANIFEST_CANDIDATES && self.seen.insert(root.clone()) {
+            self.roots.push(root);
+        }
+    }
+}
+
+/// The root candidates one manifest names, or none when `needs_listing` and it never lists `started`.
+fn scan_manifest(
+    path: &str,
+    needs_listing: bool,
+    started: &str,
+    self_path: &str,
+    windows: bool,
+    fs: &dyn LookupFs,
+) -> Result<Vec<Vec<u8>>, ShimError> {
+    let refused = |reason: String| refuse(format!("{reason}: {path}"));
+    let lines = match fs.read_lines(path, MAX_MANIFEST_BYTES, MAX_MANIFEST_LINE) {
+        Ok(Some(lines)) => lines,
+        Ok(None) => return Ok(Vec::new()),
+        Err(err) => return Err(manifest_refusal(path, err)),
+    };
+    let mut found = RootSet::default();
+    let mut lists = !needs_listing;
+    for line in lines {
+        let line = line.map_err(|err| manifest_refusal(path, err))?;
+        if line.contains(&0) {
+            return Err(refused("runfiles manifest line holds a NUL byte".to_string()));
+        }
+        // Bazel on Windows writes UTF-8; a line that is not cannot name a path it wrote.
+        if windows && std::str::from_utf8(&line).is_err() {
+            continue;
+        }
+        let Some((key, target)) = split_manifest_line(&line) else {
+            continue;
+        };
+        if target.is_empty() {
+            continue;
+        }
+        lists = lists || lists_started_path(&target, started, windows);
+        if let Some(root) = manifest_root_bytes(&key, &target, self_path, windows) {
+            found.push(root);
+        }
+    }
+    Ok(if lists { found.roots } else { Vec::new() })
+}
+
+/// The refusal for a manifest that cannot be read within its bounds.
+fn manifest_refusal(path: &str, err: ReadError) -> ShimError {
+    refuse(match err {
+        ReadError::StreamTooLarge => format!("runfiles manifest larger than 64 MiB: {path}"),
+        ReadError::LineTooLong => format!("runfiles manifest line longer than 64 KiB: {path}"),
+        other => format!("cannot read runfiles manifest {path}: {other}"),
+    })
+}
+
+/// Candidate (d): the roots the runfiles manifests name, for a launcher reached with no runfiles tree.
+///
+/// Sources in order: `<started>.runfiles/MANIFEST`, `<started>.runfiles_manifest`, then `$RUNFILES_MANIFEST_FILE` only
+/// when it lists the started path. `Err` entries are roots rejected on their shape.
+fn manifest_roots(
+    started: &str,
+    self_path: &str,
+    context: &LookupContext<'_>,
+    fs: &dyn LookupFs,
+) -> Result<Vec<Result<String, String>>, ShimError> {
+    let windows = context.windows;
+    let beside = [
+        format!("{started}.runfiles/MANIFEST"),
+        format!("{started}.runfiles_manifest"),
+    ];
+    let mut roots = RootSet::default();
+    for path in &beside {
+        for root in scan_manifest(path, false, started, self_path, windows, fs)? {
+            roots.push(root);
+        }
+    }
+    if let Some(path) = context.manifest_file {
+        for root in scan_manifest(path, true, started, self_path, windows, fs)? {
+            roots.push(root);
+        }
+    }
+    Ok(roots
+        .roots
+        .iter()
+        .map(|root| checked_manifest_root(root, windows))
+        .collect())
 }
 
 /// The started path on Unix: `argv[0]` joined onto the working directory, or the first `PATH` hit for a bare name.
@@ -306,6 +608,18 @@ fn read_record(path: &str, fs: &dyn LookupFs) -> Result<Option<Vec<u8>>, ShimErr
 #[cfg(test)]
 pub(super) fn locate(started: &str, context: &LookupContext<'_>, fs: &dyn LookupFs) -> Result<Probed, ShimError> {
     locate_with(|| Ok(started.to_string()), context, fs)
+}
+
+/// The accepted root made absolute by a lexical join, refused when it holds the path-list separator.
+fn bind_root(sidecar: DirectRecord, candidate: &str, context: &LookupContext<'_>) -> Result<Probed, ShimError> {
+    let root = absolutize(candidate, context.cwd, context.windows);
+    let list_separator = if context.windows { ';' } else { ':' };
+    if root.contains(list_separator) {
+        return Err(refuse(format!(
+            "vendor root {root} contains the path-list separator '{list_separator}'"
+        )));
+    }
+    Ok(Probed::Direct(Located { sidecar, root }))
 }
 
 /// Decides the kind from the record beside the loaded image, then runs the started-path rules for kind `direct`.
@@ -375,17 +689,28 @@ pub(super) fn locate_with(
         };
         for candidate in roots {
             if accepts(&candidate, &sidecar.self_path, &raw, windows, fs)? {
-                let root = absolutize(&candidate, context.cwd, windows);
-                let list_separator = if windows { ';' } else { ':' };
-                if root.contains(list_separator) {
-                    return Err(refuse(format!(
-                        "vendor root {root} contains the path-list separator '{list_separator}'"
-                    )));
-                }
-                return Ok(Probed::Direct(Located { sidecar, root }));
+                return bind_root(sidecar, &candidate, context);
             }
             rejected.push(candidate);
         }
+    }
+
+    // The manifest is read last: only a tree holds declared links, and a remote action has no usable manifest.
+    let mut record_bytes = 0u64;
+    for candidate in manifest_roots(started, &sidecar.self_path, context, fs)? {
+        let root = match candidate {
+            Ok(root) if record_bytes < MAX_CANDIDATE_RECORD_BYTES => root,
+            Ok(root) | Err(root) => {
+                rejected.push(root);
+                continue;
+            }
+        };
+        let found = candidate_record(&root, &sidecar.self_path, windows, fs)?;
+        record_bytes += found.as_ref().map_or(0, |bytes| bytes.len() as u64);
+        if found.is_some_and(|bytes| bytes == raw) {
+            return bind_root(sidecar, &root, context);
+        }
+        rejected.push(root);
     }
 
     let named: Vec<&str> = rejected.iter().take(NAMED_CANDIDATES).map(String::as_str).collect();
@@ -553,6 +878,11 @@ impl LookupFs for RealFs {
 
     fn read_sidecar(&self, path: &str) -> Result<Option<Vec<u8>>, ReadError> {
         read_regular_bounded(Path::new(path))
+    }
+
+    fn read_lines(&self, path: &str, max_bytes: u64, max_line: usize) -> Result<Option<LineStream>, ReadError> {
+        Ok(open_regular(Path::new(path))?
+            .map(|(file, _)| bounded_lines(std::io::BufReader::new(file), max_bytes, max_line)))
     }
 
     fn list_dir(&self, dir: &str) -> Vec<String> {
@@ -878,9 +1208,11 @@ pub(super) fn run() -> Result<i32, ShimError> {
         .ok_or(ShimError::SelfPathFailure)?;
 
     let runfiles_dir = variable("RUNFILES_DIR");
+    let manifest_file = variable("RUNFILES_MANIFEST_FILE");
     let context = LookupContext {
         cwd: &cwd,
         runfiles_dir: runfiles_dir.as_deref(),
+        manifest_file: manifest_file.as_deref(),
         windows: false,
     };
     let located = match lookup_unix(argv0.as_deref(), &context, variable("PATH").as_deref(), &RealFs)? {
@@ -908,6 +1240,8 @@ pub(super) fn run() -> Result<i32, ShimError> {
 pub(super) fn run_windows(started: &str) -> Result<i32, ShimError> {
     #[expect(clippy::disallowed_methods, reason = "no ocx_env edge: the shim's size budget")]
     let runfiles_dir = std::env::var_os("RUNFILES_DIR").map(|value| value.to_string_lossy().into_owned());
+    #[expect(clippy::disallowed_methods, reason = "no ocx_env edge: the shim's size budget")]
+    let manifest_file = std::env::var_os("RUNFILES_MANIFEST_FILE").map(|value| value.to_string_lossy().into_owned());
     let cwd = std::env::current_dir()
         .ok()
         .and_then(|dir| dir.into_os_string().into_string().ok())
@@ -915,6 +1249,7 @@ pub(super) fn run_windows(started: &str) -> Result<i32, ShimError> {
     let context = LookupContext {
         cwd: &cwd,
         runfiles_dir: runfiles_dir.as_deref(),
+        manifest_file: manifest_file.as_deref(),
         windows: true,
     };
     let located = match locate_with(|| Ok(started.to_string()), &context, &RealFs)? {
@@ -1122,6 +1457,15 @@ mod tests {
             }
             Ok(self.files.get(path).cloned())
         }
+        fn read_lines(&self, path: &str, max_bytes: u64, max_line: usize) -> Result<Option<LineStream>, ReadError> {
+            if self.unreadable.contains(path) {
+                return Err(ReadError::NotRegular);
+            }
+            Ok(self
+                .files
+                .get(path)
+                .map(|bytes| bounded_lines(std::io::Cursor::new(bytes.clone()), max_bytes, max_line)))
+        }
         fn list_dir(&self, dir: &str) -> Vec<String> {
             self.dirs.get(dir).cloned().unwrap_or_default()
         }
@@ -1143,6 +1487,7 @@ mod tests {
         LookupContext {
             cwd: "/work",
             runfiles_dir,
+            manifest_file: None,
             windows: false,
         }
     }
@@ -1176,6 +1521,7 @@ mod tests {
         LookupContext {
             cwd: "C:\\work",
             runfiles_dir: None,
+            manifest_file: None,
             windows: true,
         }
     }
@@ -1239,6 +1585,7 @@ mod tests {
         let context = LookupContext {
             cwd: "C:\\work",
             runfiles_dir: None,
+            manifest_file: None,
             windows: true,
         };
         let located = direct(locate(started, &context, &fs).unwrap());
@@ -1333,6 +1680,7 @@ mod tests {
         let context = LookupContext {
             cwd: "C:\\work",
             runfiles_dir: None,
+            manifest_file: None,
             windows: true,
         };
         let message = refusal(locate("C:\\out\\bin\\tool.exe", &context, &fs));
@@ -1423,6 +1771,7 @@ mod tests {
         let context = LookupContext {
             cwd: "C:\\work",
             runfiles_dir: None,
+            manifest_file: None,
             windows: true,
         };
         let bytes = sidecar_json(VENDOR_A, SELF_PATH);
@@ -2164,5 +2513,438 @@ mod tests {
         )
         .expect_err("a pin that cannot be a path string");
         assert_eq!(error.exit_code(), 78);
+    }
+
+    // ── Runfiles manifest, the stage after the trees ───────────────────────
+
+    const TOOL: &str = "/out/bin/tool";
+    const WINDOWS_TOOL: &str = "C:\\out\\bin\\tool.exe";
+
+    fn manifest_line(root: &str) -> Vec<u8> {
+        format!("pkg/{SELF_PATH}.launch {root}/{SELF_PATH}.launch\n").into_bytes()
+    }
+
+    /// A started launcher with its record, no runfiles tree, `manifest` beside it and a record under `/vendor/set`.
+    fn manifest_world(manifest: &[u8]) -> FakeFs {
+        let record = sidecar_json(VENDOR_A, SELF_PATH);
+        FakeFs::default()
+            .with_file("/out/bin/tool.launch", &record)
+            .with_file("/out/bin/tool.runfiles/MANIFEST", manifest)
+            .with_file(&format!("/vendor/set/{SELF_PATH}.launch"), &record)
+    }
+
+    fn manifest_root(fs: &FakeFs) -> String {
+        direct(locate(TOOL, &unix(None), fs).unwrap()).root
+    }
+
+    fn manifest_refusal(fs: &FakeFs) -> String {
+        refusal(locate(TOOL, &unix(None), fs))
+    }
+
+    /// The Windows counterpart of [`manifest_world`]: the record sits beside `tool.exe`, the root's record is at `root`.
+    fn windows_manifest_world(manifest: &[u8], root: &str) -> FakeFs {
+        let record = sidecar_json(VENDOR_A, SELF_PATH);
+        FakeFs::default()
+            .with_file("C:\\out\\bin\\tool.launch", &record)
+            .with_file("C:\\out\\bin\\tool.exe.runfiles/MANIFEST", manifest)
+            .with_file(&format!("{root}/{SELF_PATH}.launch"), &record)
+    }
+
+    fn windows_root(fs: &FakeFs) -> String {
+        direct(locate(WINDOWS_TOOL, &windows_context(), fs).unwrap()).root
+    }
+
+    #[test]
+    fn vl43_a_plain_manifest_line_names_the_root() {
+        let fs = manifest_world(&manifest_line("/vendor/set"));
+        assert_eq!(manifest_root(&fs), "/vendor/set");
+    }
+
+    #[test]
+    fn vl43_the_second_source_is_read_when_the_first_is_absent() {
+        let record = sidecar_json(VENDOR_A, SELF_PATH);
+        let fs = FakeFs::default()
+            .with_file("/out/bin/tool.launch", &record)
+            .with_file("/out/bin/tool.runfiles_manifest", &manifest_line("/vendor/set"))
+            .with_file(&format!("/vendor/set/{SELF_PATH}.launch"), &record);
+        assert_eq!(manifest_root(&fs), "/vendor/set");
+    }
+
+    #[test]
+    fn vl43_an_escaped_line_unescapes_its_key_and_target_and_splits_at_the_first_space() {
+        // Key `dir one/...` (`\s`), target `/vendor/a b\c` (a raw space, `\b` for the backslash).
+        let line = format!(" dir\\sone/{SELF_PATH}.launch /vendor/a b\\bc/{SELF_PATH}.launch\n");
+        let record = sidecar_json(VENDOR_A, SELF_PATH);
+        let fs = FakeFs::default()
+            .with_file("/out/bin/tool.launch", &record)
+            .with_file("/out/bin/tool.runfiles/MANIFEST", line.as_bytes())
+            .with_file(&format!("/vendor/a b\\c/{SELF_PATH}.launch"), &record);
+        assert_eq!(manifest_root(&fs), "/vendor/a b\\c");
+    }
+
+    #[test]
+    fn vl43_an_escaped_line_keeps_an_unknown_escape_as_two_characters() {
+        let line = format!(" pkg/{SELF_PATH}.launch /vendor/x\\qy/{SELF_PATH}.launch\n");
+        let record = sidecar_json(VENDOR_A, SELF_PATH);
+        let fs = FakeFs::default()
+            .with_file("/out/bin/tool.launch", &record)
+            .with_file("/out/bin/tool.runfiles/MANIFEST", line.as_bytes())
+            .with_file(&format!("/vendor/x\\qy/{SELF_PATH}.launch"), &record);
+        assert_eq!(manifest_root(&fs), "/vendor/x\\qy");
+    }
+
+    #[test]
+    fn vl43_an_unescaped_line_keeps_its_backslashes() {
+        let record = sidecar_json(VENDOR_A, SELF_PATH);
+        let fs = FakeFs::default()
+            .with_file("/out/bin/tool.launch", &record)
+            .with_file("/out/bin/tool.runfiles/MANIFEST", &manifest_line("/vendor/we\\bird"))
+            .with_file(&format!("/vendor/we\\bird/{SELF_PATH}.launch"), &record);
+        assert_eq!(manifest_root(&fs), "/vendor/we\\bird");
+    }
+
+    #[test]
+    fn vl43_a_line_with_an_empty_target_or_no_space_is_skipped() {
+        let mut manifest = format!("pkg/{SELF_PATH}.launch \n").into_bytes();
+        manifest.extend_from_slice(format!("pkg/{SELF_PATH}.launch\n").as_bytes());
+        manifest.extend_from_slice(&manifest_line("/vendor/set"));
+        assert_eq!(manifest_root(&manifest_world(&manifest)), "/vendor/set");
+        let empty = format!("pkg/{SELF_PATH}.launch \n").into_bytes();
+        assert!(manifest_refusal(&manifest_world(&empty)).contains("0 candidate"));
+    }
+
+    #[test]
+    fn vl43_a_line_for_another_file_is_no_candidate() {
+        let manifest =
+            format!("pkg/other.txt /vendor/set/{SELF_PATH}.launch\npkg/{SELF_PATH}.launch /vendor/set/other\n");
+        assert!(manifest_refusal(&manifest_world(manifest.as_bytes())).contains("0 candidate"));
+    }
+
+    #[test]
+    fn vl43_windows_targets_with_either_separator_and_any_case_name_the_root() {
+        let backslashes = SELF_PATH.replace('/', "\\");
+        for (target, root) in [
+            (format!("C:\\vendor\\set\\{backslashes}.launch"), "C:/vendor/set"),
+            (format!("C:/vendor/set/{SELF_PATH}.launch"), "C:/vendor/set"),
+            (
+                format!("c:\\VENDOR\\Set\\{}.LAUNCH", backslashes.to_uppercase()),
+                "c:/VENDOR/Set",
+            ),
+        ] {
+            let manifest = format!("PKG/{}.Launch {target}\n", SELF_PATH.to_uppercase());
+            let fs = windows_manifest_world(manifest.as_bytes(), root);
+            assert_eq!(windows_root(&fs), root, "{target}");
+        }
+    }
+
+    #[test]
+    fn vl43_a_windows_line_that_is_not_utf8_is_skipped_and_a_utf8_root_is_decoded_once() {
+        let mut manifest = format!("pkg/{SELF_PATH}.launch C:/bad").into_bytes();
+        manifest.push(0xFF);
+        manifest.extend_from_slice(format!("/{SELF_PATH}.launch\n").as_bytes());
+        manifest.extend_from_slice(&manifest_line("C:/vendor/\u{fc}n\u{ef}"));
+        let fs = windows_manifest_world(&manifest, "C:/vendor/\u{fc}n\u{ef}");
+        assert_eq!(windows_root(&fs), "C:/vendor/\u{fc}n\u{ef}");
+    }
+
+    #[test]
+    fn vl43_a_line_over_64_kib_is_refused_and_one_of_64_kib_is_not() {
+        let filler = |length: usize| {
+            let mut line = b"k ".to_vec();
+            line.resize(length, b'x');
+            line.push(b'\n');
+            line
+        };
+        let mut allowed = filler(MAX_MANIFEST_LINE);
+        allowed.extend_from_slice(&manifest_line("/vendor/set"));
+        assert_eq!(manifest_root(&manifest_world(&allowed)), "/vendor/set");
+
+        let mut over = filler(MAX_MANIFEST_LINE + 1);
+        over.extend_from_slice(&manifest_line("/vendor/set"));
+        let message = manifest_refusal(&manifest_world(&over));
+        assert!(message.contains("longer than 64 KiB"), "{message}");
+    }
+
+    #[test]
+    fn vl43_a_line_holding_nul_is_refused_even_when_it_names_no_candidate() {
+        let mut manifest = b"a b\0c\n".to_vec();
+        manifest.extend_from_slice(&manifest_line("/vendor/set"));
+        let message = manifest_refusal(&manifest_world(&manifest));
+        assert!(message.contains("NUL"), "{message}");
+    }
+
+    /// `valid` first, then filler lines that name nothing, up to `total` bytes.
+    fn manifest_of_size(valid: &[u8], total: usize) -> Vec<u8> {
+        let mut manifest = valid.to_vec();
+        let start = manifest.len();
+        manifest.resize(total, b'x');
+        for at in (start + 1023..total).step_by(1024) {
+            manifest[at] = b'\n';
+        }
+        manifest[total - 1] = b'\n';
+        manifest
+    }
+
+    #[test]
+    fn vl43_a_file_over_64_mib_is_refused_and_one_of_64_mib_is_not() {
+        let valid = manifest_line("/vendor/set");
+        let at_bound = manifest_of_size(&valid, MAX_MANIFEST_BYTES as usize);
+        assert_eq!(manifest_root(&manifest_world(&at_bound)), "/vendor/set");
+
+        let mut over = at_bound;
+        over.push(b'x');
+        let message = manifest_refusal(&manifest_world(&over));
+        assert!(message.contains("larger than 64 MiB"), "{message}");
+    }
+
+    #[test]
+    fn vl43_candidate_records_are_read_up_to_16_mib_together() {
+        let record = sidecar_json(VENDOR_A, SELF_PATH);
+        let heavy = vec![b' '; MAX_RECORD_BYTES as usize];
+        let world = |matching: usize| {
+            let mut manifest = Vec::new();
+            let mut fs = FakeFs::default()
+                .with_file("/out/bin/tool.launch", &record)
+                .with_file(&format!("/vendor/c{matching:02}/{SELF_PATH}.launch"), &record);
+            for index in 0..=matching {
+                manifest.extend_from_slice(&manifest_line(&format!("/vendor/c{index:02}")));
+                if index != matching {
+                    fs = fs.with_file(&format!("/vendor/c{index:02}/{SELF_PATH}.launch"), &heavy);
+                }
+            }
+            fs.with_file("/out/bin/tool.runfiles/MANIFEST", &manifest)
+        };
+        assert_eq!(manifest_root(&world(15)), "/vendor/c15");
+        let message = manifest_refusal(&world(16));
+        assert!(message.contains("17 candidate"), "{message}");
+    }
+
+    #[test]
+    fn vl43_duplicate_roots_are_deduplicated_before_the_cap_of_4096() {
+        let mut manifest = Vec::new();
+        for _ in 0..MAX_MANIFEST_CANDIDATES + 1 {
+            manifest.extend_from_slice(&manifest_line("/vendor/none"));
+        }
+        manifest.extend_from_slice(&manifest_line("/vendor/set"));
+        assert_eq!(manifest_root(&manifest_world(&manifest)), "/vendor/set");
+    }
+
+    #[test]
+    fn vl43_at_most_4096_distinct_candidates_are_examined() {
+        let world = |matching: usize| {
+            let mut manifest = Vec::new();
+            for index in 0..=matching {
+                manifest.extend_from_slice(&manifest_line(&format!("/vendor/n{index}")));
+            }
+            let record = sidecar_json(VENDOR_A, SELF_PATH);
+            FakeFs::default()
+                .with_file("/out/bin/tool.launch", &record)
+                .with_file("/out/bin/tool.runfiles/MANIFEST", &manifest)
+                .with_file(&format!("/vendor/n{matching}/{SELF_PATH}.launch"), &record)
+        };
+        assert_eq!(
+            manifest_root(&world(MAX_MANIFEST_CANDIDATES - 1)),
+            format!("/vendor/n{}", MAX_MANIFEST_CANDIDATES - 1)
+        );
+        let message = manifest_refusal(&world(MAX_MANIFEST_CANDIDATES));
+        assert!(message.contains("4096 candidate"), "{message}");
+    }
+
+    #[test]
+    fn vl43_the_refusal_names_the_first_eight_candidates_and_keeps_the_windows_hint() {
+        let mut manifest = Vec::new();
+        for index in 0..10 {
+            manifest.extend_from_slice(&manifest_line(&format!("/vendor/r{index}")));
+        }
+        let message = manifest_refusal(&manifest_world_without_root(&manifest));
+        assert!(message.contains("10 candidate"), "{message}");
+        assert!(
+            message.contains("/vendor/r7") && !message.contains("/vendor/r8"),
+            "{message}"
+        );
+        assert!(!message.contains("--enable_runfiles"), "{message}");
+
+        let windows = refusal(locate(
+            WINDOWS_TOOL,
+            &windows_context(),
+            &windows_manifest_world(b"", "C:/none"),
+        ));
+        assert!(windows.contains("--enable_runfiles"), "{windows}");
+    }
+
+    fn manifest_world_without_root(manifest: &[u8]) -> FakeFs {
+        FakeFs::default()
+            .with_file("/out/bin/tool.launch", &sidecar_json(VENDOR_A, SELF_PATH))
+            .with_file("/out/bin/tool.runfiles/MANIFEST", manifest)
+    }
+
+    // ── RUNFILES_MANIFEST_FILE ─────────────────────────────────────────────
+
+    fn with_inherited_manifest(manifest_file: &str) -> LookupContext<'_> {
+        LookupContext {
+            manifest_file: Some(manifest_file),
+            ..unix(None)
+        }
+    }
+
+    #[test]
+    fn vl44_an_inherited_manifest_that_does_not_list_the_started_path_is_ignored() {
+        let record = sidecar_json(VENDOR_A, SELF_PATH);
+        let mut other_tree = manifest_line("/vendor/set");
+        other_tree.extend_from_slice(b"tool /somewhere/else/tool\n");
+        let fs = FakeFs::default()
+            .with_file("/out/bin/tool.launch", &record)
+            .with_file("/outer/MANIFEST", &other_tree)
+            .with_file(&format!("/vendor/set/{SELF_PATH}.launch"), &record);
+        let message = refusal(locate(TOOL, &with_inherited_manifest("/outer/MANIFEST"), &fs));
+        assert!(message.contains("0 candidate"), "{message}");
+    }
+
+    #[test]
+    fn vl44_an_inherited_manifest_that_lists_the_started_path_is_used() {
+        let record = sidecar_json(VENDOR_A, SELF_PATH);
+        let mut outer = manifest_line("/vendor/set");
+        outer.extend_from_slice(format!("tool {TOOL}\n").as_bytes());
+        let fs = FakeFs::default()
+            .with_file("/out/bin/tool.launch", &record)
+            .with_file("/outer/MANIFEST", &outer)
+            .with_file(&format!("/vendor/set/{SELF_PATH}.launch"), &record);
+        let located = direct(locate(TOOL, &with_inherited_manifest("/outer/MANIFEST"), &fs).unwrap());
+        assert_eq!(located.root, "/vendor/set");
+    }
+
+    #[test]
+    fn vl44_the_started_path_is_compared_folded_on_windows_and_exactly_on_unix() {
+        let mut outer = manifest_line("C:/vendor/set");
+        outer.extend_from_slice(b"tool c:/OUT/bin/TOOL.exe\n");
+        let fs = windows_manifest_world(b"", "C:/vendor/set").with_file("C:\\outer\\MANIFEST", &outer);
+        let context = LookupContext {
+            manifest_file: Some("C:\\outer\\MANIFEST"),
+            ..windows_context()
+        };
+        assert_eq!(
+            direct(locate(WINDOWS_TOOL, &context, &fs).unwrap()).root,
+            "C:/vendor/set"
+        );
+
+        let mut unix_outer = manifest_line("/vendor/set");
+        unix_outer.extend_from_slice(b"tool /OUT/bin/tool\n");
+        let fs = manifest_world(b"").with_file("/outer/MANIFEST", &unix_outer);
+        assert!(refusal(locate(TOOL, &with_inherited_manifest("/outer/MANIFEST"), &fs)).contains("0 candidate"));
+    }
+
+    #[test]
+    fn vl44_an_inherited_manifest_that_is_not_a_regular_file_is_refused() {
+        let mut fs = manifest_world(&manifest_line("/vendor/set"));
+        fs.unreadable.insert("/outer/fifo".to_string());
+        let message = refusal(locate(TOOL, &with_inherited_manifest("/outer/fifo"), &fs));
+        assert!(
+            message.contains("/outer/fifo") && message.contains("not a regular file"),
+            "{message}"
+        );
+    }
+
+    /// A FIFO at a manifest path must not block the launcher; the read runs on a thread so a hang fails the test.
+    #[cfg(unix)]
+    #[test]
+    fn vl44_a_fifo_at_a_manifest_path_does_not_hang() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let dir = scratch_dir("manifest-fifo");
+        let fifo = dir.join("tool.runfiles_manifest");
+        let name = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        // SAFETY: `name` is a NUL-terminated path that outlives the call; `mkfifo` only reads it. No child process is
+        // forked here, so no other test's freshly written executable is held open by an inherited descriptor.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let path = fifo.to_string_lossy().into_owned();
+        std::thread::spawn(move || {
+            let _ = sender.send(
+                RealFs
+                    .read_lines(&path, MAX_MANIFEST_BYTES, MAX_MANIFEST_LINE)
+                    .map(|_| ()),
+            );
+        });
+        let outcome = receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("the open must return within a second");
+        assert!(matches!(outcome, Err(ReadError::NotRegular)), "{outcome:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn vl44_a_real_manifest_streams_its_lines_and_reports_a_missing_one_as_absent() {
+        let dir = scratch_dir("manifest-lines");
+        let file = dir.join("MANIFEST");
+        std::fs::write(&file, "a b\n\nlast").unwrap();
+        let path = file.to_string_lossy().into_owned();
+        let lines: Vec<Vec<u8>> = RealFs
+            .read_lines(&path, MAX_MANIFEST_BYTES, MAX_MANIFEST_LINE)
+            .unwrap()
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(lines, [b"a b".to_vec(), Vec::new(), b"last".to_vec()]);
+        assert!(
+            RealFs
+                .read_lines(&format!("{path}.absent"), MAX_MANIFEST_BYTES, MAX_MANIFEST_LINE)
+                .unwrap()
+                .is_none()
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // ── Root hygiene ───────────────────────────────────────────────────────
+
+    /// A manifest root that would be accepted if it were not rejected on its shape.
+    fn hygiene_refusal(root: &str) -> String {
+        let record = sidecar_json(VENDOR_A, SELF_PATH);
+        let fs = FakeFs::default()
+            .with_file("/out/bin/tool.launch", &record)
+            .with_file("/out/bin/tool.runfiles/MANIFEST", &manifest_line(root))
+            .with_file(&format!("{root}/{SELF_PATH}.launch"), &record);
+        let message = manifest_refusal(&fs);
+        assert!(message.contains("1 candidate(s) rejected"), "{root:?}: {message}");
+        message
+    }
+
+    #[test]
+    fn vl45_a_root_that_is_relative_or_holds_a_dot_segment_is_rejected() {
+        for root in [
+            "vendor/set",
+            "./vendor/set",
+            "/vendor/./set",
+            "/vendor/../vendor/set",
+            "/vendor/set/..",
+        ] {
+            hygiene_refusal(root);
+        }
+    }
+
+    #[test]
+    fn vl45_a_root_with_cr_or_the_list_separator_is_rejected() {
+        for root in ["/vendor/s\rt", "/vendor/s:t", "/vendor/s\u{b}t:"] {
+            hygiene_refusal(root);
+        }
+    }
+
+    #[test]
+    fn vl45_a_windows_root_with_a_semicolon_or_no_drive_is_rejected() {
+        for root in ["C:/vendor/a;b", "vendor/set", "C:/vendor/../set"] {
+            let manifest = manifest_line(root);
+            let fs = windows_manifest_world(&manifest, root);
+            let message = refusal(locate(WINDOWS_TOOL, &windows_context(), &fs));
+            assert!(message.contains("1 candidate(s) rejected"), "{root:?}: {message}");
+        }
+    }
+
+    #[test]
+    fn vl45_a_root_that_is_not_utf8_is_rejected_on_unix() {
+        let mut manifest = format!("pkg/{SELF_PATH}.launch /vendor/").into_bytes();
+        manifest.push(0xFF);
+        manifest.extend_from_slice(format!("/{SELF_PATH}.launch\n").as_bytes());
+        let message = manifest_refusal(&manifest_world(&manifest));
+        assert!(message.contains("1 candidate(s) rejected"), "{message}");
     }
 }
