@@ -164,6 +164,51 @@ impl PackageManager {
         groups: &[String],
         dry_run: bool,
     ) -> Result<RenderReport, crate::error::PackageErrorKind> {
+        self.render_home_with(lock, pinned, render, groups, dry_run, self.is_offline())
+            .await
+    }
+
+    /// Re-render the global home from `$OCX_HOME/ocx.lock` without reaching the network: the lock pins
+    /// digests, and a tool not in the local store is left out and named in the report. `Ok(None)` when
+    /// there is no global lock, so a machine that never used `--global` is untouched.
+    ///
+    /// # Errors
+    ///
+    /// An unreadable lock or `ocx.toml`, or a render that failed.
+    pub async fn render_global_home(&self) -> crate::Result<Option<RenderReport>> {
+        let root = self.file_structure().root();
+        let Some(lock) = ProjectLock::from_path(&root.join("ocx.lock")).await? else {
+            return Ok(None);
+        };
+        let config = ocx_project::ProjectConfig::from_path(&root.join("ocx.toml")).await?;
+        let pinned = super::pinned_for_project(None, &config);
+        let mut groups: Vec<String> = vec![DEFAULT_GROUP.to_owned()];
+        for tool in &lock.tools {
+            if !groups.iter().any(|group| group == &tool.group) {
+                groups.push(tool.group.clone());
+            }
+        }
+        let platform = ocx_oci::Platform::current().unwrap_or_else(ocx_oci::Platform::any);
+        let render = ToolchainRender {
+            scope: &RenderStampScope::Global,
+            toolchain_root: None,
+            platform: &platform,
+        };
+        Ok(Some(
+            self.render_home_with(&lock, pinned, &render, &groups, false, true)
+                .await?,
+        ))
+    }
+
+    async fn render_home_with(
+        &self,
+        lock: &ProjectLock,
+        pinned: bool,
+        render: &ToolchainRender<'_>,
+        groups: &[String],
+        dry_run: bool,
+        offline: bool,
+    ) -> Result<RenderReport, crate::error::PackageErrorKind> {
         use crate::error::PackageErrorKind;
 
         let home = self
@@ -174,7 +219,7 @@ impl PackageManager {
         let mut unrendered = Vec::new();
         if groups.iter().any(|group| group == DEFAULT_GROUP) {
             let roots = default_group_roots(lock, render.platform);
-            if self.is_offline() {
+            if offline {
                 // A cold store is ordinary offline: render what is present, name the rest.
                 for (root, names) in &roots {
                     match self

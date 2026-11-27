@@ -340,6 +340,15 @@ pub async fn run(
     )
     .await?;
 
+    // ── Phase 1.6: refresh the global toolchain home ──────────────────────────
+    // After phase 1 (the commit point): a failure here warns and never fails setup. Runs with and without
+    // `--handoff`, since a render heals and never introduces (`adr_unified_launcher.md` § 8.1).
+    if !options.dry_run
+        && let Some(warning) = refresh_global_toolchain(manager).await
+    {
+        log::warn!("{warning}");
+    }
+
     // ── Phase 2: env.* shims ─────────────────────────────────────────────────
     let ocx_home = file_structure.root();
     let shims_written = tokio::task::spawn_blocking({
@@ -406,6 +415,15 @@ pub async fn run(
         session_path,
         extra_ca_certs,
     })
+}
+
+/// Phase 1.6 of [`run`]: render the global toolchain home when `$OCX_HOME/ocx.lock` exists, so a new
+/// launcher generation reaches `active`. Returns the warning for a failed render, never an error.
+async fn refresh_global_toolchain(manager: &PackageManager) -> Option<String> {
+    match manager.render_global_home().await {
+        Ok(_) => None,
+        Err(error) => Some(format!("The global toolchain home was not refreshed: {error}")),
+    }
 }
 
 /// Phase 0.5 of [`run`]: resolve `OCX_EXTRA_CA_CERTS` like the loader's env arm, validate it,
@@ -1179,6 +1197,60 @@ mod tests {
         assert!(
             retired.iter().all(|entry| !registered.contains(entry)),
             "the retired entry must not be one this run registers: {retired:?} vs {registered:?}"
+        );
+    }
+
+    // ── phase 1.6: global toolchain refresh ──────────────────────────────────
+
+    fn plain_manager(root: &Path) -> PackageManager {
+        let fs = FileStructure::with_root(root.to_path_buf());
+        let local_index = ocx_index::LocalIndex::new(ocx_index::LocalConfig {
+            index_store: ocx_index::IndexStore::machine_local(&fs),
+        });
+        let index = ocx_index::Index::from_chained(local_index, vec![], ocx_index::ChainMode::Offline);
+        PackageManager::new(fs, index, None, "localhost:5000")
+    }
+
+    const EMPTY_LOCK: &str = "[metadata]\nlock_version = 3\ndeclaration_hash_version = 1\ndeclaration_hash = \"sha256:0000000000000000000000000000000000000000000000000000000000000000\"\ngenerated_by = \"test\"\ngenerated_at = \"2026-01-01T00:00:00Z\"\n";
+
+    /// With a lock present the global home is rendered: the v2 stamp exists and `active` names a
+    /// `default-<16 hex>` directory. Dropping the phase call (mutation) reds the `run` path; this
+    /// pins the step itself.
+    #[tokio::test]
+    async fn refresh_global_toolchain_renders_when_the_lock_exists() {
+        let home = tempfile::TempDir::new().unwrap();
+        std::fs::write(home.path().join("ocx.toml"), "").unwrap();
+        std::fs::write(home.path().join("ocx.lock"), EMPTY_LOCK).unwrap();
+        let manager = plain_manager(home.path());
+
+        assert_eq!(refresh_global_toolchain(&manager).await, None);
+
+        let stamp = manager.file_structure().state.global_render_stamp_v2_file();
+        assert!(stamp.is_file(), "no v2 stamp at {}", stamp.display());
+    }
+
+    #[tokio::test]
+    async fn refresh_global_toolchain_does_nothing_without_a_lock() {
+        let home = tempfile::TempDir::new().unwrap();
+        let manager = plain_manager(home.path());
+
+        assert_eq!(refresh_global_toolchain(&manager).await, None);
+
+        assert!(!manager.file_structure().state.global_render_stamp_v2_file().exists());
+        assert!(!home.path().join("toolchain").exists());
+    }
+
+    #[tokio::test]
+    async fn refresh_global_toolchain_turns_a_failed_render_into_a_warning() {
+        let home = tempfile::TempDir::new().unwrap();
+        // A lock with no `ocx.toml` beside it cannot render.
+        std::fs::write(home.path().join("ocx.lock"), EMPTY_LOCK).unwrap();
+        let manager = plain_manager(home.path());
+
+        let warning = refresh_global_toolchain(&manager).await.expect("a warning");
+        assert!(
+            warning.starts_with("The global toolchain home was not refreshed"),
+            "{warning}"
         );
     }
 
