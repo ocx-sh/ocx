@@ -994,16 +994,44 @@ fn unregistered(literals: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// The shim sources that name an environment variable.
+const SHIM_ENV_SOURCES: [&str; 3] = ["main.rs", "core.rs", "direct.rs"];
+
+/// The `OCX_*` names the shim reads: `var_os("X")` / `var("X")` literals, the name argument of
+/// `environment_value(env, "X", …)`, and `…_VAR: &str = "X"` constants. Foreign names (`PATH`,
+/// `RUNFILES_DIR`) are the registry's no business.
+fn shim_env_literals(source: &str) -> Vec<String> {
+    let mut names = env_read_literals(source);
+    for line in source.lines().filter(|line| !line.trim_start().starts_with("//")) {
+        // The text after `marker` up to the first closing quote of a literal opened by `opener`.
+        let literal_after = |marker: &str, opener: &str| {
+            let rest = &line[line.find(marker)? + marker.len()..];
+            let rest = &rest[rest.find(opener)? + opener.len()..];
+            Some(rest[..rest.find('"')?].to_owned())
+        };
+        names.extend(literal_after("environment_value(", ", \""));
+        names.extend(literal_after("_VAR: &str = ", "\""));
+    }
+    names.retain(|name| name.starts_with("OCX_") || name.starts_with("__OCX_"));
+    names
+}
+
 /// `ocx_shim` stays free of `ocx_env` for its size budget, so it reads its variables by literal;
 /// each literal must still be a registry name, or a rename in the registry strands the shim.
 #[test]
 fn shim_env_literals_are_registry_names() {
-    let source = std::fs::read_to_string(crates_dir().join("ocx_shim/src/main.rs")).expect("shim source readable");
-    let literals = env_read_literals(&source);
-    assert!(
-        literals.iter().any(|name| name == "OCX_HOME") && literals.iter().any(|name| name == "OCX_BINARY_PIN"),
-        "the scan stopped finding the shim's two reads: {literals:?}"
-    );
+    let mut literals = Vec::new();
+    for file in SHIM_ENV_SOURCES {
+        let source =
+            std::fs::read_to_string(crates_dir().join("ocx_shim/src").join(file)).expect("shim source readable");
+        literals.extend(shim_env_literals(&source));
+    }
+    for expected in ["OCX_HOME", "OCX_BINARY_PIN", "__OCX_LAUNCHER_DEPTH"] {
+        assert!(
+            literals.iter().any(|name| name == expected),
+            "the scan stopped finding the shim's read of {expected}: {literals:?}"
+        );
+    }
     assert_eq!(
         unregistered(&literals),
         Vec::<String>::new(),
@@ -1013,10 +1041,16 @@ fn shim_env_literals_are_registry_names() {
 
 #[test]
 fn shim_env_literal_scan_reds_on_an_unregistered_read() {
-    let source = "let a = std::env::var_os(\"OCX_HOME\");\n// std::env::var(\"OCX_COMMENTED\")\nlet b = std::env::var(\"OCX_SHIM_RENAMED\");";
-    let literals = env_read_literals(source);
-    assert_eq!(literals, ["OCX_HOME", "OCX_SHIM_RENAMED"]);
-    assert_eq!(unregistered(&literals), ["OCX_SHIM_RENAMED"]);
+    let source = "let a = std::env::var_os(\"OCX_HOME\");\n// std::env::var(\"OCX_COMMENTED\")\nlet b = std::env::var(\"OCX_SHIM_RENAMED\");\nlet c = core::environment_value(&env, \"OCX_VIA_SNAPSHOT\", windows);\nconst X_VAR: &str = \"__OCX_CONST_NAME\";\nlet d = variable(\"PATH\");";
+    let literals = shim_env_literals(source);
+    assert_eq!(
+        literals,
+        ["OCX_HOME", "OCX_SHIM_RENAMED", "OCX_VIA_SNAPSHOT", "__OCX_CONST_NAME"]
+    );
+    assert_eq!(
+        unregistered(&literals),
+        ["OCX_SHIM_RENAMED", "OCX_VIA_SNAPSHOT", "__OCX_CONST_NAME"]
+    );
 }
 
 /// References to `ocx_env::dynamic` / `dynamic_secret` in `crates/` outside `ocx_env`, pinned: calls
@@ -1113,15 +1147,15 @@ const RAW_ENV_RESIDUE: &[(&str, usize)] = &[
     ("crates/ocx_env/src/lib.rs", 3),
     ("crates/ocx_sdkgen/templates/rust/spawn.rs", 1),
     ("crates/ocx_sdkgen/tests/golden/rust/spawn.rs", 1),
-    ("crates/ocx_shim/src/direct.rs", 4),
-    ("crates/ocx_shim/src/main.rs", 2),
+    ("crates/ocx_shim/src/direct.rs", 6),
     ("crates/ocx_test_support/tests/workspace_structure.rs", 1),
 ];
 
-/// The variable each `ocx_shim` raw read names, so swapping in another name reds.
+/// The variable each `ocx_shim` literal raw read names, so swapping in another name reds. The `OCX_*` names
+/// the shim picks out of its `vars_os()` snapshot are held by `shim_env_literals_are_registry_names`.
 const RAW_ENV_NAMED_RESIDUE: &[(&str, &str)] = &[
-    ("crates/ocx_shim/src/main.rs", "OCX_BINARY_PIN"),
-    ("crates/ocx_shim/src/main.rs", "OCX_HOME"),
+    ("crates/ocx_shim/src/direct.rs", "RUNFILES_DIR"),
+    ("crates/ocx_shim/src/direct.rs", "RUNFILES_MANIFEST_FILE"),
 ];
 
 /// Banned `env::<fn>` paths and `env::{…}` imports of them; a `::` after the name is a module path.
@@ -1520,11 +1554,6 @@ const OCX_UTIL_WITHOUT_CONSUMER: &[&str] = &[
     "from_file_magic",
     "lock_exclusive_with_timeout",
     "open_shared_with_timeout",
-    // Launcher-directory publish helpers, public for the home launcher writers that land after
-    // them; drop each entry when its first caller lands.
-    "publish_dir",
-    "retarget_link",
-    "retire_dir",
     // Public for the package export and import verbs, which land after this item; drop the
     // entry when the first one calls it.
     "with_level",
