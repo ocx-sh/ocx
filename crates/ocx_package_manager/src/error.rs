@@ -129,7 +129,7 @@ pub enum Error {
     #[exit(delegate = 0)]
     Archive(#[from] ocx_util::archive::Error),
 
-    /// A string baked into a generated launcher contains a launcher-unsafe character.
+    /// A string baked into a launch record contains a character the writer refuses.
     #[error("launcher-unsafe character {character:?} in {value:?}; {}", launcher_unsafe_hint(*character))]
     #[exit(
         DataError,
@@ -138,7 +138,7 @@ pub enum Error {
     )]
     LauncherUnsafeCharacter { value: String, character: char },
 
-    /// A path baked verbatim into a generated launcher or sidecar is not valid UTF-8; `path` is its lossy rendering.
+    /// A path baked verbatim into a launch record is not valid UTF-8; `path` is its lossy rendering.
     #[error("path baked into a generated launcher is not valid UTF-8: {path:?}")]
     #[exit(
         DataError,
@@ -902,12 +902,11 @@ impl From<ocx_oci::media_type::UnsupportedMediaType> for Error {
 
 fn launcher_unsafe_hint(c: char) -> &'static str {
     match c {
-        '\'' => {
-            "single quotes cannot appear in installation paths — relocate $OCX_HOME to a directory whose absolute path has no apostrophe"
+        '\'' => "a launch record does not take an apostrophe in a path; use a directory whose path has none",
+        '"' => "a launch record does not take a double quote in a path; use a directory whose path has none",
+        '\n' | '\r' | '\0' => {
+            "a launch record cannot hold a line break or NUL byte in a path; use a directory whose path has none"
         }
-        '"' => "double quotes break Windows launcher quoting — relocate the path to a directory without `\"`",
-        '%' => "percent triggers cmd.exe variable expansion — relocate the path to a directory without `%`",
-        '\n' | '\r' | '\0' => "control characters cannot be embedded in launcher scripts",
         _ => "remove the offending character from the path",
     }
 }

@@ -1,16 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Launcher-safe string newtype for characters that cannot appear in generated launchers.
+//! Launcher-safe string newtype for characters that a launch record must not carry.
 
-/// Characters no launcher string may carry, one set for the `.sh` body and the `.shim` sidecar
-/// (`adr_windows_exe_shim.md` §`.shim` Sidecar Format Contract).
+/// Characters no string baked into a `NAME.launch` record may carry.
 ///
-/// `'` cannot be escaped in a single-quoted shell literal; `\n`, `\r`, `\0` inject lines;
-/// `"` breaks `CreateProcessW` and `.sh` quoting. Adding `%` or `\` blocks real Windows install paths.
+/// `\n`, `\r` and `\0`: the record's own validation refuses a line break in a path field and a NUL in any string, so
+/// the launcher would exit 78 on a record that holds one. `'` and `"`: no reader of the record is broken by them today
+/// (JSON escapes both and the Windows launcher quotes every token of the child command line), so their refusal is a
+/// retained decision, not a consequence of the record format. Adding `%` or `\` would block real Windows install paths.
 const LAUNCHER_UNSAFE_CHARS: &[char] = &['\'', '"', '\n', '\r', '\0'];
 
-/// A `String` proven free of characters that would corrupt a generated launcher.
+/// A `String` proven free of the characters a launch record must not carry.
 #[derive(Debug, Clone)]
 pub(crate) struct LauncherSafeString(String);
 
@@ -37,8 +38,7 @@ mod tests {
 
     #[test]
     fn launcher_safe_string_rejects_all_unsafe_characters() {
-        // Amendment §2: `%` REMOVED from the unsafe set (post-cutover no
-        // consumer treats it specially). The retained set is `' " \n \r \0`.
+        // The refused set is `' " \n \r \0`; `%` is not in it.
         for unsafe_char in ['\'', '"', '\n', '\r', '\0'] {
             let input = format!("prefix{unsafe_char}suffix");
             let err = super::LauncherSafeString::new(input.clone())
@@ -89,9 +89,7 @@ mod tests {
 
     #[test]
     fn launcher_safe_string_rejects_double_quote_even_though_unix_tolerates_it() {
-        // Both launchers are generated on every platform, so the constraint is
-        // unified: `"` would break the Windows `SET "var=value"` form even on
-        // a Linux install where only the `.sh` launcher is used.
+        // One launcher is generated on every platform, so the constraint is the same on every host.
         assert!(super::LauncherSafeString::new("/path/with\"dq").is_err());
     }
 
