@@ -1136,8 +1136,8 @@ fn mapped_image_path() -> Result<String, ShimError> {
                 )));
             }
             SectionQuery::Ready => {
-                // SAFETY: the kernel wrote a `UNICODE_STRING` at the start of `backing`, which is 8-aligned and
-                // holds at least `HEADER` bytes because the call succeeded.
+                // SAFETY: `backing` is zero-initialised, 8-aligned and at least `HEADER` bytes by construction (`capacity`
+                // starts at 2048 and only grows), so the read is in bounds whatever the kernel wrote.
                 let section = unsafe { std::ptr::read(backing.as_ptr().cast::<UNICODE_STRING>()) };
                 // SAFETY: the same allocation viewed as `capacity.div_ceil(8) * 8` initialized bytes.
                 let bytes = unsafe { std::slice::from_raw_parts(backing.as_ptr().cast::<u8>(), backing.len() * 8) };

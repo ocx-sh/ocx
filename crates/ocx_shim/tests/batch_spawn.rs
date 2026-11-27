@@ -3,7 +3,8 @@
 
 //! Windows launches end to end. A vendored `.cmd` target: hostile arguments never run an injected command (BatBadBut,
 //! CVE-2024-24576). An argument std can quote reaches the batch file (exit 0); one holding a line break is refused (exit 64).
-//! A program whose path exceeds `MAX_PATH` starts, from a `direct` record and from a `package` record; one that cannot names the limit. A launcher started through a directory junction resolves the directory behind it.
+//! A program whose path exceeds `MAX_PATH` starts, from a `direct` record and from a `package` record; one that cannot names the limit.
+//! A launcher whose real path is past `MAX_PATH`, started through a directory junction, finds its record and starts a program.
 //!
 //! Runs on Windows CI only; the dispatch decision itself is a host-run unit in `direct.rs`.
 #![cfg(windows)]
@@ -215,22 +216,41 @@ fn a_direct_launcher_starts_a_program_past_max_path() {
     LongPath::assert_child_ran(&output);
 }
 
-/// The launcher is started through a directory junction and the real directory behind it is past `MAX_PATH`: the image
-/// path it resolves is the real one, so the record beside it and the program it names are found and the child runs.
+/// The launcher image lies under nested directories that put its real path past `MAX_PATH`, and it is started through a
+/// short directory junction onto that tree. The record beside the real image is read and the short batch target runs.
+///
+/// Guards the image lookup: with `GetMappedFileNameW` the launcher exits 78 with "cannot resolve the launcher image".
 #[test]
-fn a_direct_launcher_started_through_a_junction_finds_its_record_past_max_path() {
-    let long_path = LongPath::new("junction");
-    let root = long_path.vendor_root();
-    let launcher = root.join(format!("{SELF_PATH}.exe"));
+fn a_launcher_whose_real_path_is_past_max_path_starts_through_a_junction() {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_nanos());
+    let base = std::env::temp_dir().join(format!("ocx-junction-{}-{nanos}", std::process::id()));
+    let root = base.join("vendor");
+    let nested: Vec<String> = (0..5).map(|index| format!("{index}{}", "d".repeat(49))).collect();
+    let self_path = format!("{}/tool", nested.join("/"));
+    let launcher = root.join(format!("{self_path}.exe").replace('/', "\\"));
+    assert!(
+        launcher.as_os_str().encode_wide().count() > 260,
+        "the real image path must exceed MAX_PATH: {}",
+        launcher.display()
+    );
     std::fs::create_dir_all(launcher.parent().unwrap()).unwrap();
     std::fs::copy(LAUNCHER_BINARY, &launcher).unwrap();
+    // The child stays short: the launcher image is what must be long.
+    let program = root.join(PROGRAM);
+    std::fs::create_dir_all(program.parent().unwrap()).unwrap();
+    std::fs::write(&program, PROBE_SCRIPT).unwrap();
     let sidecar = format!(
-        r#"{{"kind":"direct","schema_version":1,"vendor_id":"{VENDOR_ID}","self":"{SELF_PATH}","program":"@VENDOR_DIR@/{}","args":[],"unset":[],"env":[]}}"#,
-        long_path.relative
+        r#"{{"kind":"direct","schema_version":1,"vendor_id":"{VENDOR_ID}","self":"{self_path}","program":"@VENDOR_DIR@/{PROGRAM}","args":[],"unset":[],"env":[]}}"#
     );
-    std::fs::write(root.join(format!("{SELF_PATH}.launch")), sidecar).unwrap();
+    std::fs::write(root.join(format!("{self_path}.launch").replace('/', "\\")), sidecar).unwrap();
+
     // The junction target is short, so `mklink` takes it; the length is in the directories beneath it.
-    let link = long_path.base.join("active");
+    let link = base.join("active");
     let made = Command::new("cmd")
         .args(["/C", "mklink", "/J"])
         .arg(&link)
@@ -238,15 +258,23 @@ fn a_direct_launcher_started_through_a_junction_finds_its_record_past_max_path()
         .output()
         .unwrap();
     assert!(made.status.success(), "mklink /J: {made:?}");
-    let through_junction = link.join(format!("{SELF_PATH}.exe").replace('/', "\\"));
+    let attributes = std::fs::symlink_metadata(&link).unwrap().file_attributes();
+    assert!(attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0, "{attributes:#x}");
+    let through_junction = link.join(format!("{self_path}.exe").replace('/', "\\"));
     assert!(through_junction.is_file(), "{}", through_junction.display());
 
     let output = Command::new(&through_junction)
-        .current_dir(&long_path.base)
+        .arg("hello")
+        .current_dir(&base)
         .output()
         .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let _ = std::fs::remove_dir_all(&base);
 
-    LongPath::assert_child_ran(&output);
+    assert!(!stderr.contains("cannot resolve the launcher image"), "{stderr}");
+    assert_eq!(output.status.code(), Some(0), "{stderr}");
+    assert!(stdout.contains("ARG1=hello"), "the program did not run: {stdout:?}");
 }
 
 #[test]
@@ -301,7 +329,8 @@ fn a_relative_pin_past_max_path_is_refused_as_not_absolute_on_the_one_stderr_lin
 }
 
 /// A batch target whose path reaches `MAX_PATH` never runs: whether std refuses the start or cmd.exe exits non-zero,
-/// the one stderr line carries the length-limit clause (the line's exact text is a host unit in `direct.rs`).
+/// the one stderr line carries the length-limit clause (the line's exact text is a host unit in `direct.rs`). The
+/// launcher here lies under a short path, so this says nothing about the launcher image lookup.
 #[test]
 fn a_batch_target_past_max_path_names_the_length_limit_on_the_stderr_line() {
     let long_path = LongPath::new("batch");
