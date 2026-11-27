@@ -103,7 +103,7 @@ A record holds the package root as a JSON string. The root must be an absolute p
 
 A value with a refused character fails the write with exit code `65` (`DataError`) and the slug `launcher_unsafe_character`. The message names the character and the value. For an apostrophe or a quote, move `$OCX_HOME` to a directory whose absolute path has none.
 
-A root that is not absolute, or that holds the token, passes that check. The launcher's own record rule refuses it instead, with exit code `65` and the slug `launcher_record_refused`. Nothing is written.
+A root that holds the token passes that check. The launcher's own record rule refuses it instead, with exit code `65` and the slug `launcher_record_refused`. A root that is not absolute fails the write with exit code `74`. Nothing is written in either case.
 
 [`ocx vendor`][cmd-vendor] refuses the same token in a package's environment keys, environment values and entry-point arguments with exit code `65` and the slug `vendor_value_unrepresentable`.
 
