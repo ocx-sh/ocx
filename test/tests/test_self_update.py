@@ -38,6 +38,14 @@ from src import (
 )
 from src.conformance import GOLDEN
 from src.registry import fetch_platform_manifest_digest
+from src.toolchain_fixtures import (
+    STAMP_V1,
+    active_shell,
+    generated_shells,
+    read_render_stamp,
+    render_stamp_path,
+    run_previous_in,
+)
 
 pytestmark = pytest.mark.command("version", "status")
 
@@ -854,6 +862,68 @@ def test_self_update_installs_newer_version(
         f"the new binary's own setup must reach phase 3.5 and write {store}; "
         "an update that leaves it absent is the 0.6.0 -> 0.6.1 regression"
     )
+
+
+@_skip_on_windows
+def test_self_update_renders_the_global_toolchain_into_a_new_directory(
+    ocx: OcxRunner,
+    tmp_path: Path,
+    unique_repo: str,
+) -> None:
+    """V-L42 / C-136 / S-103 -- phase 1.6 of the hand-off's setup renders the global
+    home: afterwards `active` names a new `shells/default-<16 hex>` directory.
+
+    The older render here is an older `ocx`'s (``active -> shells/default``, a v1
+    stamp, ``$OCX_HOME/ocx.lock`` present). The hand-off child is the build
+    under test, so the blob does not change between the two; the contract still
+    holds because the old render carries no v2 stamp. A render failure that
+    warns and lets setup succeed (S-103's second half) cannot be provoked
+    through the CLI without a new seam, so it stays a unit test.
+
+    RED: no phase 1.6 -- `active` still names `shells/default`.
+    """
+    repo = unique_repo
+    receipt = _publish_two_versions(ocx, repo, tmp_path)
+    ocx.json("package", "install", "-s", f"{repo}:0.0.1")
+
+    tool = f"{repo}_gtool"
+    package = make_package(ocx, tool, "1.0.0", tmp_path, cascade=False, bins=["gtool"])
+    added = run_previous_in(ocx, tmp_path, "--global", "add", package.fq)
+    assert added.returncode == 0, f"the older ocx adds a global tool:\n{added.stderr}"
+    pulled = run_previous_in(ocx, tmp_path, "--global", "pull")
+    assert pulled.returncode == 0, (
+        f"the older ocx renders the global home:\n{pulled.stderr}"
+    )
+
+    ocx_home = Path(ocx.env["OCX_HOME"])
+    home = ocx_home / "toolchain"
+    assert (ocx_home / "ocx.lock").is_file(), "precondition: the global lock exists"
+    assert active_shell(home) == "default", (
+        "precondition: the older render is `shells/default`"
+    )
+    assert render_stamp_path(ocx, home, 1) is not None, (
+        f"precondition: the older ocx wrote {STAMP_V1}"
+    )
+    assert generated_shells(home) == [], "precondition: no generated directory yet"
+
+    result = _run_self_update_via_seam(ocx, repo, home=tmp_path / "home")
+    assert result.returncode == 0, (
+        f"self update must exit 0; rc={result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    _hand_off_receipt(receipt)
+
+    shells = generated_shells(home)
+    assert len(shells) == 1, (
+        f"V-L42 -- phase 1.6 publishes one new directory; shells/ holds {shells}"
+    )
+    assert active_shell(home) == shells[0], (
+        f"V-L42 -- `active` names the new directory; it names {active_shell(home)!r}"
+    )
+    stamp = read_render_stamp(ocx, home)
+    assert stamp is not None and stamp["shell_dir"] == shells[0], (
+        f"C-136 -- the v2 stamp names the new directory; {stamp}"
+    )
+    assert (home / "shells" / "default").is_dir(), "C-132 -- the older directory stays"
 
 
 @_skip_on_windows
