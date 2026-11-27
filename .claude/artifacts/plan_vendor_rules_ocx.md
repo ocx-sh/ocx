@@ -8,11 +8,11 @@
 - **Tier-grammar:** 5
 - **Updated:** 2026-11-27
 - **Active phase:** 0 — second run planned (§ Second run); first run landed (ocx `9c9e32d4`, rules_ocx `401c9c4`)
-- **Step:** awaiting /hex-finalize (closing review round 3: Approve with deferred Warns; integration gate run 45994015903 beside it)
+- **Step:** /hex-finalize halted at its release gate on 2026-11-27, nothing rewritten: `website:test` fails on two retired glossary words and the fix pass would be a third outer cycle; integration gate run 45994015903 ended red on one Windows acceptance case
 - **Feature branch:** ocx `hex/bazel-rbe-rules-ocx` (pipelines on `hex/bazel-rbe-rules-ocx--<pipeline>`, worktrees under `.agents/worktrees/`); rules_ocx one branch `hex/bazel-rbe-rules-ocx`, its worktree `/home/mherwig/dev/ocx-sh/rules_ocx/.agents/worktrees/hex-bazel-rbe-rules-ocx` shared by the rules_ocx pipelines of a wave (DP-43)
-- **Last update:** 2026-11-27 (after c2a2127f: closing review round 3)
+- **Last update:** 2026-11-27 (after 84e17f45: the goal file records the red Windows acceptance case)
 - **Reviewed:** c2a2127f (rules_ocx 83477a4)
-- **Next:** /hex-finalize in ocx (pull request 784); rules_ocx `hex/bazel-rbe-rules-ocx` is finalized by hand and its pull request 36 stays a draft; both merges are the owner's
+- **Next:** the owner decides on a further cycle: repair the two glossary words and the Windows `any` package case, then /hex-finalize in ocx (pull request 784); rules_ocx pull request 36 stays a draft; both merges are the owner's
 
 ---
 
