@@ -102,19 +102,35 @@ async fn ensure_tree(
         log::debug!("Reusing published deferred tree {}", destination.root().display());
         return Ok(());
     }
-    // Retired, never edited: a published tree is only ever replaced whole.
-    if tokio::fs::symlink_metadata(destination.root()).await.is_ok() {
-        log::warn!(
-            "Replacing the incomplete deferred tree '{}'",
-            destination.root().display()
-        );
-        match retire_dir(destination.root()).await {
-            Ok(Retired::Removed | Retired::LeftForLater) => {}
-            Err(error) => return Err(internal(destination.root(), error)),
-        }
+    if retire_incomplete(destination, names).await? {
+        log::debug!("Reusing published deferred tree {}", destination.root().display());
+        return Ok(());
     }
     let staged = stage_tree(fs, destination.marker, package, nodes, names).await?;
     publish_staged(&staged, destination, names).await
+}
+
+/// Retired, never edited: a published tree is only ever replaced whole. Returns `true` when the tree turned out
+/// complete just before the retire (another process published it since the caller's check) and is left alone.
+async fn retire_incomplete(destination: &ShimDir, names: &BTreeSet<BinaryName>) -> Result<bool, PackageErrorKind> {
+    if tokio::fs::symlink_metadata(destination.root()).await.is_err() {
+        return Ok(false);
+    }
+    if tree_complete(destination, names).await {
+        return Ok(true);
+    }
+    log::warn!(
+        "Replacing the incomplete deferred tree '{}'",
+        destination.root().display()
+    );
+    match retire_dir(destination.root()).await {
+        Ok(Retired::Removed) => Ok(false),
+        Ok(Retired::LeftForLater) => Err(internal(
+            destination.root(),
+            std::io::Error::new(std::io::ErrorKind::PermissionDenied, "in use or protected, not retired"),
+        )),
+        Err(error) => Err(internal(destination.root(), error)),
+    }
 }
 
 async fn tree_complete(tree: &ShimDir, names: &BTreeSet<BinaryName>) -> bool {
@@ -544,6 +560,54 @@ mod tests {
             destination.bin().join("keep").is_file(),
             "a complete tree is not touched"
         );
+    }
+
+    /// A tree another process completed after the caller's check is kept, not retired.
+    #[tokio::test]
+    async fn retire_incomplete_keeps_a_tree_completed_in_the_meantime() {
+        let Some(generation) = generation() else { return };
+        let tempdir = tempfile::tempdir().unwrap();
+        let fs = FileStructure::with_root(tempdir.path().to_path_buf());
+        let package = pinned("ns/cmake", "a");
+        let names = names_of(&["cmake"]);
+        let destination = fs.deferred(&generation).shim_dir(&package);
+        let staged = stage_tree(&fs, destination.marker, &package, &[], &names)
+            .await
+            .unwrap();
+        publish_staged(&staged, &destination, &names).await.unwrap();
+        std::fs::write(destination.root().join("witness"), b"x").unwrap();
+
+        assert!(retire_incomplete(&destination, &names).await.unwrap());
+        assert!(
+            destination.root().join("witness").is_file(),
+            "the complete tree was retired"
+        );
+    }
+
+    /// A tree that cannot be retired is reported as in use or protected, naming the path.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn retire_incomplete_names_a_refused_retire() {
+        let Some(generation) = generation() else { return };
+        let tempdir = tempfile::tempdir().unwrap();
+        let fs = FileStructure::with_root(tempdir.path().to_path_buf());
+        let package = pinned("ns/cmake", "a");
+        let names = names_of(&["cmake"]);
+        let destination = fs.deferred(&generation).shim_dir(&package);
+        let elsewhere = tempdir.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::create_dir_all(destination.root().parent().unwrap()).unwrap();
+        // `retire_dir` never acts on a link: the tree is left for later.
+        std::os::unix::fs::symlink(&elsewhere, destination.root()).unwrap();
+
+        let error = retire_incomplete(&destination, &names).await.unwrap_err();
+
+        let PackageErrorKind::Internal(crate::Error::InternalFile(path, cause)) = &error else {
+            panic!("{error:?}");
+        };
+        assert_eq!(path, destination.root());
+        assert_eq!(cause.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(cause.to_string().contains("in use or protected"), "{cause}");
     }
 
     /// A tree another process published incomplete is an error, never converged on.

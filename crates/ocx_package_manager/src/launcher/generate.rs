@@ -238,6 +238,10 @@ async fn publish_after_retiring(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(crate::error::file_error(target, error)),
         Ok(_) => {
+            // Another process may have published a complete directory since the caller's check: never retire that.
+            if launchers_complete(target, entries).await {
+                return Ok(());
+            }
             log::warn!("Replacing the incomplete launcher directory '{}'", target.display());
             remove_entry(target).await?;
         }
@@ -906,6 +910,25 @@ mod tests {
         let chosen = super::first_use(&fs, &package, &entries).await.unwrap();
 
         assert_eq!(chosen, super::EntryPointDir::Launchers);
+        assert!(super::launchers_complete(&dir, &entries).await);
+    }
+
+    /// A directory another process completed after the caller's completeness check is used, not retired.
+    #[tokio::test]
+    async fn publish_after_retiring_keeps_a_directory_completed_in_the_meantime() {
+        let tmp = tempdir().unwrap();
+        let (fs, package) = home_with_package(tmp.path());
+        let generation = host_generation();
+        let entries = entries_for(&["alpha", "beta"]);
+        let dir = package.launchers(&generation);
+        super::generate(package.root(), &entries, &dir).await.unwrap();
+        std::fs::write(dir.join("witness"), b"published by the other process").unwrap();
+
+        super::publish_after_retiring(&fs, &package, &generation, &dir, &entries)
+            .await
+            .unwrap();
+
+        assert!(dir.join("witness").exists(), "the complete directory was retired");
         assert!(super::launchers_complete(&dir, &entries).await);
     }
 

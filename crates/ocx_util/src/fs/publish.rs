@@ -191,11 +191,11 @@ fn rename_staged_link(staged: &Path, link: &Path) -> std::io::Result<()> {
     std::fs::rename(staged, link)
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 const REPARSE_TAG_MOUNT_POINT: u32 = 0xA000_0003;
 #[cfg(windows)]
 const REPARSE_TAG_SYMLINK: u32 = 0xA000_000C;
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 const MAX_REPARSE_BUFFER: usize = 16 * 1024;
 #[cfg(windows)]
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
@@ -337,17 +337,38 @@ fn reparse_tag(handle: &std::fs::File) -> std::io::Result<u32> {
 }
 
 /// Replaces the mount-point data on an open junction handle.
-///
-/// Layout, all little-endian: `ReparseTag u32`, `ReparseDataLength u16` (bytes after the 8-byte header), `Reserved u16`,
-/// then `SubstituteNameOffset/Length`, `PrintNameOffset/Length` (4 x `u16`, bytes) and the UTF-16 path buffer
-/// `\??\<target>\0<target>\0`.
 #[cfg(windows)]
 fn set_mount_point(handle: &std::fs::File, target: &Path) -> std::io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::System::Ioctl::FSCTL_SET_REPARSE_POINT;
 
-    let print: Vec<u16> = target.as_os_str().encode_wide().collect();
-    let substitute: Vec<u16> = r"\??\".encode_utf16().chain(print.iter().copied()).collect();
+    let target: Vec<u16> = target.as_os_str().encode_wide().collect();
+    let buffer = mount_point_buffer(&target)?;
+    device_control(handle, FSCTL_SET_REPARSE_POINT, &buffer, &mut [])
+}
+
+/// The `REPARSE_DATA_BUFFER` of a mount point to `target` (UTF-16 units).
+///
+/// Layout, all little-endian: `ReparseTag u32`, `ReparseDataLength u16` (bytes after the 8-byte header), `Reserved u16`,
+/// then `SubstituteNameOffset/Length`, `PrintNameOffset/Length` (4 x `u16`, bytes) and the UTF-16 path buffer
+/// `\??\<target>\0<target>\0`. A verbatim `\\?\` prefix is dropped first, because the substitute name already
+/// carries the NT `\??\` prefix: `\\?\C:\x` becomes `\??\C:\x`, `\\?\UNC\s\r` becomes `\??\UNC\s\r`.
+#[cfg(any(windows, test))]
+fn mount_point_buffer(target: &[u16]) -> std::io::Result<Vec<u8>> {
+    let units = |text: &str| text.encode_utf16().collect::<Vec<u16>>();
+    let (verbatim, verbatim_unc) = (units(r"\\?\"), units(r"\\?\UNC\"));
+    let (substitute, print): (Vec<u16>, Vec<u16>) = if let Some(rest) = target.strip_prefix(verbatim_unc.as_slice()) {
+        (
+            units(r"\??\UNC\").into_iter().chain(rest.iter().copied()).collect(),
+            units(r"\\").into_iter().chain(rest.iter().copied()).collect(),
+        )
+    } else {
+        let plain = target.strip_prefix(verbatim.as_slice()).unwrap_or(target);
+        (
+            units(r"\??\").into_iter().chain(plain.iter().copied()).collect(),
+            plain.to_vec(),
+        )
+    };
     let (substitute_bytes, print_bytes) = (substitute.len() * 2, print.len() * 2);
     let data_length = 8 + substitute_bytes + 2 + print_bytes + 2;
     if 8 + data_length > MAX_REPARSE_BUFFER {
@@ -367,7 +388,7 @@ fn set_mount_point(handle: &std::fs::File, target: &Path) -> std::io::Result<()>
     for unit in substitute.iter().chain(&[0]).chain(&print).chain(&[0]) {
         buffer.extend_from_slice(&unit.to_le_bytes());
     }
-    device_control(handle, FSCTL_SET_REPARSE_POINT, &buffer, &mut [])
+    Ok(buffer)
 }
 
 /// Acts only on a real directory, never a symlink or reparse point: renames it to a sibling `.gc-<random>`,
@@ -420,6 +441,8 @@ async fn retire_real_directory(dir: &Path) -> std::io::Result<Retired> {
     };
     match super::rename_with_windows_retry(dir, &graveyard).await {
         Ok(()) => {}
+        // Another process retired `dir` after the caller's lstat: the name is gone.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Retired::Removed),
         // overlayfs refuses directory renames across layers: remove in place.
         #[cfg(unix)]
         Err(error) if error.raw_os_error() == Some(libc::EXDEV) => {
@@ -797,6 +820,64 @@ mod tests {
     async fn retire_absent_dir_is_removed() {
         let tmp = tempfile::tempdir().unwrap();
         assert_eq!(retire_dir(&tmp.path().join("gone")).await.unwrap(), Retired::Removed);
+    }
+
+    #[tokio::test]
+    async fn retire_real_directory_gone_after_the_lstat_is_removed() {
+        let tmp = tempfile::tempdir().unwrap();
+        // The state a second retirer leaves between the caller's lstat and the rename.
+        assert_eq!(
+            retire_real_directory(&tmp.path().join("gone")).await.unwrap(),
+            Retired::Removed
+        );
+    }
+
+    fn utf16(text: &str) -> Vec<u16> {
+        text.encode_utf16().collect()
+    }
+
+    /// The substitute and print names of a mount-point buffer, as text.
+    fn mount_point_names(target: &str) -> (String, String) {
+        let buffer = mount_point_buffer(&utf16(target)).unwrap();
+        let field = |at: usize| usize::from(u16::from_le_bytes([buffer[at], buffer[at + 1]]));
+        let (sub_offset, sub_length, print_offset, print_length) = (field(8), field(10), field(12), field(14));
+        let path_buffer = &buffer[16..];
+        let text = |offset: usize, length: usize| {
+            let units: Vec<u16> = path_buffer[offset..offset + length]
+                .chunks(2)
+                .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                .collect();
+            String::from_utf16(&units).unwrap()
+        };
+        (text(sub_offset, sub_length), text(print_offset, print_length))
+    }
+
+    #[test]
+    fn mount_point_buffer_plain_target_gets_the_nt_prefix() {
+        let (substitute, print) = mount_point_names(r"C:\Users\x");
+        assert_eq!(substitute, r"\??\C:\Users\x");
+        assert_eq!(print, r"C:\Users\x");
+    }
+
+    #[test]
+    fn mount_point_buffer_drops_a_verbatim_prefix() {
+        let long = format!(r"\\?\C:\{}", "d".repeat(240));
+        let (substitute, print) = mount_point_names(&long);
+        assert!(substitute.starts_with(r"\??\C:\"), "substitute: {substitute}");
+        assert!(print.starts_with(r"C:\"), "print: {print}");
+        assert!(!substitute.contains(r"\\?\"), "substitute: {substitute}");
+    }
+
+    #[test]
+    fn mount_point_buffer_maps_a_verbatim_unc_target() {
+        let (substitute, print) = mount_point_names(r"\\?\UNC\server\share\x");
+        assert_eq!(substitute, r"\??\UNC\server\share\x");
+        assert_eq!(print, r"\\server\share\x");
+    }
+
+    #[test]
+    fn mount_point_buffer_refuses_a_target_past_the_reparse_limit() {
+        assert!(mount_point_buffer(&utf16(&format!(r"C:\{}", "d".repeat(9000)))).is_err());
     }
 
     #[cfg(windows)]
