@@ -12,7 +12,8 @@ use crate::api;
 /// An object is unreferenced when its `refs/` directory is empty or absent, as
 /// after `ocx uninstall` without `--purge` or a manual symlink removal. A temp
 /// directory is stale when no running process holds its `install.lock`: a
-/// previous download was interrupted.
+/// previous download was interrupted. It also removes the launcher directories
+/// of other ocx builds.
 ///
 /// Packages any registered project's `ocx.lock` holds are retained, even from
 /// another project directory; `--force` ignores the project registry.
@@ -42,6 +43,7 @@ impl Clean {
             result.objects,
             result.temp,
             result.consent,
+            result.launchers,
             self.dry_run,
         ))?;
 

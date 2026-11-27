@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use ocx_store::file_structure::FileStructure;
 
 use reachability_graph::ReachabilityGraph;
+pub(super) use reachability_graph::current_deferred;
 
 use super::resolve::SitePatchRoots;
 
