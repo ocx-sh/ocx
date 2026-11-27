@@ -1329,6 +1329,11 @@
           "exit_code": 65
         },
         {
+          "value": "launcher_record_refused",
+          "description": "A launch record breaks a rule the launcher enforces when it reads it",
+          "exit_code": 65
+        },
+        {
           "value": "launcher_unsafe_character",
           "description": "A value baked into a generated launcher contains an unsafe character",
           "exit_code": 65

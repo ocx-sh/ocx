@@ -25,8 +25,8 @@ use ocx_env_apply::launch::{
 /// # Errors
 ///
 /// A failed write, a host without a launcher blob, or a `pkg_root` that is not UTF-8 or holds a
-/// [`LauncherSafeString`]-unsafe character, or one the target's launcher would refuse to read (a Windows target needs a
-/// drive or UNC root).
+/// [`LauncherSafeString`]-unsafe character. A root the target's launcher would refuse to read (a Windows target needs
+/// a drive or UNC root) is [`crate::Error::LauncherRecordRefused`].
 pub async fn generate(pkg_root: &Path, entries: &Entrypoints, dest: &Path) -> Result<(), crate::Error> {
     if entries.is_empty() {
         return Ok(());

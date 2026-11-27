@@ -259,6 +259,7 @@ impl ErrorDetail {
             Self::KeyUnreadable => Some(ExitCode::IoError),
             Self::LaunchSpawnFailed => Some(ExitCode::Failure),
             Self::LauncherPathNotUtf8 => Some(ExitCode::DataError),
+            Self::LauncherRecordRefused => Some(ExitCode::DataError),
             Self::LauncherUnsafeCharacter => Some(ExitCode::DataError),
             Self::LayerLayoutFailed => Some(ExitCode::Failure),
             Self::LayerNotStaged => Some(ExitCode::Failure),

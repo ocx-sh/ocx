@@ -234,6 +234,7 @@ key_unreadable	IoError	A signing or verification key could not be read from its 
 key_unreadable	IoError	A signing or verification key could not be read from its location
 launch_spawn_failed	Failure	The resolved command could not be started
 launcher_path_not_utf8	DataError	A path baked into a generated launcher is not valid UTF-8
+launcher_record_refused	DataError	A launch record breaks a rule the launcher enforces when it reads it
 launcher_unsafe_character	DataError	A value baked into a generated launcher contains an unsafe character
 layer_layout_failed	Failure	Resolving a layer layout failed with an unclassified cause
 layer_not_staged	Failure	A layer the package needs was not staged

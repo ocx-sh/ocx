@@ -3329,6 +3329,8 @@ pub enum ErrorDetail {
     LaunchSpawnFailed,
     /// A path baked into a generated launcher is not valid UTF-8
     LauncherPathNotUtf8,
+    /// A launch record breaks a rule the launcher enforces when it reads it
+    LauncherRecordRefused,
     /// A value baked into a generated launcher contains an unsafe character
     LauncherUnsafeCharacter,
     /// Resolving a layer layout failed with an unclassified cause
@@ -4203,6 +4205,7 @@ impl ErrorDetail {
             Self::KeyUnreadable => "key_unreadable",
             Self::LaunchSpawnFailed => "launch_spawn_failed",
             Self::LauncherPathNotUtf8 => "launcher_path_not_utf8",
+            Self::LauncherRecordRefused => "launcher_record_refused",
             Self::LauncherUnsafeCharacter => "launcher_unsafe_character",
             Self::LayerLayoutFailed => "layer_layout_failed",
             Self::LayerNotStaged => "layer_not_staged",
@@ -4752,6 +4755,7 @@ impl ErrorDetail {
             "key_unreadable" => Self::KeyUnreadable,
             "launch_spawn_failed" => Self::LaunchSpawnFailed,
             "launcher_path_not_utf8" => Self::LauncherPathNotUtf8,
+            "launcher_record_refused" => Self::LauncherRecordRefused,
             "launcher_unsafe_character" => Self::LauncherUnsafeCharacter,
             "layer_layout_failed" => Self::LayerLayoutFailed,
             "layer_not_staged" => Self::LayerNotStaged,

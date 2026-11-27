@@ -222,6 +222,7 @@ Input data is malformed or fails verification.
 | `json_serialization` | JSON could not be serialized or deserialized |
 | `key_malformed` | A signing or verification key holds no usable key |
 | `launcher_path_not_utf8` | A path baked into a generated launcher is not valid UTF-8 |
+| `launcher_record_refused` | A launch record breaks a rule the launcher enforces when it reads it |
 | `launcher_unsafe_character` | A value baked into a generated launcher contains an unsafe character |
 | `layer_size_exceeded` | A layer declares a size above the allowed maximum |
 | `libc_scan_scope_modifier` | The libc scan scope carries a modifier it cannot honour |
