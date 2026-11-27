@@ -113,7 +113,8 @@ pub struct EnvRecord {
     pub key: String,
     pub value: String,
     pub kind: ApplyKind,
-    /// Required for `list`, absent otherwise.
+    /// The list separator; `validate` checks neither its presence nor its use, and `apply_one` defaults a missing
+    /// list separator to a space and ignores one on `path` and `constant`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub separator: Option<String>,
 }
@@ -168,7 +169,8 @@ impl fmt::Display for RecordError {
     }
 }
 
-// No `std::error::Error` impl yet: the CLI boundary guard requires a `families!` rung for any error a public fn returns, and the rung arrives with the vendor task.
+impl std::error::Error for RecordError {}
+
 impl LaunchRecord {
     /// Reads at most [`MAX_RECORD_BYTES`]: peeks the kind, decodes that kind's struct, checks its `kind`
     /// against the peek, validates it and scans every string for NUL.
@@ -181,6 +183,15 @@ impl LaunchRecord {
             return Err(RecordError::TooLarge);
         }
         let kind = peek(bytes).map_err(RecordError::Malformed)?;
+        // A later schema may add keys the strict shape below refuses, so its version is named before that read.
+        if let Ok(PeekVersion {
+            schema_version: Some(found),
+        }) = serde_json::from_slice(bytes)
+            && let Some(found) = found.as_u64().and_then(|version| u32::try_from(version).ok())
+            && found != SCHEMA_VERSION
+        {
+            return Err(RecordError::SchemaVersion(found));
+        }
         let malformed = |error: serde_json::Error| RecordError::Malformed(error.to_string());
         // The struct's own `kind` equals the peek or `validate` returns `KindMismatch`.
         let record = match kind {
@@ -284,6 +295,13 @@ pub fn peek_kind(bytes: &[u8]) -> Option<LaunchKind> {
 #[derive(Deserialize)]
 struct Peek {
     kind: LaunchKind,
+}
+
+/// The `schema_version` of a record, every other key ignored; the strict read reports one that is not an integer.
+#[derive(Deserialize)]
+struct PeekVersion {
+    #[serde(default)]
+    schema_version: Option<serde_json::Value>,
 }
 
 /// [`peek_kind`] without the size bound, so `decode` can peek a record of up to [`MAX_RECORD_BYTES`].
@@ -903,6 +921,25 @@ mod tests {
         assert_eq!(
             LaunchRecord::decode(two.as_bytes(), false),
             Err(RecordError::SchemaVersion(2))
+        );
+    }
+
+    /// A newer schema may add keys; the refusal names the version, not the first key the strict shape rejects.
+    #[test]
+    fn decode_reports_a_newer_schema_version_before_it_reads_the_strict_shape() {
+        let newer = GOLDEN_PACKAGE.replace(r#""schema_version":1"#, r#""schema_version":2,"added_in_v2":true"#);
+        assert!(newer.contains("added_in_v2"), "the mutation landed");
+        assert_eq!(
+            LaunchRecord::decode(newer.as_bytes(), false),
+            Err(RecordError::SchemaVersion(2))
+        );
+        let unknown_key = GOLDEN_PACKAGE.replace(r#""schema_version":1"#, r#""schema_version":1,"added":true"#);
+        assert!(
+            matches!(
+                LaunchRecord::decode(unknown_key.as_bytes(), false),
+                Err(RecordError::Malformed(_))
+            ),
+            "an unknown key under the current version stays malformed"
         );
     }
 
