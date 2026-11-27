@@ -139,7 +139,7 @@ const DEEP_LEAF: &str = "leaf-past-max-path";
 
 /// A temp dir holding a real executable, a copy of the launcher, under a directory deeper than `MAX_PATH`.
 ///
-/// The copy has no sidecar of its own, so once started it exits 78 with `sidecar not found` naming its own path:
+/// The copy has no launch record of its own, so once started it exits 78 with `launch record not found` naming its own path:
 /// that exit and that path prove the child ran. A launcher that cannot start it exits 74 or 69 instead.
 struct LongPath {
     base: PathBuf,
@@ -184,7 +184,7 @@ impl LongPath {
     fn assert_child_ran(output: &Output) {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert_eq!(output.status.code(), Some(78), "{stderr}");
-        assert!(stderr.contains("sidecar not found"), "{stderr}");
+        assert!(stderr.contains("launch record not found"), "{stderr}");
         assert!(
             stderr.contains(DEEP_LEAF),
             "the child must report its own deep path: {stderr}"

@@ -30,7 +30,10 @@ enum ShimError {
     /// The resolved absolute `ocx` is not there. Exit 69 (`EX_UNAVAILABLE`).
     ///
     /// A `PATH` walk that finds none is a 78 (`DirectRefused`), never this.
-    OcxNotFound { program: String },
+    OcxNotFound {
+        program: String,
+        source: core::ProgramSource,
+    },
     /// `CreateProcessW` failed otherwise: exit 74, or 77 when `win32` is `ERROR_ACCESS_DENIED`.
     SpawnFailure { win32: u32, program: String },
     /// The launcher refused: its `.launch` record missing, unreadable or malformed, or no vendored root accepted. Exit 78.
@@ -97,10 +100,12 @@ impl ShimError {
                 format!("ocx-shim: package root outside OCX home: {}", escape_controls(path))
             }
             ShimError::SelfPathFailure => "ocx-shim: cannot determine own path".to_string(),
-            ShimError::OcxNotFound { program } => {
+            ShimError::OcxNotFound { program, source } => {
                 format!(
-                    "ocx-shim: pinned ocx not found: {} (OCX_BINARY_PIN points at a missing path)",
-                    escape_controls(program)
+                    "ocx-shim: ocx not found: {} (from {}); {}",
+                    escape_controls(program),
+                    source.describe(),
+                    source.remedy()
                 )
             }
             ShimError::SpawnFailure { win32, program } => {
@@ -130,7 +135,7 @@ impl ShimError {
     fn length_limit_hint(&self, working_directory_units: usize) -> Option<String> {
         match self {
             ShimError::SpawnFailure { win32, program } => length_limit_hint(*win32, working_directory_units, program),
-            ShimError::OcxNotFound { program } => length_limit_hint(3, working_directory_units, program),
+            ShimError::OcxNotFound { program, .. } => length_limit_hint(3, working_directory_units, program),
             _ => None,
         }
     }
@@ -292,6 +297,7 @@ fn run_home(home: &core::HomeLaunch, image: &str, stem: &str) -> Result<i32, Shi
     spawn_child(&start.program, &command_line, Some(&block)).map_err(|last| match last {
         ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND => ShimError::OcxNotFound {
             program: start.program.clone(),
+            source: start.source,
         },
         other => ShimError::SpawnFailure {
             win32: other,
@@ -728,7 +734,10 @@ mod tests {
             hint.contains("program path is 260") && hint.contains("cmd.exe"),
             "{hint}"
         );
-        let pinned = ShimError::OcxNotFound { program: batch.clone() };
+        let pinned = ShimError::OcxNotFound {
+            program: batch.clone(),
+            source: crate::core::ProgramSource::Pin,
+        };
         assert!(
             pinned.length_limit_hint(10).is_some(),
             "a pinned ocx is judged as error 3"
@@ -769,11 +778,11 @@ mod tests {
     #[test]
     fn a_refusal_reaches_stderr_with_its_control_characters_escaped() {
         let refused = ShimError::DirectRefused {
-            reason: "started path /v/to\u{1b}[2Jol is not the running image".to_string(),
+            reason: "started path /v/to\u{1b}[2Jol is not the file this launcher runs from".to_string(),
         };
         assert_eq!(
             refused.stderr_message(),
-            "ocx-shim: started path /v/to\\u{1b}[2Jol is not the running image"
+            "ocx-shim: started path /v/to\\u{1b}[2Jol is not the file this launcher runs from"
         );
         let argument = ShimError::DirectArgumentRefused {
             reason: "argument 1 for C:\\t\r.cmd holds a line break".to_string(),
@@ -820,6 +829,7 @@ mod tests {
         );
         let pinned = ShimError::OcxNotFound {
             program: "C:\\o\ncx.exe".to_string(),
+            source: crate::core::ProgramSource::Pin,
         };
         assert!(
             pinned.stderr_message().contains("C:\\o\\ncx.exe"),
@@ -851,7 +861,8 @@ mod tests {
         // ERROR_FILE_NOT_FOUND) needs Windows, but the code mapping is pure.
         assert_eq!(
             ShimError::OcxNotFound {
-                program: "C:\\ocx.exe".to_string()
+                program: "C:\\ocx.exe".to_string(),
+                source: crate::core::ProgramSource::Pin,
             }
             .exit_code(),
             69,
@@ -923,9 +934,39 @@ mod tests {
     // ── E5 OcxNotFound — the stderr line names the resolved program ─────────
 
     #[test]
+    fn a_missing_ocx_names_the_source_the_program_came_from() {
+        let line = |source| {
+            ShimError::OcxNotFound {
+                program: "C:\\tools\\ocx.exe".to_string(),
+                source,
+            }
+            .stderr_message()
+        };
+        let pin = line(crate::core::ProgramSource::Pin);
+        assert!(
+            pin.contains("from OCX_BINARY_PIN") && pin.contains("or unset it"),
+            "{pin}"
+        );
+        let record = line(crate::core::ProgramSource::Record);
+        assert!(record.contains("from the launch record's ocx"), "{record}");
+        assert!(
+            !record.contains("from OCX_BINARY_PIN"),
+            "a record's ocx is not the pin: {record}"
+        );
+        assert!(
+            record.contains("OCX_BINARY_PIN") && record.contains("put ocx on PATH"),
+            "{record}"
+        );
+        let walk = line(crate::core::ProgramSource::PathWalk);
+        assert!(walk.contains("from the ocx found on PATH"), "{walk}");
+        assert!(!walk.contains("from OCX_BINARY_PIN"), "{walk}");
+    }
+
+    #[test]
     fn e5_ocx_not_found_pinned_names_program_and_drops_path_hint() {
         let err = ShimError::OcxNotFound {
             program: "C:\\tools\\ocx.exe".to_string(),
+            source: crate::core::ProgramSource::Pin,
         };
         assert_eq!(
             err.exit_code(),

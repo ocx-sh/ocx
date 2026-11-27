@@ -12,13 +12,13 @@ name = "ocx-shim"
 path = "src/main.rs"
 
 [dependencies]
-# The direct-launcher mode (A5) decodes the `.launch` sidecar with these and applies
-# its records through `ocx_env_apply`; std + serde only, so the size budget holds.
+# The launcher decodes the `NAME.launch` record with these and applies it through `ocx_env_apply`;
+# std + serde only, so the size budget holds.
 ocx_env_apply.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
-# `O_NONBLOCK` for the sidecar open, so a FIFO planted at the sidecar path cannot hang the launcher.
+# `O_NONBLOCK` for the record open, so a FIFO planted at the record path cannot hang the launcher.
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
 
@@ -34,11 +34,7 @@ workspace = true
 
 # size profile
 #
-# The binary-size budget for the shim (opt-level="z", lto=true,
-# codegen-units=1, panic="abort", strip="symbols") is NOT declared here:
-# Cargo only honours `[profile.*]` tables at the workspace root, and adding
-# a size-tuned release profile to the root `Cargo.toml` would change the
-# release build of every workspace crate. The release-size budget for the
-# committed shim blob is therefore governed by a dedicated build profile /
-# CI job introduced in Phase 4 (see plan_windows_exe_shim.md §4.3-4.4).
-# This crate carries only its package metadata in Phase 1 (stub).
+# The binary-size budget (opt-level="z", lto=true, codegen-units=1, panic="abort", strip="symbols") is not declared
+# here: Cargo honours `[profile.*]` tables only at the workspace root, and a size-tuned release profile there would
+# change the release build of every workspace crate. The committed launcher blobs are built by their own profile and
+# CI job; see `adr_unified_launcher.md`.
