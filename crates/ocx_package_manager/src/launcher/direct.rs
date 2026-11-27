@@ -20,7 +20,8 @@ use crate::tasks::vendor::VendorError;
 ///
 /// # Errors
 ///
-/// [`VendorError::ValueUnrepresentable`] or [`VendorError::PathUnrepresentable`] when `sidecar` breaks a rule of
+/// [`VendorError::PathUnrepresentable`] when `sidecar` names a path outside the vendor directory, and
+/// [`crate::Error::LauncherRecordRefused`] (as [`VendorError::Package`]) for any other rule of
 /// [`DirectRecord::validate`], before anything is written; [`VendorError::Package`] for a failed write.
 pub async fn write_direct_launcher_for(
     dir: &Path,
@@ -32,11 +33,12 @@ pub async fn write_direct_launcher_for(
     let mut sidecar = sidecar.clone();
     // The launcher's environment is never the caller's: every credential and every plumbing key is removed.
     sidecar.unset = unset_keys();
-    sidecar.validate(windows).map_err(|e| match e {
+    sidecar.validate(windows).map_err(|error| match error {
         RecordError::PathNotInRoot(path) => VendorError::PathUnrepresentable { path },
-        other => VendorError::ValueUnrepresentable {
-            reason: other.to_string(),
-        },
+        source => VendorError::Package(crate::Error::LauncherRecordRefused {
+            path: dir.join(format!("{name}.{RECORD_EXTENSION}")),
+            source,
+        }),
     })?;
     let body = LaunchRecord::Direct(sidecar).encode();
 
@@ -163,7 +165,13 @@ mod tests {
                 separator: None,
             }];
             let (_tmp, result) = write(&bad).await;
-            assert!(matches!(result, Err(VendorError::ValueUnrepresentable { .. })), "{key}");
+            assert!(
+                matches!(
+                    result,
+                    Err(VendorError::Package(crate::Error::LauncherRecordRefused { .. }))
+                ),
+                "{key}"
+            );
         }
 
         let mut ok = sidecar("bin/tool");

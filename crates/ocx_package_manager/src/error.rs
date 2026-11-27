@@ -147,7 +147,23 @@ pub enum Error {
     )]
     LauncherPathNotUtf8 { path: String },
 
-    /// A toolchain root baked into a rendered launcher or its `.exec` sidecar is not absolute.
+    /// A launch record breaks a rule the launcher enforces when it reads the record, so no launcher is written with it.
+    ///
+    /// `path` is the file the record was meant for; the broken rule is the [`RecordError`](ocx_env_apply::launch::RecordError) cause, which the chain walk
+    /// prints, so the message does not repeat it.
+    #[error("the launcher would refuse the launch record for {}", path.display())]
+    #[exit(
+        DataError,
+        slug = "launcher_record_refused",
+        summary = "A launch record breaks a rule the launcher enforces when it reads it"
+    )]
+    LauncherRecordRefused {
+        path: std::path::PathBuf,
+        #[source]
+        source: ocx_env_apply::launch::RecordError,
+    },
+
+    /// A toolchain root baked into a launch record is not absolute.
     #[error("toolchain home is not an absolute path: {value:?}")]
     #[exit(
         DataError,

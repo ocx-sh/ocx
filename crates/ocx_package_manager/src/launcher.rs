@@ -47,20 +47,52 @@ pub(crate) fn deferred_record(identifier: &ocx_oci::PinnedPackageRef) -> Result<
 ///
 /// # Errors
 ///
-/// The record's [`LaunchRecord::validate`] failure, as an invalid-input file error.
+/// [`crate::Error::LauncherRecordRefused`] carrying the record's [`LaunchRecord::validate`] failure.
 pub(crate) fn validate_for_write(
     record: &LaunchRecord,
     windows: bool,
     context: &std::path::Path,
 ) -> Result<(), crate::Error> {
-    // `RecordError` has no `std::error::Error` impl, so its text is the whole cause.
-    record.validate(windows).map_err(|error| {
-        crate::error::file_error(
-            context,
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("the launcher would refuse this record: {error}"),
-            ),
-        )
-    })
+    record
+        .validate(windows)
+        .map_err(|source| crate::Error::LauncherRecordRefused {
+            path: context.to_path_buf(),
+            source,
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::error::Error as _;
+
+    use ocx_env_apply::launch::{LaunchKind, LaunchRecord, PackageRecord, RecordError, SCHEMA_VERSION};
+    use ocx_exit::{ClassifyErrorKind, ClassifyExitCode, Detail, ExitCode};
+
+    use super::validate_for_write;
+
+    /// A record the launcher would refuse leaves the writer as a data error, with the broken rule as its cause.
+    #[test]
+    fn a_record_the_launcher_would_refuse_is_a_data_error_whose_source_is_the_record_error() {
+        let relative_root = LaunchRecord::Package(PackageRecord {
+            kind: LaunchKind::Package,
+            schema_version: SCHEMA_VERSION,
+            package_root: "relative/root".to_owned(),
+        });
+        let error = validate_for_write(&relative_root, false, std::path::Path::new("/home/launchers/tool"))
+            .expect_err("a relative package root is refused");
+        assert_eq!(error.classify(), Some(ExitCode::DataError));
+        let Detail::Fixed(entry) = error.kind_detail() else {
+            panic!("the variant names its slug directly");
+        };
+        assert_eq!(entry.slug, "launcher_record_refused");
+        let source = error.source().expect("the record error is the source");
+        assert_eq!(
+            source.downcast_ref::<RecordError>(),
+            Some(&RecordError::NotAbsolute("relative/root".to_owned()))
+        );
+        assert!(
+            !error.to_string().contains("relative/root"),
+            "the cause is printed by the chain, not twice: {error}"
+        );
+    }
 }

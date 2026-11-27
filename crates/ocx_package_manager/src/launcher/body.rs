@@ -8,7 +8,9 @@
 
 use std::path::{Path, PathBuf};
 
-use ocx_env_apply::launch::{LaunchKind, LaunchRecord, SCHEMA_VERSION, ToolchainRecord, ToolchainTier};
+use ocx_env_apply::launch::{
+    LaunchKind, LaunchRecord, SCHEMA_VERSION, ToolchainRecord, ToolchainTier, is_absolute_any_host,
+};
 
 use super::safety::LauncherSafeString;
 
@@ -32,8 +34,8 @@ pub(crate) enum TrampolineTarget {
 /// - [`crate::Error::LauncherPathNotUtf8`] when the project root or `ocx` path is not UTF-8.
 /// - [`crate::Error::ToolchainHomeNotAbsolute`] when the project root is relative.
 /// - [`crate::Error::LauncherUnsafeCharacter`] when either path holds a launcher-unsafe character.
-/// - [`crate::Error::InternalFile`] naming `context` when the launcher would refuse the record (a Windows path
-///   without a drive, a batch-file `ocx`).
+/// - [`crate::Error::LauncherRecordRefused`] naming `context` when the launcher would refuse the record (a Windows
+///   path without a drive, a batch-file `ocx`).
 pub(crate) fn toolchain_record(
     target: &TrampolineTarget,
     ocx_binary: Option<&Path>,
@@ -95,20 +97,6 @@ pub(super) fn utf8_baked_path(path: &Path) -> Result<&str, crate::Error> {
     path.to_str().ok_or_else(|| crate::Error::LauncherPathNotUtf8 {
         path: path.to_string_lossy().into_owned(),
     })
-}
-
-/// Whether `value` is an absolute path on any host, not on the rendering one; the record's own
-/// `validate` then applies the target's rule.
-fn is_absolute_any_host(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    if value.starts_with("\\\\") {
-        return true;
-    }
-    if bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && (bytes[2] == b'\\' || bytes[2] == b'/')
-    {
-        return true;
-    }
-    value.starts_with('/')
 }
 
 #[cfg(test)]
@@ -214,11 +202,11 @@ mod tests {
     fn a_record_the_windows_launcher_refuses_is_never_built() {
         assert!(matches!(
             encoded(&project("/w/proj"), None, true),
-            Err(crate::Error::InternalFile(..))
+            Err(crate::Error::LauncherRecordRefused { .. })
         ));
         assert!(matches!(
             encoded(&TrampolineTarget::Global, Some("C:\\ocx\\ocx.cmd"), true),
-            Err(crate::Error::InternalFile(..))
+            Err(crate::Error::LauncherRecordRefused { .. })
         ));
         assert!(encoded(&project("C:\\w\\proj"), Some("C:\\ocx\\ocx.exe"), true).is_ok());
     }
