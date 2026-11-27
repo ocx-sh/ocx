@@ -1051,6 +1051,7 @@ async fn write_content(
     }
     manifest.content = Content::Present;
     mark_declared_binaries_executable(&manifest.tools, &mut manifest.packages);
+
     ensure_binary_targets_exist(&layout, &manifest.tools, &manifest.packages).await?;
 
     // No blob for the platform means no launcher and no sidecar; the manifest then lists no `launcher_path`.
@@ -1941,11 +1942,25 @@ mod tests {
 
     /// Registers a flat package manifest over the metadata `config`; returns the manifest digest.
     fn register_package(source: FakeManifestSource, config: serde_json::Value) -> (FakeManifestSource, Digest) {
+        register_package_typed(source, config, "")
+    }
+
+    /// [`register_package`] with `artifact_type` spelled in the manifest, so a pull of it succeeds.
+    fn register_package_typed(
+        source: FakeManifestSource,
+        config: serde_json::Value,
+        artifact_type: &str,
+    ) -> (FakeManifestSource, Digest) {
         let config = config.to_string();
         let config_digest = Algorithm::Sha256.hash(config.as_bytes());
         let manifest = format!(
-            r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{{"mediaType":"{MEDIA_TYPE_PACKAGE_METADATA_V1}","digest":"{config_digest}","size":{size}}},"layers":[]}}"#,
+            r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json",{artifact_type}"config":{{"mediaType":"{MEDIA_TYPE_PACKAGE_METADATA_V1}","digest":"{config_digest}","size":{size}}},"layers":[]}}"#,
             size = config.len(),
+            artifact_type = if artifact_type.is_empty() {
+                String::new()
+            } else {
+                format!(r#""artifactType":"{artifact_type}","#)
+            },
         );
         let digest = Algorithm::Sha256.hash(manifest.as_bytes());
         let source = source
@@ -2915,7 +2930,22 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn manifest_only_writes_exactly_one_deterministic_file() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let (source, _, _) = registered_tool();
+        let artifact = "application/vnd.sh.ocx.package.v1";
+        let (source, dependency) = register_package_typed(
+            FakeManifestSource::default(),
+            serde_json::json!({"type": "bundle", "version": 1, "dependencies": [], "entrypoints": {}, "env": []}),
+            artifact,
+        );
+        let (source, root) = register_package_typed(
+            source,
+            serde_json::json!({
+                "type": "bundle", "version": 1, "binaries": ["cmake"], "entrypoints": {},
+                "dependencies": [{"identifier": format!("{REGISTRY}/dep@{dependency}"), "visibility": "public", "name": "dep"}],
+                "env": [{"key": "PATH", "type": "path", "value": "${installPath}/bin", "visibility": "public"}],
+            }),
+            artifact,
+        );
+        let source = register_index(source, "1.0", &root, &[("linux", "amd64")]);
         let manager = manager_over(&dir.path().join("home"), source);
         let mut request = packages_request(vec![package("tool", "1.0")], linux_amd64());
         let selection = select(&manager, &request).await.expect("the selection reads");
@@ -3442,6 +3472,70 @@ mod tests {
             probe.writable_reads.load(SeqCst),
             0,
             "no read went to the writable index"
+        );
+    }
+
+    /// The call in `write_content`, not the helper: a declared binary on disk without any executable mode bit
+    /// is listed `executable: true`, a file nothing declares keeps `false`.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn write_content_marks_the_declared_binary_executable_though_its_mode_bits_are_clear() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let artifact = "application/vnd.sh.ocx.package.v1";
+        let (source, dependency) = register_package_typed(
+            FakeManifestSource::default(),
+            serde_json::json!({"type": "bundle", "version": 1, "dependencies": [], "entrypoints": {}, "env": []}),
+            artifact,
+        );
+        let (source, root) = register_package_typed(
+            source,
+            serde_json::json!({
+                "type": "bundle", "version": 1, "binaries": ["cmake"], "entrypoints": {},
+                "dependencies": [{"identifier": format!("{REGISTRY}/dep@{dependency}"), "visibility": "public", "name": "dep"}],
+                "env": [{"key": "PATH", "type": "path", "value": "${installPath}/bin", "visibility": "public"}],
+            }),
+            artifact,
+        );
+        let source = register_index(source, "1.0", &root, &[("linux", "amd64")]);
+        let manager = manager_over(&dir.path().join("home"), source);
+        let mut request = packages_request(vec![package("tool", "1.0")], linux_amd64());
+        request.output = dir.path().join("out");
+        let (selection, mut manifest) = manifest_of(&manager, &request).await;
+        let staging = dunce::canonicalize(dir.path()).expect("canonical");
+        let layout = VendorLayout::new(&staging);
+        let binary = manifest
+            .tools
+            .iter()
+            .find(|tool| tool.kind == ToolKind::Binary)
+            .expect("the cmake binary")
+            .target_path
+            .clone();
+        let content = binary.rsplit_once("/bin/").expect("a binary under bin/").0.to_owned();
+        for path in [binary.clone(), format!("{content}/share/readme")] {
+            let file = layout.resolve(&path);
+            std::fs::create_dir_all(file.parent().expect("parent")).expect("directory");
+            std::fs::write(&file, &path).expect("file");
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+        }
+
+        write_content(&manager, &request, &selection, &mut manifest, &staging)
+            .await
+            .expect("the content is written");
+
+        let files: Vec<_> = manifest
+            .packages
+            .iter()
+            .filter_map(|package| package.tree.as_ref())
+            .flat_map(|tree| &tree.files)
+            .map(|file| (file.path.as_str(), file.executable))
+            .collect();
+        assert!(files.contains(&(binary.as_str(), true)), "{files:?}");
+        assert!(
+            files
+                .iter()
+                .any(|(path, executable)| path.ends_with("/share/readme") && !executable),
+            "{files:?}"
         );
     }
 
