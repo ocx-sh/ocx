@@ -93,6 +93,22 @@ Recorded decisions, second run:
 - Security finding, by reference only: rules_ocx `ocx/private/update.bat.tpl`, class argument handling in a batch wrapper. Root-cause analysis by reading rated it a hardening gap; no Windows run confirmed either reading. Pipeline R1R hardens it and adds test rows. The DONE block reports it in full.
 - Cross-model review skipped in the closing review: the second harness returned no usable output twice on the whole diff. Decision: the review continues without it, as the review skill prescribes; the DONE block says so.
 
+- **Deep run red at 04152fdc (2026-11-27).** Question: are the Windows, macOS and Shell Activation reds of
+  verify-deep run 45975863112 product defects, and do they open a new outer cycle? Research: a read-only triage of
+  the job logs sorted them into ten groups. Nine are test or harness defects that assume a Linux host (fixture
+  leaves, `.exe` names, path spelling, a directory junction read as a file, a compiler set up by several test
+  workers at once, an old script marker in the latency bench). One is open between product and golden: the
+  `executable` flag of a vendored `.exe` in `manifest.json` differs by the host that wrote it. Decision: the fixes
+  join the review-fix pass already in flight, so they are part of outer cycle 1 and open no second one. The per-OS
+  skip ceilings move to the measured counts. A second red deep run after this pass is outer cycle 2.
+- **Older deferred launchers on a cleaned home (2026-11-27).** Question: when a home was cleaned and the package
+  metadata is gone, may the claim check fetch it? Research: the fix reads the claim set from metadata the home
+  already holds and writes nothing. Decision: no fetch. The launcher refuses with exit 81 and names
+  `ocx install <id>` as the remedy, because a name check must never start a download. The owner may revisit this.
+- **rules_ocx deep run red on Windows at 48d3ace (2026-11-27).** Question: is the red a defect of the batch update
+  wrapper written blind in the fix pass? Research and decision: delegated to a fix worker with the job log. Its
+  fix is part of outer cycle 1.
+
 ## Loop shape
 
 - Entry point: Run the /hex-architect skill on .agents/goals/bazel-rbe-rules-ocx.md.
