@@ -165,7 +165,7 @@ fn escape_controls(text: &str) -> String {
 ///
 /// `working_directory_units` is the inherited working directory's length in UTF-16 units.
 fn length_limit_hint(win32: u32, working_directory_units: usize, program: &str) -> Option<String> {
-    use ocx_env_apply::windows_path::{MAX_PATH, extended_length_path};
+    use ocx_env_apply::windows_path::MAX_PATH;
 
     // No prefix lifts this one: `CreateProcessW` refuses a working directory of MAX_PATH or more.
     if working_directory_units >= MAX_PATH && matches!(win32, 3 | 87 | 206 | 267) {
@@ -175,19 +175,14 @@ fn length_limit_hint(win32: u32, working_directory_units: usize, program: &str) 
         ));
     }
     let program_units = program.encode_utf16().count();
-    if program_units < MAX_PATH || !matches!(win32, 2 | 3 | 206) {
+    // Every program is absolute, so an over-long `.exe` takes the `\\?\` prefix at the spawn; only a batch file, which
+    // `cmd.exe` runs under the plain limit, still fails on length.
+    if program_units < MAX_PATH || !matches!(win32, 2 | 3 | 206) || !ocx_env_apply::launch::is_batch_target(program) {
         return None;
     }
-    let why = if ocx_env_apply::launch::is_batch_target(program) {
-        "a batch file runs through cmd.exe, which has the same limit"
-    } else if extended_length_path(program).is_none() {
-        "a relative program path cannot take the \\\\?\\ prefix"
-    } else {
-        return None;
-    };
     Some(format!(
-        "the program path is {program_units} characters long, past the {MAX_PATH} Windows allows, and {why}; \
-         move the directory the tree sits in to a shorter path"
+        "the program path is {program_units} characters long, past the {MAX_PATH} Windows allows, and a batch file \
+         runs through cmd.exe, which has the same limit; move the directory the tree sits in to a shorter path"
     ))
 }
 
@@ -733,11 +728,6 @@ mod tests {
             hint.contains("program path is 260") && hint.contains("cmd.exe"),
             "{hint}"
         );
-        let relative = format!("bin\\{}", "a".repeat(260));
-        let hint = spawn_failure(206, &relative)
-            .length_limit_hint(10)
-            .expect("a long relative path");
-        assert!(hint.contains("cannot take the \\\\?\\ prefix"), "{hint}");
         let pinned = ShimError::OcxNotFound { program: batch.clone() };
         assert!(
             pinned.length_limit_hint(10).is_some(),
