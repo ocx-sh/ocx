@@ -1308,6 +1308,22 @@ pub(super) fn environment_block(env: &[(OsString, OsString)]) -> Vec<u16> {
     block
 }
 
+/// The line a batch target's non-zero exit earns when a path-length limit is its plausible cause; `None` otherwise.
+///
+/// cmd.exe limits every path to MAX_PATH, so a script path that long never runs and a non-zero exit is cmd.exe's own
+/// refusal, never the script's.
+#[cfg(any(windows, test))]
+fn batch_failure_line(program: &str, code: i32) -> Option<String> {
+    if code == 0 {
+        return None;
+    }
+    let hint = super::length_limit_hint(3, 0, program)?;
+    Some(format!(
+        "ocx-shim: failed to start {} through cmd.exe: exit {code}; {hint}",
+        super::escape_controls(program)
+    ))
+}
+
 /// Starts a batch target with `std::process::Command` and holds it in a kill-on-close job until it exits.
 #[cfg(windows)]
 #[expect(
@@ -1382,13 +1398,8 @@ fn spawn_batch(launch: &Launch) -> Result<i32, ShimError> {
             let code = status.code().unwrap_or(1);
             // cmd.exe limits every path to MAX_PATH, so a script path that long never runs and a non-zero exit is
             // cmd.exe's own refusal, never the script's.
-            if code != 0
-                && let Some(hint) = super::length_limit_hint(3, 0, &launch.program)
-            {
-                eprintln!(
-                    "ocx-shim: failed to start {} through cmd.exe: exit {code}; {hint}",
-                    super::escape_controls(&launch.program)
-                );
+            if let Some(line) = batch_failure_line(&launch.program, code) {
+                eprintln!("{line}");
             }
             Ok(code)
         }
@@ -2321,10 +2332,23 @@ mod tests {
         let link = base.join("active");
         make_directory_link(&render, &link);
 
-        #[expect(clippy::disallowed_types, reason = "a test starting its own copy")]
-        let output = std::process::Command::new(link.join(name))
-            .args(["--nocapture", "probe_child_reports"])
-            .output()
+        // A copy another test's concurrent fork still holds open for writing refuses to exec (ETXTBSY) until
+        // that child execs; the hold is brief, so a bounded retry is enough.
+        let output = (0..50)
+            .find_map(|attempt| {
+                #[expect(clippy::disallowed_types, reason = "a test starting its own copy")]
+                let started = std::process::Command::new(link.join(name))
+                    .args(["--nocapture", "probe_child_reports"])
+                    .output();
+                match started {
+                    Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy && attempt < 49 => {
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                        None
+                    }
+                    other => Some(other),
+                }
+            })
+            .unwrap()
             .unwrap();
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         assert!(
@@ -2359,6 +2383,36 @@ mod tests {
         assert!(reported("MODULE=").contains("active"));
 
         std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn a_batch_start_failure_line_names_the_program_the_exit_and_the_length_limit() {
+        let program = format!("C:\\{}\\run.cmd", "d".repeat(300));
+        let line = batch_failure_line(&program, 1).expect("a batch path past MAX_PATH earns the line");
+        assert!(
+            line.starts_with(&format!(
+                "ocx-shim: failed to start {program} through cmd.exe: exit 1; "
+            )),
+            "{line}"
+        );
+        assert!(
+            line.ends_with(
+                "and a batch file runs through cmd.exe, which has the same limit; \
+                 move the directory the tree sits in to a shorter path"
+            ),
+            "{line}"
+        );
+        assert!(
+            line.contains("the program path is 311 characters long, past the 260 Windows allows"),
+            "{line}"
+        );
+    }
+
+    #[test]
+    fn a_batch_start_failure_line_is_absent_for_exit_zero_and_for_a_short_path() {
+        let long = format!("C:\\{}\\run.cmd", "d".repeat(300));
+        assert_eq!(batch_failure_line(&long, 0), None);
+        assert_eq!(batch_failure_line("C:\\short\\run.cmd", 1), None);
     }
 
     #[test]

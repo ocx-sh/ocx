@@ -267,3 +267,30 @@ fn a_relative_pin_past_max_path_names_the_length_limit_on_the_one_stderr_line() 
         "{stderr}"
     );
 }
+
+/// A batch target whose path reaches `MAX_PATH` never runs: whether std refuses the start or cmd.exe exits non-zero,
+/// the one stderr line carries the length-limit clause (the line's exact text is a host unit in `direct.rs`).
+#[test]
+fn a_batch_target_past_max_path_names_the_length_limit_on_the_stderr_line() {
+    let long_path = LongPath::new("batch");
+    let relative = long_path.relative.replace("probe.exe", "probe.cmd");
+    std::fs::write(long_path.vendor_root().join(relative.replace('/', "\\")), PROBE_SCRIPT).unwrap();
+    let root = long_path.vendor_root();
+    let launcher = root.join(format!("{SELF_PATH}.exe"));
+    std::fs::create_dir_all(launcher.parent().unwrap()).unwrap();
+    std::fs::copy(LAUNCHER_BINARY, &launcher).unwrap();
+    let sidecar = format!(
+        r#"{{"kind":"direct","schema_version":1,"vendor_id":"{VENDOR_ID}","self":"{SELF_PATH}","program":"@VENDOR_DIR@/{relative}","args":[],"unset":[],"env":[]}}"#
+    );
+    std::fs::write(root.join(format!("{SELF_PATH}.launch")), sidecar).unwrap();
+
+    let output = Command::new(&launcher).current_dir(&long_path.base).output().unwrap();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{stderr}");
+    assert!(stderr.starts_with("ocx-shim: "), "{stderr}");
+    assert!(
+        stderr.contains("and a batch file runs through cmd.exe, which has the same limit; move the directory"),
+        "{stderr}"
+    );
+}
