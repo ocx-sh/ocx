@@ -8,9 +8,9 @@
 - **Tier-grammar:** 5
 - **Updated:** 2026-11-27
 - **Active phase:** 0 — second run planned (§ Second run); first run landed (ocx `9c9e32d4`, rules_ocx `401c9c4`)
-- **Step:** /hex-execute → wave 0 (CW2)
+- **Step:** /hex-execute → wave 5 (PF), then X2
 - **Feature branch:** ocx `hex/bazel-rbe-rules-ocx` (pipelines on `hex/bazel-rbe-rules-ocx--<pipeline>`, worktrees under `.agents/worktrees/`); rules_ocx one branch `hex/bazel-rbe-rules-ocx`, its worktree `/home/mherwig/dev/ocx-sh/rules_ocx/.agents/worktrees/hex-bazel-rbe-rules-ocx` shared by the rules_ocx pipelines of a wave (DP-43)
-- **Last update:** 2026-11-26 (after 3db147f6: decision record for the unified launcher model, with amendments)
+- **Last update:** 2026-11-27 (after edb7d754: merge pipeline I2; added fix pipelines LF, LF3, LF4, FXA, FXB, FXC before the second launcher rebuild)
 - **Next:** /hex-execute .claude/artifacts/plan_vendor_rules_ocx.md
 
 ---
@@ -1529,30 +1529,30 @@ on PF, IR, and act D2. Must not touch: code in either repository.
 
 | Pipeline | Repo | Scope | Expected files | Wave | Depends on | Marks | Status |
 |---|---|---|---|---|---|---|---|
-| CW2 | . | contract wave: C-101…C-105 types, C-114…C-118 types, C-124…C-126 surfaces; DP-33, DP-35 | § Run 2 — contract wave CW2 | 0 | — | | pending |
-| CW-R2 | rules_ocx | contract wave: C-RO-18…C-RO-26, C-RO-30, C-RO-31 stubs, C-RO-28 fixture, every BUILD target | § Run 2 — contract wave CW-R2 | 0 | CW2 | | pending |
-| LA | . | C-101, C-103, C-105…C-113; V-L01…V-L08, V-L10, V-L12, V-L14…V-L19, V-L43…V-L45; carried Warn 1 | `crates/ocx_env_apply/src/**`, `crates/ocx_shim/**` | 1 | CW2 | hard | pending |
-| VF | . | C-114…C-119, C-121…C-123; V-L27 (vendor), V-L50, V-L51, V-L52, V-L54, V-L56, V-L60; R-U1, R-U6, R-U10; carried Warn 3 | § VF | 1 | CW2 | hard | pending |
-| IX | . | C-118 (lookups); V-L55; R-U7 | `crates/ocx_index/src/**`, `crates/ocx_cli/src/app/context.rs`, `crates/ocx_package_manager/src/lib.rs` | 1 | CW2 | | pending |
-| PB | . | C-124, C-125, C-138 (helper); V-L21, V-L22, V-L31, V-L32 (tests) | § PB | 1 | CW2 | review | pending |
-| CI2 | . | C-113 (checks), C-139; V-L31/V-L32 job, V-L36, V-L58; carried Warn 2 | § CI2 | 1 | CW2 | | pending |
-| VA | . | acceptance for C-114…C-122 (C-120 met today: V-L59, R-U9); S-107…S-109 | § VA | 1 | CW2 | | pending |
-| HA1 | . | acceptance for C-106…C-110, C-127, C-128, C-135, C-141; S-101, S-104, S-112 | § HA1 | 1 | CW2 | | pending |
-| HA2 | . | acceptance for C-131, C-134, C-136, C-137; S-102, S-103, S-105 | § HA2 | 1 | CW2 | | pending |
-| DOC2 | . | C-143; goal ocx item 8 (records, pages) | § DOC2 | 1 | CW2 | | pending |
-| EP | . | C-127…C-130, C-140, C-142; V-L20…V-L26, V-L27 (home), V-L37, V-L38 (writer) | § EP | 2 | VF, PB | | pending |
-| GC | . | C-132 (clean), C-137; V-L29 (clean), V-L30, V-L41 | § GC | 2 | PB | | pending |
-| TD | . | C-135; V-L39 | `crates/ocx_config/src/env.rs` | 2 | LA | | pending |
-| TR | . | C-131…C-134, C-136, C-138; V-L28, V-L29 (render), V-L33, V-L34, V-L35, V-L42; DP-42 | § TR | 3 | EP, GC, PB; act M2 (variant) | hard | pending |
-| I2 | . | hub files; V-L41 and V-L53 gate halves | § Run 2 — hub files (ocx) | 4 | LA, VF, IX, PB, CI2, VA, HA1, HA2, DOC2, EP, GC, TD, TR | | pending |
+| CW2 | . | contract wave: C-101…C-105 types, C-114…C-118 types, C-124…C-126 surfaces; DP-33, DP-35 | § Run 2 — contract wave CW2 | 0 | — | | merged |
+| CW-R2 | rules_ocx | contract wave: C-RO-18…C-RO-26, C-RO-30, C-RO-31 stubs, C-RO-28 fixture, every BUILD target | § Run 2 — contract wave CW-R2 | 0 | CW2 | | merged |
+| LA | . | C-101, C-103, C-105…C-113; V-L01…V-L08, V-L10, V-L12, V-L14…V-L19, V-L43…V-L45; carried Warn 1 | `crates/ocx_env_apply/src/**`, `crates/ocx_shim/**` | 1 | CW2 | hard | merged |
+| VF | . | C-114…C-119, C-121…C-123; V-L27 (vendor), V-L50, V-L51, V-L52, V-L54, V-L56, V-L60; R-U1, R-U6, R-U10; carried Warn 3 | § VF | 1 | CW2 | hard | merged |
+| IX | . | C-118 (lookups); V-L55; R-U7 | `crates/ocx_index/src/**`, `crates/ocx_cli/src/app/context.rs`, `crates/ocx_package_manager/src/lib.rs` | 1 | CW2 | | merged |
+| PB | . | C-124, C-125, C-138 (helper); V-L21, V-L22, V-L31, V-L32 (tests) | § PB | 1 | CW2 | review | merged |
+| CI2 | . | C-113 (checks), C-139; V-L31/V-L32 job, V-L36, V-L58; carried Warn 2 | § CI2 | 1 | CW2 | | merged |
+| VA | . | acceptance for C-114…C-122 (C-120 met today: V-L59, R-U9); S-107…S-109 | § VA | 1 | CW2 | | merged |
+| HA1 | . | acceptance for C-106…C-110, C-127, C-128, C-135, C-141; S-101, S-104, S-112 | § HA1 | 1 | CW2 | | merged |
+| HA2 | . | acceptance for C-131, C-134, C-136, C-137; S-102, S-103, S-105 | § HA2 | 1 | CW2 | | merged |
+| DOC2 | . | C-143; goal ocx item 8 (records, pages) | § DOC2 | 1 | CW2 | | merged |
+| EP | . | C-127…C-130, C-140, C-142; V-L20…V-L26, V-L27 (home), V-L37, V-L38 (writer) | § EP | 2 | VF, PB | | merged |
+| GC | . | C-132 (clean), C-137; V-L29 (clean), V-L30, V-L41 | § GC | 2 | PB | | merged |
+| TD | . | C-135; V-L39 | `crates/ocx_config/src/env.rs` | 2 | LA | | merged |
+| TR | . | C-131…C-134, C-136, C-138; V-L28, V-L29 (render), V-L33, V-L34, V-L35, V-L42; DP-42 | § TR | 3 | EP, GC, PB; act M2 (variant) | hard | merged |
+| I2 | . | hub files; V-L41 and V-L53 gate halves | § Run 2 — hub files (ocx) | 4 | LA, VF, IX, PB, CI2, VA, HA1, HA2, DOC2, EP, GC, TD, TR | | merged |
 | PF | . | every local V-L row green, `mut` rows red/green | § PF | 5 | I2; act B | | pending |
-| RM | rules_ocx | C-RO-21…C-RO-23; MR-1…MR-4, MR-10, MR-11 | § RM | 1 | CW-R2 | | pending |
-| RL | rules_ocx | C-RO-18…C-RO-20, C-RO-26, C-RO-31; MR-5…MR-9, MR-12; goal rules item 4 (`--remote`) | § RL | 1 | CW-R2 | hard | pending |
-| RU | rules_ocx | C-RO-24, C-RO-25, C-RO-30; MR-14; DP-44 guard | § RU | 1 | CW-R2 | | pending |
-| RE | rules_ocx | e2e rows of ADR 0003; S-110, S-111 | § RE | 1 | CW-R2 | | pending |
-| RD | rules_ocx | C-RO-27 (docs), C-RO-28 (pages); DP-45 | § RD | 1 | CW-R2 | | pending |
-| RP | rules_ocx | C-RO-27; V-L46…V-L49; MR-13; S-106 | § RP | 1 | CW-R2 | | pending |
-| IR | rules_ocx | integration; D1 pin; RE green locally | § IR | 2 | RM, RL, RU, RE, RD, RP, VF; acts B, D1 (after LA, CI2) | | pending |
+| RM | rules_ocx | C-RO-21…C-RO-23; MR-1…MR-4, MR-10, MR-11 | § RM | 1 | CW-R2 | | merged |
+| RL | rules_ocx | C-RO-18…C-RO-20, C-RO-26, C-RO-31; MR-5…MR-9, MR-12; goal rules item 4 (`--remote`) | § RL | 1 | CW-R2 | hard | merged |
+| RU | rules_ocx | C-RO-24, C-RO-25, C-RO-30; MR-14; DP-44 guard | § RU | 1 | CW-R2 | | merged |
+| RE | rules_ocx | e2e rows of ADR 0003; S-110, S-111 | § RE | 1 | CW-R2 | | merged |
+| RD | rules_ocx | C-RO-27 (docs), C-RO-28 (pages); DP-45 | § RD | 1 | CW-R2 | | merged |
+| RP | rules_ocx | C-RO-27; V-L46…V-L49; MR-13; S-106 | § RP | 1 | CW-R2 | | merged |
+| IR | rules_ocx | integration; D1 pin; RE green locally | § IR | 2 | RM, RL, RU, RE, RD, RP, VF; acts B, D1 (after LA, CI2) | | merged |
 | X2 | . + rules_ocx | C-RO-29; fixture parity; CI evidence | § X2 | 6 | PF, IR; act D2 | | pending |
 
 ```mermaid
