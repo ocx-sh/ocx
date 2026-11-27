@@ -2966,6 +2966,15 @@ mod tests {
     }
 
     #[test]
+    fn vl43_an_escaped_key_reads_backslash_s_as_a_space() {
+        // The lookup only suffix-checks a key, so the key's `\s` shows at the splitter alone.
+        assert_eq!(
+            split_manifest_line(b" a\\sb/x t"),
+            Some((b"a b/x".to_vec(), b"t".to_vec()))
+        );
+    }
+
+    #[test]
     fn vl43_an_escaped_line_keeps_an_unknown_escape_as_two_characters() {
         let line = format!(" pkg/{SELF_PATH}.launch /vendor/x\\qy/{SELF_PATH}.launch\n");
         let record = sidecar_json(VENDOR_A, SELF_PATH);
