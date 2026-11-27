@@ -182,6 +182,10 @@ pub fn compose(inherited: &Inherited, spawn: &Spawn<'_>) -> Projected {
             if cfg!(windows) {
                 carry_system_root(&mut env, &Env::new());
             }
+            // A clean exec that drops the launcher depth lets two launchers that start each other fork forever.
+            if let Some(depth) = Env::new().get(ocx_env::__OCX_LAUNCHER_DEPTH.name) {
+                env.set(ocx_env::__OCX_LAUNCHER_DEPTH.name, depth);
+            }
             env
         }
         ExecMode::Layer | ExecMode::Isolate => Env::new(),

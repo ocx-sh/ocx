@@ -499,31 +499,53 @@ pub const TRAMPOLINE_PROBE_BYTES: usize = 256;
 /// Judges the file, not a directory list, so it catches two project homes on one `PATH`,
 /// which no exclusion set can name. Any I/O error answers "not a trampoline".
 pub fn is_ocx_trampoline(path: &std::path::Path) -> bool {
-    trampoline_signal(path)
+    (cfg!(windows) && windows_exec_signal(path)) || record_signal(path) || (cfg!(not(windows)) && marker_signal(path))
 }
 
-/// POSIX half of [`is_ocx_trampoline`]: [`TRAMPOLINE_MARKER`] as line two of the probed prefix.
-#[cfg(not(windows))]
-fn trampoline_signal(path: &std::path::Path) -> bool {
-    use std::io::Read as _;
+/// A launch record of kind `toolchain` at `path` (when it ends in `.launch`) or beside it.
+/// `package` and `deferred` records are not trampolines, so `ocx launcher exec` re-entry stays allowed.
+fn record_signal(path: &std::path::Path) -> bool {
+    use ocx_env_apply::launch::{LaunchKind, RECORD_EXTENSION, peek_kind, record_path_for};
 
-    // Before the open: opening a FIFO blocks forever on the path that runs before every `exec`.
-    if !std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file()) {
-        return false;
-    }
-    // Fails open: this runs before every exec, so failing closed refuses on a transient `EACCES`.
-    let Ok(file) = std::fs::File::open(path) else {
+    let Some(text) = path.to_str() else {
         return false;
     };
-    // A prefix read, never `read_bounded`, which errors past its cap and so disarms deep checkouts.
-    let mut prefix = Vec::with_capacity(TRAMPOLINE_PROBE_BYTES);
-    if file
-        .take(TRAMPOLINE_PROBE_BYTES as u64)
-        .read_to_end(&mut prefix)
-        .is_err()
+    let record = if path.extension().is_some_and(|extension| extension == RECORD_EXTENSION) {
+        path.to_path_buf()
+    } else {
+        std::path::PathBuf::from(record_path_for(text, cfg!(windows)))
+    };
+    read_regular_prefix(&record, ocx_env_apply::launch::MAX_PEEK_BYTES + 1)
+        .is_some_and(|bytes| peek_kind(&bytes) == Some(LaunchKind::Toolchain))
+}
+
+/// At most `limit` bytes of a regular file; `None` for anything else or on any error.
+/// `O_NONBLOCK` keeps an open of a FIFO from waiting for a writer on the path that runs before every `exec`.
+fn read_regular_prefix(path: &std::path::Path, limit: u64) -> Option<Vec<u8>> {
+    use std::io::Read as _;
+
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
     {
-        return false;
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NONBLOCK);
     }
+    let file = options.open(path).ok()?;
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.take(limit).read_to_end(&mut bytes).ok()?;
+    Some(bytes)
+}
+
+/// [`TRAMPOLINE_MARKER`] as line two of the probed prefix, for scripts an older ocx wrote.
+fn marker_signal(path: &std::path::Path) -> bool {
+    // A prefix read, never `read_bounded`, which errors past its cap and so disarms deep checkouts.
+    let Some(prefix) = read_regular_prefix(path, TRAMPOLINE_PROBE_BYTES as u64) else {
+        return false;
+    };
     // Line two matched whole, never anywhere, or a baked path spelling the marker refuses an ordinary launcher.
     prefix
         .split(|byte| *byte == b'\n')
@@ -531,11 +553,10 @@ fn trampoline_signal(path: &std::path::Path) -> bool {
         .is_some_and(|line| line == TRAMPOLINE_MARKER.as_bytes())
 }
 
-/// Windows half of [`is_ocx_trampoline`]: a sibling `.exec` sidecar, or an `.exec` path itself.
+/// A sibling `.exec` sidecar, or an `.exec` path itself, for launchers an older ocx wrote.
 ///
 /// No content check: trampolines and lazy shims hardlink one blob, so a content match refuses shims.
-#[cfg(windows)]
-fn trampoline_signal(path: &std::path::Path) -> bool {
+fn windows_exec_signal(path: &std::path::Path) -> bool {
     // A `PATHEXT` containing `.EXEC` makes the sidecar itself an answer.
     if path
         .extension()
@@ -1958,6 +1979,79 @@ mod tests {
             !is_ocx_trampoline(&path),
             "a non-regular file is 'not a trampoline' without ever being opened"
         );
+    }
+
+    fn write_record(dir: &std::path::Path, name: &str, body: &str) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    /// A regular file with a sibling `cmake.launch` of kind `toolchain` is a native trampoline.
+    #[test]
+    fn a_sibling_toolchain_record_is_a_trampoline() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_record(dir.path(), "cmake", "MZ");
+        write_record(dir.path(), "cmake.launch", r#"{"kind":"toolchain","schema_version":1}"#);
+        assert!(is_ocx_trampoline(&path));
+    }
+
+    /// A later schema with keys this build does not know is still recognised: only `kind` is read.
+    #[test]
+    fn a_schema_two_toolchain_record_is_a_trampoline() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_record(dir.path(), "cmake", "MZ");
+        write_record(
+            dir.path(),
+            "cmake.launch",
+            r#"{"kind":"toolchain","schema_version":2,"future":{"a":[1,2]},"other":"x"}"#,
+        );
+        assert!(is_ocx_trampoline(&path));
+    }
+
+    /// `package` and `deferred` records are not trampolines.
+    #[test]
+    fn package_and_deferred_records_are_not_trampolines() {
+        for kind in ["package", "deferred"] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = write_record(dir.path(), "cmake", "MZ");
+            write_record(
+                dir.path(),
+                "cmake.launch",
+                &format!(r#"{{"kind":"{kind}","schema_version":1}}"#),
+            );
+            assert!(!is_ocx_trampoline(&path), "kind {kind}");
+        }
+    }
+
+    /// The record path itself, passed as the command, is answered from its own bytes.
+    #[test]
+    fn a_launch_path_is_peeked_directly() {
+        let dir = tempfile::tempdir().unwrap();
+        let record = write_record(dir.path(), "cmake.launch", r#"{"kind":"toolchain","schema_version":1}"#);
+        assert!(is_ocx_trampoline(&record));
+    }
+
+    /// A FIFO at the record path must not hang: only "returns false" can report green.
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_at_the_record_path_is_not_a_trampoline() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_record(dir.path(), "cmake", "MZ");
+        let record = dir.path().join("cmake.launch");
+        ocx_test_support::fifo::mkfifo(&record);
+        assert!(std::fs::metadata(&record).is_ok_and(|m| !m.is_file()));
+        assert!(!is_ocx_trampoline(&path));
+    }
+
+    /// Windows (CI only): `cmake.exe` resolves its record as `cmake.launch`.
+    #[cfg(windows)]
+    #[test]
+    fn a_windows_exe_with_a_toolchain_record_is_a_trampoline() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = write_record(dir.path(), "cmake.exe", "MZ");
+        write_record(dir.path(), "cmake.launch", r#"{"kind":"toolchain","schema_version":1}"#);
+        assert!(is_ocx_trampoline(&exe));
     }
 
     /// Windows: the sibling `.shim` sidecar of a lazy shim
