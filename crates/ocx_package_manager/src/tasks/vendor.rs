@@ -319,7 +319,9 @@ fn offered_platforms(result: InspectResult) -> BTreeSet<String> {
             .into_iter()
             .map(|candidate| candidate.platform.to_string())
             .collect(),
-        InspectResult::Manifest { .. } | InspectResult::Resolved { .. } => BTreeSet::from([Platform::any().to_string()]),
+        InspectResult::Manifest { .. } | InspectResult::Resolved { .. } => {
+            BTreeSet::from([Platform::any().to_string()])
+        }
     }
 }
 
