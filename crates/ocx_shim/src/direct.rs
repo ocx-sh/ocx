@@ -35,7 +35,7 @@ const MAX_CANDIDATE_RECORD_BYTES: u64 = 16 * 1024 * 1024;
 /// How many root candidates the "no root found" line names.
 const NAMED_CANDIDATES: usize = 8;
 
-/// Why a sidecar read was refused.
+/// Why a launch record read was refused.
 #[derive(Debug)]
 pub(super) enum ReadError {
     /// The path is not a regular file (a FIFO, a directory, a device).
@@ -69,7 +69,7 @@ pub(super) type LineStream = Box<dyn Iterator<Item = Result<Vec<u8>, ReadError>>
 pub(super) trait LookupFs {
     /// The kernel's record of the loaded image, resolved once; the refusal when the platform names none.
     fn image_path(&self) -> Result<String, ShimError>;
-    /// The bytes of the sidecar at `path`; `Ok(None)` when nothing is there.
+    /// The bytes of the launch record at `path`; `Ok(None)` when nothing is there.
     fn read_sidecar(&self, path: &str) -> Result<Option<Vec<u8>>, ReadError>;
     /// The lines of the file at `path`, read as a stream: `Ok(None)` when nothing is there. The stream yields
     /// `Err` once the file passes `max_bytes` or a line passes `max_line` bytes (the line feed is not part of a
@@ -114,7 +114,7 @@ pub(super) struct HomeFound {
     pub image: String,
 }
 
-/// A decoded `.launch` sidecar bound to its vendor root.
+/// A decoded `.launch` record bound to its vendor root.
 #[derive(Debug)]
 pub(super) struct Located {
     pub sidecar: DirectRecord,
@@ -362,11 +362,14 @@ fn candidate_record(
         root.trim_end_matches(separators(windows)),
         RECORD_EXTENSION
     );
-    fs.read_sidecar(&path)
-        .map_err(|err| refuse(format!("cannot read sidecar {path}: {err}")))
+    fs.read_sidecar(&path).map_err(|err| {
+        refuse(format!(
+            "cannot read launch record {path}: {err}; check that the file is readable"
+        ))
+    })
 }
 
-/// Whether `<root>/<self>.launch` is there and byte-identical to the sidecar beside the started path.
+/// Whether `<root>/<self>.launch` is there and byte-identical to the record beside the started path.
 fn accepts(root: &str, self_path: &str, raw: &[u8], windows: bool, fs: &dyn LookupFs) -> Result<bool, ShimError> {
     Ok(candidate_record(root, self_path, windows, fs)?.is_some_and(|bytes| bytes == raw))
 }
@@ -606,8 +609,11 @@ pub(super) fn lookup_unix(
 
 /// Reads `path` as a record file: `Ok(None)` when absent, the refusal naming `path` when it cannot be read.
 fn read_record(path: &str, fs: &dyn LookupFs) -> Result<Option<Vec<u8>>, ShimError> {
-    fs.read_sidecar(path)
-        .map_err(|err| refuse(format!("cannot read sidecar {path}: {err}")))
+    fs.read_sidecar(path).map_err(|err| {
+        refuse(format!(
+            "cannot read launch record {path}: {err}; check that the file is readable"
+        ))
+    })
 }
 
 /// [`locate_with`] over a started path that is already known.
@@ -646,11 +652,11 @@ pub(super) fn locate_with(
     let beside_image = read_record(&image_record, fs)?;
     if let Some(raw) = &beside_image {
         let record = LaunchRecord::decode(raw, windows)
-            .map_err(|err| refuse(format!("malformed sidecar {image_record}: {err}")))?;
+            .map_err(|err| refuse(format!("malformed launch record {image_record}: {err}; restore the launcher and its record from the same install")))?;
         if !matches!(record, LaunchRecord::Direct(_)) {
             return core::HomeLaunch::from_record(record)
                 .map(|home| Probed::Home(HomeFound { home, image }))
-                .ok_or_else(|| refuse(format!("malformed sidecar {image_record}: not a runnable record")));
+                .ok_or_else(|| refuse(format!("malformed launch record {image_record}: not a runnable record; restore the launcher and its record from the same install")));
         }
     }
 
@@ -663,7 +669,9 @@ pub(super) fn locate_with(
     // The image serves kind `direct` for this check only: a home kind never compares a `stat` with a later `open`.
     #[cfg(unix)]
     if !fs.is_running_image(started) {
-        return Err(refuse(format!("started path {started} is not the running image")));
+        return Err(refuse(format!(
+            "started path {started} is not the file this launcher runs from; start the launcher by the path of its own file"
+        )));
     }
 
     let record_path = record_path_for(started, windows);
@@ -675,15 +683,18 @@ pub(super) fn locate_with(
         Some(raw) => raw,
         None => {
             return Err(refuse(format!(
-                "sidecar not found: none of {record_path}; keep the launcher beside its .launch sidecar"
+                "launch record not found: {record_path}; keep the launcher beside its NAME.launch record"
             )));
         }
     };
-    let record =
-        LaunchRecord::decode(&raw, windows).map_err(|err| refuse(format!("malformed sidecar {record_path}: {err}")))?;
+    let record = LaunchRecord::decode(&raw, windows).map_err(|err| {
+        refuse(format!(
+            "malformed launch record {record_path}: {err}; restore the launcher and its record from the same install"
+        ))
+    })?;
     let LaunchRecord::Direct(sidecar) = record else {
         return Err(refuse(format!(
-            "sidecar {record_path} is not of kind direct; a home kind runs from the record beside the launcher's image"
+            "launch record {record_path} does not describe a vendored tool; start the launcher from its own directory, not through a link to another launcher"
         )));
     };
     let mut rejected: Vec<String> = Vec::new();
@@ -720,14 +731,8 @@ pub(super) fn locate_with(
     }
 
     let named: Vec<&str> = rejected.iter().take(NAMED_CANDIDATES).map(String::as_str).collect();
-    // Bazel on Windows builds no runfiles tree unless asked, so the hint names the flag that creates one.
-    let hint = if windows {
-        "; under Bazel on Windows, build with --enable_runfiles"
-    } else {
-        ""
-    };
     Err(refuse(format!(
-        "no vendored root found for {}: {} candidate(s) rejected: {}{hint}; keep the launcher inside its vendored directory",
+        "no vendored root found for {}: {} candidate(s) rejected: {}; neither a runfiles tree nor a runfiles manifest names the launch record; keep the launcher inside its vendored directory and check that its runfiles tree or manifest is present",
         sidecar.self_path,
         rejected.len(),
         if named.is_empty() {
@@ -808,7 +813,7 @@ fn apply_record(record: &EnvRecord, existing: Option<&OsStr>, root: &str, fold: 
     )
 }
 
-/// Assembles the launch of a located sidecar over the caller's environment and arguments.
+/// Assembles the launch of a located record over the caller's environment and arguments.
 ///
 /// `argv[0]` is the program path itself, which is what `ocx exec` passes for the same tool. On Windows `/` becomes
 /// `\` in the root, the program and `path` values, as the native install path `ocx exec` composes spells them.
@@ -1214,6 +1219,8 @@ impl core::ProgramFs for RealFs {
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct HomeStart {
     pub program: String,
+    /// Where `program` came from, so a missing file names the setting to fix.
+    pub source: core::ProgramSource,
     pub environment: Vec<(OsString, OsString)>,
 }
 
@@ -1237,17 +1244,19 @@ pub(super) fn plan_home(
         None => None,
     };
     let path = core::environment_value(&environment, "PATH", windows).map(|value| value.to_string_lossy());
-    let program = core::resolve_program(
-        &core::ProgramInputs {
-            pin,
-            baked: home.baked_ocx(),
-            path: path.as_deref(),
-            launcher_directory,
-            windows,
-        },
-        fs,
-    )?;
-    Ok(HomeStart { program, environment })
+    let inputs = core::ProgramInputs {
+        pin,
+        baked: home.baked_ocx(),
+        path: path.as_deref(),
+        launcher_directory,
+        windows,
+    };
+    let program = core::resolve_program(&inputs, fs)?;
+    Ok(HomeStart {
+        program,
+        source: core::program_source(&inputs),
+        environment,
+    })
 }
 
 #[cfg(windows)]
@@ -1847,9 +1856,9 @@ mod tests {
         assert!(message.contains("no vendored root"), "{message}");
     }
 
-    /// With no runfiles tree on Windows the refusal names `--enable_runfiles`; elsewhere it does not.
+    /// The refusal never tells anyone to build with `--enable_runfiles`: the manifest fallback makes the flag needless.
     #[test]
-    fn v45_no_root_on_windows_names_the_enable_runfiles_flag() {
+    fn v45_no_root_names_the_missing_tree_and_manifest_on_every_host() {
         let bytes = sidecar_json(VENDOR_A, SELF_PATH);
         let fs = FakeFs::default().with_file("C:\\out\\bin\\tool.launch", &bytes);
         let context = LookupContext {
@@ -1860,14 +1869,18 @@ mod tests {
         };
         let message = refusal(locate("C:\\out\\bin\\tool.exe", &context, &fs));
         assert!(message.contains("no vendored root found"), "{message}");
-        assert!(message.contains("--enable_runfiles"), "{message}");
+        assert!(!message.contains("--enable_runfiles"), "{message}");
+        assert!(
+            message.contains("neither a runfiles tree nor a runfiles manifest"),
+            "{message}"
+        );
 
         let fs = FakeFs::default().with_file("/out/bin/tool.launch", &bytes);
         let message = refusal(locate("/out/bin/tool", &unix(None), &fs));
         assert!(message.contains("no vendored root found"), "{message}");
         assert!(!message.contains("--enable_runfiles"), "{message}");
         assert!(
-            message.ends_with("keep the launcher inside its vendored directory"),
+            message.ends_with("check that its runfiles tree or manifest is present"),
             "{message}"
         );
     }
@@ -1875,9 +1888,9 @@ mod tests {
     #[test]
     fn a_missing_sidecar_message_names_the_remedy() {
         let message = refusal(locate("/own/tool", &unix(None), &FakeFs::default()));
-        assert!(message.contains("sidecar not found: none of "), "{message}");
+        assert!(message.contains("launch record not found: "), "{message}");
         assert!(
-            message.ends_with("keep the launcher beside its .launch sidecar"),
+            message.ends_with("keep the launcher beside its NAME.launch record"),
             "{message}"
         );
     }
@@ -3143,7 +3156,7 @@ mod tests {
     }
 
     #[test]
-    fn vl43_the_refusal_names_the_first_eight_candidates_and_keeps_the_windows_hint() {
+    fn vl43_the_refusal_names_the_first_eight_candidates_and_names_the_missing_tree_and_manifest() {
         let mut manifest = Vec::new();
         for index in 0..10 {
             manifest.extend_from_slice(&manifest_line(&format!("/vendor/r{index}")));
@@ -3161,7 +3174,11 @@ mod tests {
             &windows_context(),
             &windows_manifest_world(b"", "C:/none"),
         ));
-        assert!(windows.contains("--enable_runfiles"), "{windows}");
+        assert!(!windows.contains("--enable_runfiles"), "{windows}");
+        assert!(
+            windows.contains("neither a runfiles tree nor a runfiles manifest"),
+            "{windows}"
+        );
     }
 
     fn manifest_world_without_root(manifest: &[u8]) -> FakeFs {

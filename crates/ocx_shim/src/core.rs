@@ -237,30 +237,69 @@ pub(super) struct ProgramInputs<'a> {
 ///
 /// A relative pin or baked program, and a batch file on any rung, is a 78: `cmd.exe` would re-parse its arguments.
 pub(super) fn resolve_program(inputs: &ProgramInputs<'_>, fs: &dyn ProgramFs) -> Result<String, ShimError> {
-    let explicit = inputs
-        .pin
-        .filter(|pin| !pin.is_empty())
-        .map(|pin| ("OCX_BINARY_PIN", pin))
-        .or(inputs.baked.map(|baked| ("the record's ocx", baked)));
-    let program = match explicit {
-        Some((source, program)) => {
+    let source = program_source(inputs);
+    let program = match (source, inputs.pin.filter(|pin| !pin.is_empty()).or(inputs.baked)) {
+        (ProgramSource::PathWalk, _) | (_, None) => find_on_path(inputs, fs)?,
+        (source, Some(program)) => {
             if !is_fully_qualified(program, inputs.windows) {
                 return Err(refuse(format!(
-                    "{source} must be an absolute path: {}",
-                    super::escape_controls(program)
+                    "{} must be an absolute path: {}; {}",
+                    source.describe(),
+                    super::escape_controls(program),
+                    source.remedy()
                 )));
             }
             program.to_string()
         }
-        None => find_on_path(inputs, fs)?,
     };
     if is_batch_target(&program) {
         return Err(refuse(format!(
-            "ocx resolved to the batch file {}, which the launcher does not start",
-            super::escape_controls(&program)
+            "ocx resolved to the batch file {}, which the launcher does not start; {}",
+            super::escape_controls(&program),
+            source.remedy()
         )));
     }
     Ok(program)
+}
+
+/// Where the program a home launch starts comes from, in the order [`resolve_program`] tries them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ProgramSource {
+    Pin,
+    Record,
+    PathWalk,
+}
+
+impl ProgramSource {
+    /// The source as a diagnostic names it.
+    pub(super) fn describe(self) -> &'static str {
+        match self {
+            ProgramSource::Pin => "OCX_BINARY_PIN",
+            ProgramSource::Record => "the launch record's ocx",
+            ProgramSource::PathWalk => "the ocx found on PATH",
+        }
+    }
+
+    /// The next step for a program from this source that cannot be started.
+    pub(super) fn remedy(self) -> &'static str {
+        match self {
+            ProgramSource::Pin => "point OCX_BINARY_PIN at an existing ocx executable or unset it",
+            ProgramSource::Record | ProgramSource::PathWalk => {
+                "set OCX_BINARY_PIN to an existing ocx executable or put ocx on PATH"
+            }
+        }
+    }
+}
+
+/// The source [`resolve_program`] takes its program from: a non-empty pin, then the record's `ocx`, then the `PATH` walk.
+pub(super) fn program_source(inputs: &ProgramInputs<'_>) -> ProgramSource {
+    if inputs.pin.is_some_and(|pin| !pin.is_empty()) {
+        ProgramSource::Pin
+    } else if inputs.baked.is_some() {
+        ProgramSource::Record
+    } else {
+        ProgramSource::PathWalk
+    }
 }
 
 /// `directory` for a lexical comparison: no trailing separator, and on Windows ASCII case and `\` folded.
@@ -295,7 +334,9 @@ fn find_on_path(inputs: &ProgramInputs<'_>, fs: &dyn ProgramFs) -> Result<String
             return Ok(candidate);
         }
     }
-    Err(refuse("no ocx found on PATH".to_string()))
+    Err(refuse(
+        "no ocx found on PATH; set OCX_BINARY_PIN to an absolute path of ocx or put ocx on PATH".to_string(),
+    ))
 }
 
 /// Wire verb for an installed package: `launcher exec "<pkg_root>" -- "<stem>" <argv...>`.
@@ -383,7 +424,8 @@ pub(super) fn append_quoted_arg(line: &mut String, arg: &str) {
 #[cfg(test)]
 mod tests {
     use super::{
-        HomeLaunch, LAUNCHER_DEPTH_VAR, ProgramFs, ProgramInputs, ToolchainHome, home_environment, resolve_program,
+        HomeLaunch, LAUNCHER_DEPTH_VAR, ProgramFs, ProgramInputs, ProgramSource, ToolchainHome, home_environment,
+        program_source, resolve_program,
     };
     use crate::ShimError;
     use std::collections::BTreeSet;
@@ -646,6 +688,30 @@ mod tests {
             let line = refusal(resolve_program(&unix(None, None, path), &fs));
             assert!(line.contains("no ocx found on PATH"), "{path:?}: {line}");
         }
+    }
+
+    #[test]
+    fn a_refusal_about_the_program_names_the_remedy_for_its_source() {
+        let fs = FakeFs::default();
+        let none = refusal(resolve_program(&unix(None, None, None), &fs));
+        assert!(
+            none.contains("set OCX_BINARY_PIN") && none.contains("put ocx on PATH"),
+            "no ocx on PATH names both remedies: {none}"
+        );
+        let pin = refusal(resolve_program(&unix(Some("rel/ocx"), None, None), &fs));
+        assert!(
+            pin.contains("OCX_BINARY_PIN must be an absolute path") && pin.contains("or unset it"),
+            "{pin}"
+        );
+        let record = refusal(resolve_program(&unix(None, Some("rel/ocx"), None), &fs));
+        assert!(
+            record.contains("the launch record's ocx must be an absolute path"),
+            "{record}"
+        );
+        assert!(!record.contains("sidecar"), "{record}");
+        assert_eq!(program_source(&unix(Some("/p"), Some("/b"), None)), ProgramSource::Pin);
+        assert_eq!(program_source(&unix(Some(""), Some("/b"), None)), ProgramSource::Record);
+        assert_eq!(program_source(&unix(None, None, Some("/x"))), ProgramSource::PathWalk);
     }
 
     #[test]
