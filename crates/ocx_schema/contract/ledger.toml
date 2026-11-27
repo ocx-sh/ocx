@@ -278,3 +278,38 @@ subjects = ["*"]
 rule = "G14"
 pointer = "/env/5"
 reason = "OCX_CONFIG is now a path list (platform path-list separator) instead of one path; a value holding the separator is split into several files"
+
+[[break]]
+document = "reports"
+subjects = ["InspectReport", "Installs"]
+rule = "doc"
+pointer = "/$defs/Bundle/properties/entrypoints"
+reason = "reworded to name the launcher NAME and its NAME.launch record under launchers/<generation>/ instead of the .sh script, .exe shim and .shim sidecar under entrypoints/; the field is unchanged"
+
+[[break]]
+document = "reports"
+subjects = ["Clean"]
+rule = "doc"
+pointer = "/$defs/CleanRoot"
+reason = "reworded to list launcher directories among the resources a clean removes; the new launchers kind is an added enum value"
+
+[[break]]
+document = "reports"
+subjects = ["Clean"]
+rule = "doc"
+pointer = "/$defs/CleanRoot/properties/items"
+reason = "reworded to list launcher directories last among the resources; the order of the existing kinds is unchanged"
+
+[[break]]
+document = "reports"
+subjects = ["PullDryRun"]
+rule = "doc"
+pointer = "/$defs/DryRunEntry"
+reason = "reworded to name launchers/ as the sibling of content/ in the package root; path is unchanged"
+
+[[break]]
+document = "reports"
+subjects = ["LocatedPaths", "WarmedPaths"]
+rule = "doc"
+pointer = "/$defs/PathKind/x-ocx-enum/0"
+reason = "reworded to name launchers/ as the sibling of content/ in the package root; the package kind is unchanged"
