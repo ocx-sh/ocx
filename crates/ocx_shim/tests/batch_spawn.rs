@@ -3,7 +3,7 @@
 
 //! Windows launches end to end. A vendored `.cmd` target: hostile arguments never run an injected command (BatBadBut,
 //! CVE-2024-24576). An argument std can quote reaches the batch file (exit 0); one holding a line break is refused (exit 64).
-//! A program whose path exceeds `MAX_PATH` starts, from a `direct` record and from a `package` record; one that cannot names the limit.
+//! A program whose path exceeds `MAX_PATH` starts, from a `direct` record and from a `package` record; one that cannot names the limit. A launcher started through a directory junction resolves the directory behind it.
 //!
 //! Runs on Windows CI only; the dispatch decision itself is a host-run unit in `direct.rs`.
 #![cfg(windows)]
@@ -211,6 +211,40 @@ fn a_direct_launcher_starts_a_program_past_max_path() {
     std::fs::write(root.join(format!("{SELF_PATH}.launch")), sidecar).unwrap();
 
     let output = Command::new(&launcher).current_dir(&long_path.base).output().unwrap();
+
+    LongPath::assert_child_ran(&output);
+}
+
+/// The launcher is started through a directory junction and the real directory behind it is past `MAX_PATH`: the image
+/// path it resolves is the real one, so the record beside it and the program it names are found and the child runs.
+#[test]
+fn a_direct_launcher_started_through_a_junction_finds_its_record_past_max_path() {
+    let long_path = LongPath::new("junction");
+    let root = long_path.vendor_root();
+    let launcher = root.join(format!("{SELF_PATH}.exe"));
+    std::fs::create_dir_all(launcher.parent().unwrap()).unwrap();
+    std::fs::copy(LAUNCHER_BINARY, &launcher).unwrap();
+    let sidecar = format!(
+        r#"{{"kind":"direct","schema_version":1,"vendor_id":"{VENDOR_ID}","self":"{SELF_PATH}","program":"@VENDOR_DIR@/{}","args":[],"unset":[],"env":[]}}"#,
+        long_path.relative
+    );
+    std::fs::write(root.join(format!("{SELF_PATH}.launch")), sidecar).unwrap();
+    // The junction target is short, so `mklink` takes it; the length is in the directories beneath it.
+    let link = long_path.base.join("active");
+    let made = Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(&link)
+        .arg(&root)
+        .output()
+        .unwrap();
+    assert!(made.status.success(), "mklink /J: {made:?}");
+    let through_junction = link.join(format!("{SELF_PATH}.exe").replace('/', "\\"));
+    assert!(through_junction.is_file(), "{}", through_junction.display());
+
+    let output = Command::new(&through_junction)
+        .current_dir(&long_path.base)
+        .output()
+        .unwrap();
 
     LongPath::assert_child_ran(&output);
 }

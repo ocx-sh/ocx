@@ -937,7 +937,7 @@ const SHORT_BUFFER_ERRORS: [u32; 2] = [122, 234];
 ///
 /// `call` receives the buffer and returns `(written, error)`, `error` being the thread's last error when `written` is 0
 /// and ignored otherwise. A short buffer comes back in three forms and each grows it: a zero return with
-/// [`SHORT_BUFFER_ERRORS`] (`GetMappedFileNameW`, `GetModuleFileNameW` on some systems), a return equal to the
+/// [`SHORT_BUFFER_ERRORS`] (`GetModuleFileNameW` on some systems), a return equal to the
 /// capacity (a truncated name), and a return above it (`GetFinalPathNameByHandleW`: the size, NUL included, to retry
 /// with). A return of `capacity - 1` may be a name cut to keep room for the NUL, so it grows too, and the retry returns
 /// the same length when the name did fit. A return below that is the name's length, NUL excluded.
@@ -963,6 +963,69 @@ fn fill_wide(max_units: usize, mut call: impl FnMut(&mut [u16]) -> (usize, u32))
         }
         capacity = wanted;
     }
+}
+
+/// What a `NtQueryVirtualMemory(MemoryMappedFilenameInformation)` status asks of the caller.
+#[cfg(any(windows, test))]
+#[derive(Debug, PartialEq, Eq)]
+enum SectionQuery {
+    /// The structure is filled.
+    Ready,
+    /// The buffer was short: retry with this many bytes.
+    Grow(usize),
+    /// The call failed for a reason other than a short buffer; carries its `NTSTATUS`.
+    Failed(i32),
+    /// The name does not fit in `max_bytes`.
+    TooLong,
+}
+
+/// `STATUS_BUFFER_OVERFLOW`, `STATUS_INFO_LENGTH_MISMATCH` and `STATUS_BUFFER_TOO_SMALL`: the buffer is short and
+/// `ReturnLength` may carry the size wanted. Named by value because the unit tests run on every host.
+#[cfg(any(windows, test))]
+const SHORT_SECTION_BUFFER: [i32; 3] = [0x8000_0005_u32 as i32, 0xC000_0004_u32 as i32, 0xC000_0023_u32 as i32];
+
+/// Reads `status` of a query that wrote into a `capacity`-byte buffer and reported `returned` bytes wanted.
+///
+/// A short buffer grows to `returned` when that is larger, else doubles: a call may leave `returned` unset.
+#[cfg(any(windows, test))]
+fn classify_section_query(status: i32, returned: usize, capacity: usize, max_bytes: usize) -> SectionQuery {
+    if status >= 0 {
+        return SectionQuery::Ready;
+    }
+    if !SHORT_SECTION_BUFFER.contains(&status) {
+        return SectionQuery::Failed(status);
+    }
+    let wanted = if returned > capacity {
+        returned
+    } else {
+        capacity.saturating_mul(2)
+    };
+    if wanted > max_bytes {
+        SectionQuery::TooLong
+    } else {
+        SectionQuery::Grow(wanted)
+    }
+}
+
+/// The name a filled `MEMORY_SECTION_NAME` holds, as UTF-16 units, or `None` when the structure lies.
+///
+/// `bytes` is the whole query buffer; `length` (BYTES) and `name_ptr` are the `UNICODE_STRING` the kernel wrote at its
+/// start, `header_len` its size. The kernel puts the text inside the buffer, so a pointer outside it, before the
+/// header, misaligned for UTF-16, or a length that is odd, zero or reaches past the end is refused, never followed.
+#[cfg(any(windows, test))]
+fn section_name_units(bytes: &[u8], length: u16, name_ptr: usize, header_len: usize) -> Option<Vec<u16>> {
+    let offset = name_ptr.checked_sub(bytes.as_ptr() as usize)?;
+    let length = usize::from(length);
+    let end = offset.checked_add(length)?;
+    if length == 0 || length % 2 != 0 || offset % 2 != 0 || offset < header_len || end > bytes.len() {
+        return None;
+    }
+    Some(
+        bytes[offset..end]
+            .chunks_exact(2)
+            .map(|pair| u16::from_ne_bytes([pair[0], pair[1]]))
+            .collect(),
+    )
 }
 
 /// The thread's last error when `written` is 0, else 0: read before anything else can overwrite it.
@@ -1012,21 +1075,27 @@ fn image_step_failed(step: &str) -> ShimError {
 /// `GetModuleFileNameW` returns the path the process was started by, which is the `active` junction when the launcher
 /// is reached through one. The mapped file is the one the loader opened, so its final path names the render
 /// directory behind the junction; no `stat` is compared with a later `open`.
+///
+/// The mapped name comes from `NtQueryVirtualMemory` itself: `GetMappedFileNameW` wraps it with a `MAX_PATH` buffer
+/// of its own, so it fails for every caller buffer once the image path passes 260 characters.
 #[cfg(windows)]
 fn mapped_image_path() -> Result<String, ShimError> {
-    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Wdk::Storage::FileSystem::NtQueryVirtualMemory;
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE, UNICODE_STRING};
     use windows_sys::Win32::Storage::FileSystem::{
         CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
         FILE_SHARE_READ, FILE_SHARE_WRITE, GetFinalPathNameByHandleW, OPEN_EXISTING, VOLUME_NAME_DOS,
     };
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-    use windows_sys::Win32::System::ProcessStatus::GetMappedFileNameW;
     use windows_sys::Win32::System::Threading::GetCurrentProcess;
 
     const MAX_UNITS: usize = 64 * 1024;
-    const STEP_MAPPED: &str = "GetMappedFileNameW";
+    /// `MemoryMappedFilenameInformation`: the file name behind the mapping at an address.
+    const MEMORY_MAPPED_FILENAME_INFORMATION: i32 = 2;
+    const STEP_MAPPED: &str = "NtQueryVirtualMemory";
     const STEP_OPEN: &str = "opening the mapped file";
     const STEP_FINAL: &str = "GetFinalPathNameByHandleW";
+    const HEADER: usize = std::mem::size_of::<UNICODE_STRING>();
 
     // SAFETY: a null name asks for the module the process was created from; the returned base is only an address.
     let module = unsafe { GetModuleHandleW(std::ptr::null()) };
@@ -1034,20 +1103,52 @@ fn mapped_image_path() -> Result<String, ShimError> {
         return Err(image_step_failed("GetModuleHandleW"));
     }
 
-    // The device path (`\Device\HarddiskVolumeN\…`).
-    let mut device = fill_wide(MAX_UNITS, |buffer| {
-        // SAFETY: `buffer` holds `buffer.len()` u16s, passed as `nsize`; `module` lies inside this image.
-        let written = unsafe {
-            GetMappedFileNameW(
+    // The device path (`\Device\HarddiskVolumeN\…`), read from a `MEMORY_SECTION_NAME` in a `u64`-backed buffer
+    // so the `UNICODE_STRING` at its start is aligned.
+    let max_bytes = MAX_UNITS * 2 + HEADER;
+    let mut capacity = 2048_usize;
+    let mut device = loop {
+        let mut backing = vec![0u64; capacity.div_ceil(8)];
+        let mut returned = 0_usize;
+        // SAFETY: `backing` holds `capacity.div_ceil(8) * 8` writable bytes, at least the `capacity` passed; `module`
+        // lies inside this image; `returned` is a valid out pointer.
+        let status = unsafe {
+            NtQueryVirtualMemory(
                 GetCurrentProcess(),
                 module.cast(),
-                buffer.as_mut_ptr(),
-                buffer.len() as u32,
+                MEMORY_MAPPED_FILENAME_INFORMATION,
+                backing.as_mut_ptr().cast(),
+                capacity,
+                &mut returned,
             )
         };
-        (written as usize, last_error_if_zero(written as usize))
-    })
-    .map_err(|failure| wide_fill_refusal(failure, STEP_MAPPED))?;
+        match classify_section_query(status, returned, capacity, max_bytes) {
+            SectionQuery::Grow(wanted) => capacity = wanted,
+            SectionQuery::TooLong => {
+                return Err(refuse(format!(
+                    "the launcher image path from {STEP_MAPPED} is longer than 64K units"
+                )));
+            }
+            SectionQuery::Failed(code) => {
+                return Err(refuse(format!(
+                    "cannot resolve the launcher image: {STEP_MAPPED} failed (status {:#010x})",
+                    code as u32
+                )));
+            }
+            SectionQuery::Ready => {
+                // SAFETY: the kernel wrote a `UNICODE_STRING` at the start of `backing`, which is 8-aligned and
+                // holds at least `HEADER` bytes because the call succeeded.
+                let section = unsafe { std::ptr::read(backing.as_ptr().cast::<UNICODE_STRING>()) };
+                // SAFETY: the same allocation viewed as `capacity.div_ceil(8) * 8` initialized bytes.
+                let bytes = unsafe { std::slice::from_raw_parts(backing.as_ptr().cast::<u8>(), backing.len() * 8) };
+                break section_name_units(bytes, section.Length, section.Buffer as usize, HEADER).ok_or_else(|| {
+                    refuse(format!(
+                        "cannot resolve the launcher image: {STEP_MAPPED} returned an invalid name"
+                    ))
+                })?;
+            }
+        }
+    };
 
     // `\\?\GLOBALROOT` + the device path names the object by its NT path, which `CreateFileW` accepts.
     let mut name: Vec<u16> = r"\\?\GLOBALROOT".encode_utf16().collect();
@@ -2224,6 +2325,89 @@ mod tests {
         assert_eq!(
             fill_wide(1024, fake_call(&name, "more-data")),
             Err(WideFillFailure::TooLong)
+        );
+    }
+
+    #[test]
+    fn a_section_query_grows_on_a_short_buffer_status_and_stops_at_its_limit() {
+        let max = 130_000;
+        assert_eq!(classify_section_query(0, 0, 2048, max), SectionQuery::Ready);
+        assert_eq!(
+            classify_section_query(0x8000_0005_u32 as i32, 6000, 2048, max),
+            SectionQuery::Grow(6000)
+        );
+        assert_eq!(
+            classify_section_query(0xC000_0004_u32 as i32, 0, 2048, max),
+            SectionQuery::Grow(4096)
+        );
+        assert_eq!(
+            classify_section_query(0xC000_0023_u32 as i32, 100, 2048, max),
+            SectionQuery::Grow(4096)
+        );
+        assert_eq!(
+            classify_section_query(0xC000_0004_u32 as i32, max + 1, 2048, max),
+            SectionQuery::TooLong
+        );
+        assert_eq!(
+            classify_section_query(0xC000_0004_u32 as i32, 0, usize::MAX, max),
+            SectionQuery::TooLong
+        );
+        let denied = 0xC000_0022_u32 as i32;
+        assert_eq!(
+            classify_section_query(denied, 9999, 2048, max),
+            SectionQuery::Failed(denied)
+        );
+    }
+
+    /// A query buffer of `total` bytes with `text` written at `offset`.
+    fn section_buffer(total: usize, offset: usize, text: &[u16]) -> Vec<u8> {
+        let mut bytes = vec![0u8; total];
+        for (index, unit) in text.iter().enumerate() {
+            bytes[offset + index * 2..offset + index * 2 + 2].copy_from_slice(&unit.to_ne_bytes());
+        }
+        bytes
+    }
+
+    #[test]
+    fn a_section_name_is_read_past_max_path_and_hostile_structures_are_refused() {
+        let text: Vec<u16> = r"\Device\HarddiskVolume3\".repeat(30).encode_utf16().collect();
+        assert!(text.len() > 260);
+        let bytes = section_buffer(16 + text.len() * 2 + 8, 16, &text);
+        let base = bytes.as_ptr() as usize;
+        let length = (text.len() * 2) as u16;
+        assert_eq!(section_name_units(&bytes, length, base + 16, 16), Some(text.clone()));
+
+        assert_eq!(section_name_units(&bytes, 0, base + 16, 16), None, "zero length");
+        assert_eq!(
+            section_name_units(&bytes, length - 1, base + 16, 16),
+            None,
+            "odd length"
+        );
+        assert_eq!(
+            section_name_units(&bytes, length + 16, base + 16, 16),
+            None,
+            "past the end"
+        );
+        assert_eq!(section_name_units(&bytes, length, base + 17, 16), None, "misaligned");
+        assert_eq!(
+            section_name_units(&bytes, length, base + 8, 16),
+            None,
+            "inside the header"
+        );
+        assert_eq!(
+            section_name_units(&bytes, length, base.wrapping_sub(2), 16),
+            None,
+            "before the buffer"
+        );
+        assert_eq!(
+            section_name_units(&bytes, length, usize::MAX - 1, 16),
+            None,
+            "overflowing pointer"
+        );
+        assert_eq!(
+            section_name_units(&bytes, u16::MAX - 1, base + 16, 16),
+            None,
+            "length beyond the buffer"
         );
     }
 
