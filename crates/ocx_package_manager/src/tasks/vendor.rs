@@ -3188,6 +3188,136 @@ mod tests {
         assert_eq!(after, before, "the index directory is byte-identical");
     }
 
+    /// An index that tells the writable instance from its read-only view: any read of the writable one is a
+    /// write path a vendor run must not take; the view counts the reads it served.
+    #[derive(Clone)]
+    struct ViewProbe {
+        view: bool,
+        writable_reads: Arc<std::sync::atomic::AtomicUsize>,
+        view_reads: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl ViewProbe {
+        fn touch(&self) {
+            let counter = if self.view {
+                &self.view_reads
+            } else {
+                &self.writable_reads
+            };
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ocx_index::IndexImpl for ViewProbe {
+        async fn list_repositories(&self, _: &str) -> ocx_index::error::Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+        async fn list_tags(&self, _: &PackageRef) -> ocx_index::error::Result<Option<Vec<String>>> {
+            Ok(None)
+        }
+        async fn fetch_manifest(
+            &self,
+            _: &PackageRef,
+            _: ocx_index::IndexOperation,
+        ) -> ocx_index::error::Result<Option<(Digest, ocx_oci::Manifest)>> {
+            Ok(None)
+        }
+        async fn fetch_manifest_digest(
+            &self,
+            _: &PackageRef,
+            _: ocx_index::IndexOperation,
+        ) -> ocx_index::error::Result<Option<Digest>> {
+            Ok(None)
+        }
+        async fn fetch_blob(&self, _: &PinnedPackageRef) -> ocx_index::error::Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
+        async fn declared_publishers(&self, _: &PackageRef) -> ocx_index::error::Result<ocx_index::DeclaredPublishers> {
+            self.touch();
+            Ok(ocx_index::DeclaredPublishers::Undeclared)
+        }
+        async fn committed_publishers(
+            &self,
+            _: &PackageRef,
+        ) -> ocx_index::error::Result<ocx_index::DeclaredPublishers> {
+            self.touch();
+            Ok(ocx_index::DeclaredPublishers::Undeclared)
+        }
+        fn box_clone(&self) -> Box<dyn ocx_index::IndexImpl> {
+            Box::new(self.clone())
+        }
+        fn read_only_view(&self) -> Box<dyn ocx_index::IndexImpl> {
+            Box::new(Self {
+                view: true,
+                ..self.clone()
+            })
+        }
+    }
+
+    /// The trust checks of a vendor run ask the index through its read-only view only: with a covering
+    /// `signatures = "required"` registry the check reads the index, and every read lands on the view.
+    /// Fails when `verify_selection` uses the manager it was given.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn verifying_a_selection_reads_the_index_only_through_the_read_only_view() {
+        use std::sync::atomic::Ordering::SeqCst;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let probe = ViewProbe {
+            view: false,
+            writable_reads: Arc::default(),
+            view_reads: Arc::default(),
+        };
+        let config: ocx_config::Config =
+            toml::from_str(&format!("[registries.\"{REGISTRY}\"]\nsignatures = \"required\"\n")).expect("config");
+        let auto_verify = super::super::auto_verify::AutoVerify::new(super::super::auto_verify::AutoVerifyInput {
+            operator_policies: Vec::new(),
+            project_policies: Vec::new(),
+            config,
+            registry_client: ocx_oci::Client::with_transport(Box::new(
+                ocx_oci::client::test_transport::StubTransport::new(
+                    ocx_oci::client::test_transport::StubTransportData::new(),
+                ),
+            )),
+            rekor_url: "http://127.0.0.1:3000".parse().expect("url"),
+            offline: true,
+            state: ocx_store::file_structure::StateStore::new(dir.path().join("state")),
+            trusted_root_env: None,
+            sigstore_trust: None,
+            home_trusted_root: None,
+            user_opted_out: false,
+        });
+        let manager = PackageManager::new(
+            FileStructure::with_root(dir.path().join("home")),
+            Index::from_impl(probe.clone()),
+            None,
+            REGISTRY,
+        )
+        .with_auto_verify(Some(auto_verify));
+        let digest = Algorithm::Sha256.hash(b"leaf");
+        let node = closure_node(&digest);
+        let closures = ClosureSet {
+            roots: vec![SelectedRoot {
+                binding: None,
+                requested: node.identifier.as_identifier().clone(),
+                pinned: node.identifier.clone(),
+                index_digest: None,
+                nodes: 0..1,
+            }],
+            surface: vec![node],
+        };
+
+        // The registry requires signatures and declares no publisher, so the check refuses; the read it made is the subject.
+        let _ = verify_selection(&manager, &closures).await;
+
+        assert!(probe.view_reads.load(SeqCst) > 0, "the check read the index (control)");
+        assert_eq!(
+            probe.writable_reads.load(SeqCst),
+            0,
+            "no read went to the writable index"
+        );
+    }
+
     /// The refusal names the package with its tag, the claim, the program and who must act.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_declared_binary_the_content_lacks_names_the_package_and_the_claim() {
