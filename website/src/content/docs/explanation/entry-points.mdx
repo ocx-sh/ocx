@@ -101,7 +101,9 @@ A launcher whose record expanded `current` on every invocation would drift the m
 :::caution[Package roots a record cannot hold]
 A record holds the package root as a JSON string. The root must be an absolute path. It must not contain an apostrophe (`'`), a double quote (`"`), a newline, a carriage return or a NUL character. The same set applies to every other string OCX writes into a launcher. The token `@VENDOR_DIR@` is also refused in a root, because it stands for the directory `ocx vendor` writes to.
 
-A refused value fails the write with exit code `65` (`DataError`) and the slug `launcher_unsafe_character`. The message names the character and the value. For an apostrophe or a quote, move `$OCX_HOME` to a directory whose absolute path has none.
+A value with a refused character fails the write with exit code `65` (`DataError`) and the slug `launcher_unsafe_character`. The message names the character and the value. For an apostrophe or a quote, move `$OCX_HOME` to a directory whose absolute path has none.
+
+A root that is not absolute, or that holds the token, passes that check. The launcher's own record rule refuses it instead, with exit code `65` and the slug `launcher_record_refused`. Nothing is written.
 
 [`ocx vendor`][cmd-vendor] refuses the same token in a package's environment keys, environment values and entry-point arguments with exit code `65` and the slug `vendor_value_unrepresentable`.
 

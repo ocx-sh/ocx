@@ -73,7 +73,13 @@ A shim's launcher is the same native program an [entry point][entrypoints-ref] u
 {"kind":"deferred","schema_version":1,"identifier":"ocx.sh/nodejs/node:24@sha256:1f2e3d4c5b6a79881f2e3d4c5b6a79881f2e3d4c5b6a79881f2e3d4c5b6a7988"}
 ```
 
-The launcher starts the hidden `ocx launcher shim` subcommand. The subcommand receives the pinned identifier the shim was built for and the name the caller typed. It runs the ordinary pull, which is the same three-layer fetch, extract, and assemble pipeline an eager install uses. It then resolves the requested name on the freshly materialized package's own `PATH` and executes it.
+The launcher starts the hidden `ocx launcher shim` subcommand. The subcommand receives the pinned identifier the shim was built for and the name the caller typed.
+
+First it checks that the package declares that name. The check reads the package metadata the home already holds, offline, and downloads nothing. A name the package does not declare never triggers a download.
+
+If the metadata is missing from the home, the launcher refuses and names `ocx install <id>` as the remedy. `ocx clean` keeps what a deferred tool needs for its first use, so a clean does not cause this.
+
+Then the subcommand runs the ordinary pull, which is the same three-layer fetch, extract, and assemble pipeline an eager install uses. It then resolves the requested name on the freshly materialized package's own `PATH` and executes it.
 
 Nothing about the pull is special-cased for laziness. A lazily materialized package is byte-identical to the same package installed eagerly.
 
