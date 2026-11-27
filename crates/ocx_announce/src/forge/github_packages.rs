@@ -7,10 +7,10 @@
 //! pagination; the delete set is the version carrying the tag, plus the platform-manifest versions only
 //! it references, plus the referrer fallback-tag versions (`sha256-<digest>`). A version in that set that
 //! carries another tag refuses the run with `prune_shared_version`, as does a version another remaining tagged
-//! version's index lists. A 401 or 403 is the existing `DeleteDenied` (exit 80), a 404 on the owner or the
-//! listing too, but a spent rate limit (429, or 403 with `x-ratelimit-remaining: 0`) is a transient failure
-//! (exit 75). The API has no conditional delete, so a candidate prune must not overlap a release push of
-//! identical bytes.
+//! version's index lists. A 401 or 403 is the existing `DeleteDenied` (exit 80), a 404 on the owner, the
+//! listing, or a root's delete whose tag is still served (a token without the admin role) too, but a spent rate
+//! limit (429, or 403 with `x-ratelimit-remaining: 0`) is a transient failure (exit 75). The API has no
+//! conditional delete, so a candidate prune must not overlap a release push of identical bytes.
 
 use futures::StreamExt as _;
 use ocx_oci::{Digest, OciIdentifier};
@@ -252,12 +252,23 @@ impl TagDeleter for GithubPackagesDeleter<'_> {
                 .iter()
                 .find(|(_, id)| *id == version.id)
                 .map_or_else(|| found.last().map_or(first_tag, |(tag, _)| *tag), |(tag, _)| *tag);
-            if let Err(error) = self.delete_version(collection, version, repository, label).await {
-                return Err(incomplete(repository, &set[position..], error));
-            }
+            let not_found = match self.delete_version(collection, version, repository, label).await {
+                Ok(not_found) => not_found,
+                Err(error) => return Err(incomplete(repository, &set[position..], error)),
+            };
             if position < roots.len() {
                 for (tag, _) in found.iter().filter(|(_, id)| *id == version.id) {
                     if let Err(error) = confirm_gone(self.client, repository, tag).await {
+                        // GitHub hides a version the token may not delete behind 404; a root's still-served
+                        // tag tells that apart from "already gone".
+                        if not_found && matches!(error, PruneError::StillPresent { .. }) {
+                            let cause = denied(
+                                repository,
+                                tag,
+                                "the forge answered 404 for a version it lists; the token needs the admin role on the package",
+                            );
+                            return Err(incomplete(repository, &set[position..], cause));
+                        }
                         return Err(incomplete(repository, &set[position + 1..], error));
                     }
                     report.deleted.push((*tag).clone());
@@ -275,21 +286,22 @@ impl GithubPackagesDeleter<'_> {
         version: &Version,
         repository: &OciIdentifier,
         tag: &str,
-    ) -> Result<(), PruneError> {
+    ) -> Result<bool, PruneError> {
         let path = format!("{}/{}", self.versions_path(collection), version.id);
         let response = self
             .send(self.request(reqwest::Method::DELETE, &path), repository, tag)
             .await?;
         let status = response.status();
-        if status == reqwest::StatusCode::NOT_FOUND {
-            log::debug!("{repository} version {} was already gone (404)", version.id);
+        let not_found = status == reqwest::StatusCode::NOT_FOUND;
+        if not_found {
+            log::debug!("{repository} version {} answered 404 on delete", version.id);
         } else if !status.is_success() {
             return Err(forge_failure(&format!(
                 "deleting version {} answered {status}",
                 version.id
             )));
         }
-        Ok(())
+        Ok(not_found)
     }
 
     /// The versions removing `roots` removes: the roots, the platform manifests no remaining tagged version
@@ -1136,6 +1148,63 @@ mod tests {
         }
         assert!(!message.contains("version 1 "), "{message}");
         assert_eq!(report.deleted, ["old"], "the root was deleted before the failure");
+    }
+
+    /// A fake whose DELETE of the root version (id 1) answers GitHub's 404 for a token that may not delete it.
+    async fn fake_hiding_the_root_delete(graph: &Graph) -> Fake {
+        let inner = route("Organization", graph.versions.clone());
+        let root = format!("/orgs/{OWNER}/packages/container/{PACKAGE}/versions/1");
+        Fake::start(move |method, target| {
+            if method == "DELETE" && target == root {
+                return (404, r#"{"message":"Not Found"}"#.to_string());
+            }
+            inner(method, target)
+        })
+        .await
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_404_on_a_listed_root_whose_tag_is_still_served_is_delete_denied() {
+        let graph = graph(&["old"], None);
+        let served = Digest::try_from(digest("served").as_str()).expect("a digest");
+        for _ in 0..ocx_package::prune::CONFIRM_TRIES {
+            graph
+                .data
+                .write()
+                .probe_results
+                .push(Ok(ManifestPresence::Present(served.clone())));
+        }
+        let client = stub_client(&graph.data);
+        let fake = fake_hiding_the_root_delete(&graph).await;
+
+        let mut report = DeleteReport::default();
+        let error = deleter(&client, &fake.base)
+            .delete(&plan(&["old"], false), &mut report)
+            .await
+            .expect_err("a 404 on a listed root that stays served is a denial");
+
+        let PruneError::Incomplete { leftover, source, .. } = &error else {
+            panic!("{error:?}");
+        };
+        assert!(matches!(source.as_ref(), PruneError::DeleteDenied { .. }), "{source:?}");
+        assert_eq!(leftover.first().map(|(id, _)| id.as_str()), Some("1"), "{leftover:?}");
+        assert!(report.deleted.is_empty(), "{:?}", report.deleted);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_404_on_a_root_whose_tag_is_gone_is_reported_deleted() {
+        let graph = graph(&["old"], None);
+        confirm_all_gone(&graph.data, 1);
+        let client = stub_client(&graph.data);
+        let fake = fake_hiding_the_root_delete(&graph).await;
+
+        let mut report = DeleteReport::default();
+        deleter(&client, &fake.base)
+            .delete(&plan(&["old"], false), &mut report)
+            .await
+            .expect("an already-gone root is a success");
+
+        assert_eq!(report.deleted, ["old"]);
     }
 
     #[tokio::test]
