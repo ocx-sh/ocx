@@ -41,3 +41,26 @@ pub(crate) fn deferred_record(identifier: &ocx_oci::PinnedPackageRef) -> Result<
         identifier: identifier.as_str().to_owned(),
     }))
 }
+
+/// Refuses a record the launcher would refuse to read, so a home writer never publishes one. `context` names the
+/// path the error reports.
+///
+/// # Errors
+///
+/// The record's [`LaunchRecord::validate`] failure, as an invalid-input file error.
+pub(crate) fn validate_for_write(
+    record: &LaunchRecord,
+    windows: bool,
+    context: &std::path::Path,
+) -> Result<(), crate::Error> {
+    // `RecordError` has no `std::error::Error` impl, so its text is the whole cause.
+    record.validate(windows).map_err(|error| {
+        crate::error::file_error(
+            context,
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("the launcher would refuse this record: {error}"),
+            ),
+        )
+    })
+}

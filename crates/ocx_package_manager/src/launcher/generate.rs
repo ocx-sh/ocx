@@ -66,6 +66,7 @@ pub(super) async fn generate_for(
         schema_version: SCHEMA_VERSION,
         package_root: package_root.as_str().to_owned(),
     });
+    super::validate_for_write(&record, windows, dest)?;
 
     tokio::fs::create_dir_all(dest)
         .await
@@ -695,6 +696,26 @@ mod tests {
         .await;
 
         assert!(result.is_err(), "a driveless root on a Windows target is refused");
+        assert!(!dest.exists(), "no directory, no file");
+    }
+
+    /// A root holding the `@VENDOR_DIR@` token passes the unsafe-character gate but not the record's own rule, so
+    /// nothing is written.
+    #[tokio::test]
+    async fn a_package_root_holding_the_vendor_token_is_refused_before_anything_is_written() {
+        let tmp = tempdir().unwrap();
+        let dest = tmp.path().join("pkg").join("launchers");
+
+        let result = super::generate_for(
+            &tmp.path().join("@VENDOR_DIR@").join("pkg"),
+            &entries_for(&["cmake"]),
+            &dest,
+            host_blob(),
+            false,
+        )
+        .await;
+
+        assert!(result.is_err(), "the launcher would refuse this record");
         assert!(!dest.exists(), "no directory, no file");
     }
 

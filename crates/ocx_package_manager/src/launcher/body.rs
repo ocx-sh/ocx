@@ -64,16 +64,7 @@ pub(crate) fn toolchain_record(
         project_root,
         ocx,
     });
-    // `RecordError` has no `std::error::Error` impl, so its text is the whole cause.
-    record.validate(windows).map_err(|error| {
-        crate::error::file_error(
-            context,
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("the launcher would refuse this toolchain record: {error}"),
-            ),
-        )
-    })?;
+    super::validate_for_write(&record, windows, context)?;
     Ok(record)
 }
 
