@@ -28,7 +28,8 @@ fn write_file(path: &std::path::Path, content: &str) {
 fn baked_project_selector(project_root: &std::path::Path) -> String {
     let record = super::toolchain_record(
         &super::TrampolineTarget::Project(project_root.to_path_buf()),
-        Some(std::path::Path::new("/opt/ocx/bin/ocx")),
+        // Under the root so it is absolute on every host: a POSIX literal is not on Windows.
+        Some(&project_root.join("bin").join("ocx")),
         cfg!(windows),
         project_root,
     )
