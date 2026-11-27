@@ -69,10 +69,15 @@ impl BinEntryStamp {
     }
 }
 
+/// A zero id is what a volume without a usable file index reports; it would equal itself on every file, so it is no identity.
+fn no_zero_identity(id: u64) -> Option<u64> {
+    (id != 0).then_some(id)
+}
+
 #[cfg(unix)]
 fn file_id_of(_path: &Path, metadata: &std::fs::Metadata) -> Option<u64> {
     use std::os::unix::fs::MetadataExt as _;
-    Some(metadata.ino())
+    no_zero_identity(metadata.ino())
 }
 
 /// Opens a handle because `MetadataExt::file_index()` is unstable (rust-lang/rust#63010).
@@ -107,7 +112,7 @@ fn file_id_of(path: &Path, _metadata: &std::fs::Metadata) -> Option<u64> {
         );
         return None;
     }
-    Some((u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow))
+    no_zero_identity((u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow))
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -1272,6 +1277,22 @@ mod tests {
             Some(constructed),
             "C-003 — a constructed stamp must read back, so its `v` is the one this binary recognises"
         );
+    }
+
+    #[test]
+    fn a_zero_file_identity_is_no_identity() {
+        assert_eq!(super::no_zero_identity(0), None);
+        assert_eq!(super::no_zero_identity(7), Some(7));
+        // A stamp read back with `Some(0)` never equals a freshly taken one (always `None` or non-zero),
+        // so the gate's `file_id.is_some() && identity == stamped` falls through to size plus hash.
+        let tmp = tempfile::tempdir().unwrap();
+        let entry = tmp.path().join("cmake");
+        std::fs::write(&entry, b"x").unwrap();
+        let metadata = std::fs::metadata(&entry).unwrap();
+        let mut stamped = BinEntryStamp::from_metadata(&entry, &metadata, "1".repeat(64));
+        stamped.file_id = Some(0);
+        let fresh = BinEntryStamp::from_metadata(&entry, &metadata, "1".repeat(64));
+        assert_ne!(fresh, stamped);
     }
 
     /// C-003, C-061 — [`BinEntryStamp::from_metadata`] is the one derivation
