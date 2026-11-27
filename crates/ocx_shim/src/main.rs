@@ -94,7 +94,7 @@ impl ShimError {
     fn stderr_message(&self) -> String {
         match self {
             ShimError::ContainmentViolation { path } => {
-                format!("ocx-shim: package root outside OCX home: {path}")
+                format!("ocx-shim: package root outside OCX home: {}", escape_controls(path))
             }
             ShimError::SelfPathFailure => "ocx-shim: cannot determine own path".to_string(),
             ShimError::OcxNotFound { program } => {
@@ -114,7 +114,11 @@ impl ShimError {
             }
             #[cfg(unix)]
             ShimError::DirectExecFailed { program, reason, .. } => {
-                format!("ocx-shim: failed to start {}: {reason}", escape_controls(program))
+                format!(
+                    "ocx-shim: failed to start {}: {}",
+                    escape_controls(program),
+                    escape_controls(reason)
+                )
             }
         }
     }
@@ -133,11 +137,23 @@ impl ShimError {
 }
 
 /// `text` with each control character escaped as `{:?}` writes it, so a program path cannot drive the terminal.
+///
+/// Bidirectional controls and zero-width characters (`Cf`, which `is_control` misses) are escaped too, by explicit
+/// code point: the classes the `ocx` CLI strips from its terminal output.
 fn escape_controls(text: &str) -> String {
     let mut escaped = String::with_capacity(text.len());
     for c in text.chars() {
         if c.is_control() {
             escaped.extend(c.escape_debug());
+        } else if matches!(
+            c,
+            '\u{061c}'
+                | '\u{200b}'..='\u{200f}'
+                | '\u{202a}'..='\u{202e}'
+                | '\u{2066}'..='\u{2069}'
+                | '\u{feff}'
+        ) {
+            escaped.push_str(&format!("\\u{{{:x}}}", u32::from(c)));
         } else {
             escaped.push(c);
         }
@@ -149,7 +165,7 @@ fn escape_controls(text: &str) -> String {
 ///
 /// `working_directory_units` is the inherited working directory's length in UTF-16 units.
 fn length_limit_hint(win32: u32, working_directory_units: usize, program: &str) -> Option<String> {
-    use ocx_env_apply::windows_path::{MAX_PATH, extended_length_path};
+    use ocx_env_apply::windows_path::MAX_PATH;
 
     // No prefix lifts this one: `CreateProcessW` refuses a working directory of MAX_PATH or more.
     if working_directory_units >= MAX_PATH && matches!(win32, 3 | 87 | 206 | 267) {
@@ -159,19 +175,14 @@ fn length_limit_hint(win32: u32, working_directory_units: usize, program: &str) 
         ));
     }
     let program_units = program.encode_utf16().count();
-    if program_units < MAX_PATH || !matches!(win32, 2 | 3 | 206) {
+    // Every program is absolute, so an over-long `.exe` takes the `\\?\` prefix at the spawn; only a batch file, which
+    // `cmd.exe` runs under the plain limit, still fails on length.
+    if program_units < MAX_PATH || !matches!(win32, 2 | 3 | 206) || !ocx_env_apply::launch::is_batch_target(program) {
         return None;
     }
-    let why = if ocx_env_apply::launch::is_batch_target(program) {
-        "a batch file runs through cmd.exe, which has the same limit"
-    } else if extended_length_path(program).is_none() {
-        "a relative program path cannot take the \\\\?\\ prefix"
-    } else {
-        return None;
-    };
     Some(format!(
-        "the program path is {program_units} characters long, past the {MAX_PATH} Windows allows, and {why}; \
-         move the directory the tree sits in to a shorter path"
+        "the program path is {program_units} characters long, past the {MAX_PATH} Windows allows, and a batch file \
+         runs through cmd.exe, which has the same limit; move the directory the tree sits in to a shorter path"
     ))
 }
 
@@ -717,11 +728,6 @@ mod tests {
             hint.contains("program path is 260") && hint.contains("cmd.exe"),
             "{hint}"
         );
-        let relative = format!("bin\\{}", "a".repeat(260));
-        let hint = spawn_failure(206, &relative)
-            .length_limit_hint(10)
-            .expect("a long relative path");
-        assert!(hint.contains("cannot take the \\\\?\\ prefix"), "{hint}");
         let pinned = ShimError::OcxNotFound { program: batch.clone() };
         assert!(
             pinned.length_limit_hint(10).is_some(),
@@ -777,6 +783,32 @@ mod tests {
             "{:?}",
             argument.stderr_message()
         );
+    }
+
+    #[test]
+    fn a_containment_path_and_a_canonicalization_notice_reach_stderr_with_control_characters_escaped() {
+        let violation = ShimError::ContainmentViolation {
+            path: "/o/pk\u{1b}[2Jg\r\n".to_string(),
+        };
+        assert_eq!(
+            violation.stderr_message(),
+            "ocx-shim: package root outside OCX home: /o/pk\\u{1b}[2Jg\\r\\n"
+        );
+        let notice = crate::direct::canonicalize_notice("/o/pk\u{1b}g\n", "denied");
+        assert!(!notice.contains(char::is_control), "{notice:?}");
+        assert!(notice.contains("/o/pk\\u{1b}g\\n"), "{notice:?}");
+    }
+
+    /// Bidirectional controls and zero-width characters are `Cf`, which `char::is_control` misses; the `ocx` CLI
+    /// strips the same classes from its terminal output.
+    #[test]
+    fn a_diagnostic_escapes_bidi_controls_and_zero_width_characters() {
+        let text = "a\u{202e}b\u{2066}c\u{200f}d\u{061c}e\u{200b}f\u{feff}g";
+        assert_eq!(
+            crate::escape_controls(text),
+            "a\\u{202e}b\\u{2066}c\\u{200f}d\\u{61c}e\\u{200b}f\\u{feff}g"
+        );
+        assert_eq!(crate::escape_controls("plain \u{e9}\u{4e2d}"), "plain \u{e9}\u{4e2d}");
     }
 
     #[test]

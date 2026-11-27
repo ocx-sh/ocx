@@ -234,9 +234,10 @@ fn a_classic_launcher_starts_a_pinned_ocx_past_max_path() {
     LongPath::assert_child_ran(&output);
 }
 
-/// A relative pin of `MAX_PATH` or more cannot take the `\\?\` prefix: the one stderr line names the length limit.
+/// A relative pin is refused as not absolute before any start, whatever its length: one stderr line, exit 78
+/// (`adr_unified_launcher.md` § `ocx` resolution, rung 1).
 #[test]
-fn a_relative_pin_past_max_path_names_the_length_limit_on_the_one_stderr_line() {
+fn a_relative_pin_past_max_path_is_refused_as_not_absolute_on_the_one_stderr_line() {
     let long_path = LongPath::new("relative-pin");
     let bin = long_path.base.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
@@ -256,14 +257,11 @@ fn a_relative_pin_past_max_path_names_the_length_limit_on_the_one_stderr_line() 
         .output()
         .unwrap();
 
-    // Windows documents no Win32 code for an over-long relative name (3 maps to 69, 206 to 74), so the line is the
-    // contract here; the exit-code mapping is the unit tests' in `main.rs`.
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(!output.status.success(), "{stderr}");
+    assert_eq!(output.status.code(), Some(78), "{stderr}");
     assert_eq!(stderr.lines().count(), 1, "one ocx-shim line: {stderr}");
-    assert!(stderr.starts_with("ocx-shim: "), "{stderr}");
     assert!(
-        stderr.contains("; the program path is ") && stderr.contains("cannot take the \\\\?\\ prefix"),
+        stderr.starts_with("ocx-shim: OCX_BINARY_PIN must be an absolute path: "),
         "{stderr}"
     );
 }
