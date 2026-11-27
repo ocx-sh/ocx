@@ -67,7 +67,7 @@ Every path field obeys these rules, enforced when the manifest is written.
 
 | Field | Type | Description |
 |---|---|---|
-| `files` | `{path, executable}`[], sorted by `path` | Every regular file under `content_dir`. |
+| `files` | `{path, executable}`[], sorted by `path` | Every regular file under `content_dir`. A file that a `binary` tool's `target_path` names is always `executable: true`, on every host. |
 | `links` | `{path, target}`[], sorted by `path` | Every symlink. `target` is relative and resolves inside `content_dir`. Listed even under `--omit-links`. |
 | `link_free_dirs` | string[], sorted | Top-most directories under `content_dir` that hold no link at or below them. |
 
@@ -114,7 +114,8 @@ A selection environment equals `ocx --format json env --pinned` (project) or `oc
 | Condition | Exit code | `error.detail` |
 |---|---|---|
 | The output directory exists and is not an empty directory, or is a symlink | 64 | `vendor_output_not_empty` |
-| A value holds `@VENDOR_DIR@`, NUL, non-UTF-8, or the home's or output directory's absolute path | 65 | `vendor_value_unrepresentable` |
+| A value holds `@VENDOR_DIR@`, NUL, or the home's or output directory's absolute path | 65 | `vendor_value_unrepresentable` |
+| The home or the output directory is not valid UTF-8 | 65 | `vendor_path_unrepresentable` |
 | A program, launcher or link target breaks the path rules, two package digests share a `<HEX16>`, a tool name ends in `.launch`, or a package declares a binary its content does not hold | 65 | `vendor_path_unrepresentable` |
 | A selected binding has no leaf for the platform at the locked version | 78 | existing resolution slug |
 

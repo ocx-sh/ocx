@@ -57,6 +57,8 @@ Do not run `clean` while other OCX commands run. A concurrent install may refere
 
 The rendered toolchain tree under `<home>/toolchain/` sits outside the reference graph. It is derived state that `ocx pull` rewrites, so `clean` never walks its links. Only render directories under `shells/` that a newer render superseded are retired. The packages its links point at stay live through the project's own lock.
 
+`ocx clean` skips a toolchain home whose `active` link cannot be read, and prints a warning. That home's render directories stay.
+
 The consent sweep runs on every `ocx clean`, including `--dry-run` and `--force`. A stamp is removed only when its recorded project directory is confirmed absent. A dangling symlink where the directory used to be still counts as present. An unreadable, malformed or unrecognised-version stamp is retained. A run whose object-store picture is already untrustworthy retains everything, consent stamps included.
 
 Each swept stamp is reported as a `consent` entry, and `--dry-run` names the stamps a live run would sweep.
