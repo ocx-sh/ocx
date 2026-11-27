@@ -309,17 +309,18 @@ async fn index_platforms(manager: &PackageManager, packages: &[PackageRef]) -> R
         .inspect_all(packages.to_vec(), Platform::any(), InspectOptions::default())
         .await
         .map_err(VendorError::Package)?;
-    Ok(shared_platforms(inspected.into_iter().map(|result| {
-        match result {
-            InspectResult::Candidates { candidates, .. } => candidates
-                .into_iter()
-                .map(|candidate| candidate.platform.to_string())
-                .collect(),
-            InspectResult::Manifest { .. } | InspectResult::Resolved { .. } => {
-                BTreeSet::from([Platform::any().to_string()])
-            }
-        }
-    })))
+    Ok(shared_platforms(inspected.into_iter().map(offered_platforms)))
+}
+
+/// The platforms one inspected package offers; a flat manifest or a resolved leaf offers `any`.
+fn offered_platforms(result: InspectResult) -> BTreeSet<String> {
+    match result {
+        InspectResult::Candidates { candidates, .. } => candidates
+            .into_iter()
+            .map(|candidate| candidate.platform.to_string())
+            .collect(),
+        InspectResult::Manifest { .. } | InspectResult::Resolved { .. } => BTreeSet::from([Platform::any().to_string()]),
+    }
 }
 
 /// Resolves every pick for `platform` and reads its closure from config blobs alone.
@@ -2011,6 +2012,27 @@ mod tests {
         );
         assert_eq!(shared_platforms([set(&["any"])]), ["any"]);
         assert!(shared_platforms([set(&["linux/amd64"]), set(&["windows/amd64"])]).is_empty());
+    }
+
+    /// A bare platform manifest identifier offers `any`, so `-p P` is accepted with `available_platforms = ["any"]`.
+    #[test]
+    fn a_flat_manifest_offers_any_and_an_index_offers_its_candidates() {
+        let digest = Digest::Sha256("0b5f2a4e9c7d3b1a0b5f2a4e9c7d3b1a0b5f2a4e9c7d3b1a0b5f2a4e9c7d3b1a".to_owned());
+        let pinned = closure_node(&digest).identifier;
+        let metadata = serde_json::from_str::<ocx_package::metadata::Metadata>(r#"{"type":"bundle","version":1}"#)
+            .expect("bundle metadata");
+        let flat = InspectResult::Manifest {
+            pinned: pinned.clone(),
+            metadata: ocx_package::metadata::ValidMetadata::try_from(metadata).expect("valid metadata"),
+            layers: Vec::new(),
+            closure: None,
+        };
+        assert_eq!(offered_platforms(flat), BTreeSet::from(["any".to_owned()]));
+        let index = InspectResult::Candidates {
+            pinned,
+            candidates: Vec::new(),
+        };
+        assert!(offered_platforms(index).is_empty());
     }
 
     /// What `ocx exec` selects for one default-group tool: `select_tool_set` over a config and the lock that binds it.
