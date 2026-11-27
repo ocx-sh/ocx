@@ -689,6 +689,9 @@ fn a_launcher_whose_file_was_deleted_exits_78_saying_so() {
     // `ETXTBSY` from a sibling thread's fork makes the shell's `exec` fail with 126; see `run_launcher`.
     let output = (0..100)
         .map(|_| {
+            // `install` already copied the launcher here; a Bazel output is read-only and so is its copy, which
+            // `copy` cannot overwrite.
+            let _ = std::fs::remove_file(&launcher);
             std::fs::copy(LAUNCHER_BINARY, &launcher).unwrap();
             Command::new("/bin/sh")
                 .args(["-c", r#"exec 3<"$1" && rm "$1" && exec /proc/self/fd/3"#, "sh"])
