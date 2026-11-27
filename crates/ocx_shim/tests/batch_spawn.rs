@@ -216,8 +216,13 @@ fn a_direct_launcher_starts_a_program_past_max_path() {
     LongPath::assert_child_ran(&output);
 }
 
-/// The launcher image lies under nested directories that put its real path past `MAX_PATH`, and it is started through a
-/// short directory junction onto that tree. The record beside the real image is read and the short batch target runs.
+/// The launcher image lies under directories that put its real path past `MAX_PATH`, and it is started by a short path
+/// through two chained directory junctions (`base\b` onto `base\a` onto the real tree). The record beside the real image
+/// is read and the short batch target runs.
+///
+/// The invocation path stays short because Windows refuses to start an image whose invocation path reaches `MAX_PATH`,
+/// before the launcher runs; each junction target typed to `mklink` stays short for the same reason. The record's `self`
+/// is relative to the root the started path names (`base\b`), so it is the bare file name.
 ///
 /// Guards the image lookup: with `GetMappedFileNameW` the launcher exits 78 with "cannot resolve the launcher image".
 #[test]
@@ -229,38 +234,48 @@ fn a_launcher_whose_real_path_is_past_max_path_starts_through_a_junction() {
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_nanos());
     let base = std::env::temp_dir().join(format!("ocx-junction-{}-{nanos}", std::process::id()));
-    let root = base.join("vendor");
-    let nested: Vec<String> = (0..5).map(|index| format!("{index}{}", "d".repeat(49))).collect();
-    let self_path = format!("{}/tool", nested.join("/"));
-    let launcher = root.join(format!("{self_path}.exe").replace('/', "\\"));
+    let nested: Vec<String> = (0..6).map(|index| format!("{index}{}", "d".repeat(39))).collect();
+    let real_dir = base.join("root").join(nested.join("\\"));
+    let launcher = real_dir.join("tool.exe");
     assert!(
         launcher.as_os_str().encode_wide().count() > 260,
         "the real image path must exceed MAX_PATH: {}",
         launcher.display()
     );
-    std::fs::create_dir_all(launcher.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(&real_dir).unwrap();
     std::fs::copy(LAUNCHER_BINARY, &launcher).unwrap();
     // The child stays short: the launcher image is what must be long.
-    let program = root.join(PROGRAM);
+    let program = real_dir.join(PROGRAM.replace('/', "\\"));
     std::fs::create_dir_all(program.parent().unwrap()).unwrap();
     std::fs::write(&program, PROBE_SCRIPT).unwrap();
     let sidecar = format!(
-        r#"{{"kind":"direct","schema_version":1,"vendor_id":"{VENDOR_ID}","self":"{self_path}","program":"@VENDOR_DIR@/{PROGRAM}","args":[],"unset":[],"env":[]}}"#
+        r#"{{"kind":"direct","schema_version":1,"vendor_id":"{VENDOR_ID}","self":"tool","program":"@VENDOR_DIR@/{PROGRAM}","args":[],"unset":[],"env":[]}}"#
     );
-    std::fs::write(root.join(format!("{self_path}.launch").replace('/', "\\")), sidecar).unwrap();
+    std::fs::write(real_dir.join("tool.launch"), sidecar).unwrap();
 
-    // The junction target is short, so `mklink` takes it; the length is in the directories beneath it.
-    let link = base.join("active");
-    let made = Command::new("cmd")
-        .args(["/C", "mklink", "/J"])
-        .arg(&link)
-        .arg(&root)
-        .output()
-        .unwrap();
-    assert!(made.status.success(), "mklink /J: {made:?}");
-    let attributes = std::fs::symlink_metadata(&link).unwrap().file_attributes();
-    assert!(attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0, "{attributes:#x}");
-    let through_junction = link.join(format!("{self_path}.exe").replace('/', "\\"));
+    // `a` reaches the first three segments, `b` the last three through `a`: each typed target stays under MAX_PATH.
+    let first = base.join("a");
+    let second = base.join("b");
+    let first_target = base.join("root").join(nested[..3].join("\\"));
+    let second_target = first.join(nested[3..].join("\\"));
+    for (link, target) in [(&first, &first_target), (&second, &second_target)] {
+        assert!(target.as_os_str().encode_wide().count() < 250, "{}", target.display());
+        let made = Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .output()
+            .unwrap();
+        assert!(made.status.success(), "mklink /J: {made:?}");
+        let attributes = std::fs::symlink_metadata(link).unwrap().file_attributes();
+        assert!(attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0, "{attributes:#x}");
+    }
+    let through_junction = second.join("tool.exe");
+    assert!(
+        through_junction.as_os_str().encode_wide().count() < 200,
+        "the invocation path must stay short: {}",
+        through_junction.display()
+    );
     assert!(through_junction.is_file(), "{}", through_junction.display());
 
     let output = Command::new(&through_junction)
@@ -270,6 +285,9 @@ fn a_launcher_whose_real_path_is_past_max_path_starts_through_a_junction() {
         .unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stdout = String::from_utf8_lossy(&output.stdout);
+    // Links first: `remove_dir` takes a junction itself, never what it points at.
+    let _ = std::fs::remove_dir(&second);
+    let _ = std::fs::remove_dir(&first);
     let _ = std::fs::remove_dir_all(&base);
 
     assert!(!stderr.contains("cannot resolve the launcher image"), "{stderr}");
@@ -328,11 +346,11 @@ fn a_relative_pin_past_max_path_is_refused_as_not_absolute_on_the_one_stderr_lin
     );
 }
 
-/// A batch target whose path reaches `MAX_PATH` never runs: whether std refuses the start or cmd.exe exits non-zero,
-/// the one stderr line carries the length-limit clause (the line's exact text is a host unit in `direct.rs`). The
-/// launcher here lies under a short path, so this says nothing about the launcher image lookup.
+/// A batch target whose path reaches `MAX_PATH` either runs, or fails with the one stderr line carrying the length-limit
+/// clause: which one is a property of the host's cmd.exe, not of the launcher. The line's exact text is the host unit
+/// `a_batch_start_failure_line_names_the_program_the_exit_and_the_length_limit` in `direct.rs`.
 #[test]
-fn a_batch_target_past_max_path_names_the_length_limit_on_the_stderr_line() {
+fn a_batch_target_past_max_path_runs_with_its_argument_or_names_the_length_limit() {
     let long_path = LongPath::new("batch");
     let relative = long_path.relative.replace("probe.exe", "probe.cmd");
     std::fs::write(long_path.vendor_root().join(relative.replace('/', "\\")), PROBE_SCRIPT).unwrap();
@@ -345,13 +363,24 @@ fn a_batch_target_past_max_path_names_the_length_limit_on_the_stderr_line() {
     );
     std::fs::write(root.join(format!("{SELF_PATH}.launch")), sidecar).unwrap();
 
-    let output = Command::new(&launcher).current_dir(&long_path.base).output().unwrap();
+    let output = Command::new(&launcher)
+        .arg("hello")
+        .current_dir(&long_path.base)
+        .output()
+        .unwrap();
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(!output.status.success(), "{stderr}");
-    assert!(stderr.starts_with("ocx-shim: "), "{stderr}");
-    assert!(
-        stderr.contains("and a batch file runs through cmd.exe, which has the same limit; move the directory"),
-        "{stderr}"
-    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if output.status.success() {
+        assert!(
+            stdout.contains("ARG1=hello"),
+            "the batch file did not run: {stdout:?} {stderr}"
+        );
+    } else {
+        assert!(stderr.starts_with("ocx-shim: "), "{stderr}");
+        assert!(
+            stderr.contains("and a batch file runs through cmd.exe, which has the same limit; move the directory"),
+            "{stderr}"
+        );
+    }
 }
