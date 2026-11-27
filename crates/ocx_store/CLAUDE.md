@@ -40,8 +40,8 @@ ancestor-symlink refusal classifies as `UsageError` (64) and not the flat
 ## The two `__` features are not interchangeable
 
 `__testing` is the ordinary seam feature, forwarded by `ocx`'s own `__testing`
-and therefore **present in the acceptance binary**. It gates
-`shim_bin_store`'s `__OCX_TESTING_SHIM_LOST_PUBLISH_RACE`.
+and therefore **present in the acceptance binary**. It gates no seam of its own and
+forwards `ocx_env`'s.
 
 `__test_scaffolding` is **not** forwarded by anything that ships. It exists so
 `ocx_lib`'s own unit tests can reach a seam a bare `#[cfg(test)]` cannot cross a

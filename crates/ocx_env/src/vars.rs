@@ -579,8 +579,6 @@ crate::env_vars! {
     pub __OCX_TESTING_REQUIRE_LIVE_SHELLS: String, Testing, propagation = UserInput;
     /// OCI reference `ocx self` treats as its own image.
     pub __OCX_TESTING_SELF_IMAGE: String, Testing, propagation = UserInput;
-    /// Store root whose shim publish loses its race.
-    pub __OCX_TESTING_SHIM_LOST_PUBLISH_RACE: Path, Testing, propagation = UserInput;
     /// Path replacing the system-tier config file.
     pub __OCX_TESTING_SYSTEM_CONFIG: Path, Testing, propagation = UserInput;
     /// Marks the child re-run of a telemetry unit test that must see the proxy variables its parent set.

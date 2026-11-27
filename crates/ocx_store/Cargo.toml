@@ -8,10 +8,8 @@ publish = false
 
 [features]
 # Internal-only escape hatch, the project's one seam convention
-# (`subsystem-tests.md` "Test-Only Seams"). Gates `shim_bin_store`'s
-# `__OCX_TESTING_SHIM_LOST_PUBLISH_RACE` seam, which forces the lost-publish
-# race the acceptance binary cannot otherwise reach. Forwarded by `ocx_lib`'s
-# and `ocx`'s own `__testing`; forwards `ocx_env`'s, which declares that seam.
+# (`subsystem-tests.md` "Test-Only Seams"). Gates no seam in this crate itself;
+# it forwards `ocx_env`'s, which declares the `__OCX_TESTING_*` seams.
 __testing = ["ocx_env/__testing"]
 
 # The seams `ocx_lib`'s own tests drive across the crate boundary, which a bare
