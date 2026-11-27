@@ -11,12 +11,17 @@ file, so ``build_recorder`` compiles a native ``.exe`` there.
 
 from __future__ import annotations
 
+import contextlib
+import hashlib
 import json
+import os
 import re
 import shutil
 import stat
 import subprocess
 import sys
+import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -166,28 +171,71 @@ fn main() {
 '''
 
 
-def build_recorder(directory: Path) -> Path:
-    """Compile the argv recorder to ``directory/recorder.exe``; the Windows stand-in for ``write_stub_ocx``.
+# The first `rustc` call may make the `rustup` proxy install a toolchain, and two installs into one
+# `RUSTUP_HOME` collide, so one process at a time compiles; the rest wait for its result.
+_BUILD_WAIT = 1500  # seconds a waiter gives the builder: a cold toolchain install plus the compile
+_BUILD_STALE = 1200  # a lock file older than this belongs to a builder that died
 
-    Each start appends one JSON line (``argv``, and the ``OCX_*`` / ``__OCX_*`` environment
-    with upper-cased names) to ``<exe>.log`` beside the file it ran as, so copies of one build
-    keep separate logs, then exits with ``$RECORDER_EXIT`` (default 0). Needs ``rustc`` on ``PATH``; absent, the test fails naming it.
+
+def _wait_for_exclusive_build(root: Path, exe: Path) -> bool:
+    """Take ``root/build.lock`` (exclusive create); ``False`` when ``exe`` appeared while waiting."""
+    lock = root / "build.lock"
+    deadline = time.monotonic() + _BUILD_WAIT
+    while not exe.is_file():
+        try:
+            os.close(os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+            return True
+        except FileExistsError:
+            with contextlib.suppress(OSError):
+                if time.time() - lock.stat().st_mtime > _BUILD_STALE:
+                    lock.unlink()
+                    continue
+        assert time.monotonic() < deadline, f"another process holds {lock} and never published {exe}"
+        time.sleep(0.5)
+    return False
+
+
+def build_recorder() -> Path:
+    """Compile the argv recorder once per machine; return the shared ``recorder.exe``, the Windows stand-in for ``write_stub_ocx``.
+
+    A start appends one JSON line (``argv`` and the upper-cased ``OCX_*`` / ``__OCX_*`` environment) to
+    ``<exe>.log`` beside the file it ran as, then exits with ``$RECORDER_EXIT`` (default 0): copy it with
+    ``recorder_copy``, never run it in place. Needs ``rustc`` on ``PATH``.
+
+    The build sits in a source-hash directory under the temp directory, so every xdist worker and module
+    shares it, and one process compiles at a time (a rustup toolchain install must not run twice at once).
+    The compile writes a private name and publishes with one rename.
     """
     rustc = shutil.which("rustc")
     assert rustc, "the Windows argv recorder is compiled with rustc, which is not on PATH"
-    directory.mkdir(parents=True, exist_ok=True)
-    source = directory / "recorder.rs"
-    source.write_text(_RECORDER_RS, encoding="utf-8")
-    exe = directory / "recorder.exe"
-    built = subprocess.run(
-        [rustc, "--edition", "2021", "-O", "-o", str(exe), str(source)],
-        capture_output=True,
-        text=True,
-        timeout=300,
-        check=False,
-    )
-    assert built.returncode == 0, f"compiling the recorder failed:\n{built.stderr}"
-    return exe
+    key = hashlib.sha256(_RECORDER_RS.encode()).hexdigest()[:16]
+    root = Path(tempfile.gettempdir()) / f"ocx-recorder-{key}"
+    exe = root / "recorder.exe"
+    if exe.is_file():
+        return exe
+    root.mkdir(parents=True, exist_ok=True)
+    if not _wait_for_exclusive_build(root, exe):
+        return exe
+    source = root / f"recorder-{os.getpid()}.rs"
+    staged = root / f"recorder-{os.getpid()}.exe.tmp"
+    try:
+        if exe.is_file():
+            return exe
+        source.write_text(_RECORDER_RS, encoding="utf-8")
+        built = subprocess.run(
+            [rustc, "--edition", "2021", "-O", "--crate-type", "bin", "-o", str(staged), str(source)],
+            capture_output=True,
+            text=True,
+            timeout=_BUILD_STALE - 60,
+            check=False,
+        )
+        assert built.returncode == 0, f"compiling the recorder failed:\n{built.stderr}"
+        os.replace(staged, exe)
+        return exe
+    finally:
+        source.unlink(missing_ok=True)
+        staged.unlink(missing_ok=True)
+        (root / "build.lock").unlink(missing_ok=True)
 
 
 def recorder_copy(recorder: Path, directory: Path, name: str = "ocx.exe") -> tuple[Path, Path]:

@@ -33,6 +33,7 @@ from src.vendor_fixtures import (
     cmake_with_ccache,
     entrypoint_package,
     env_template_package,
+    foreign_platform_package,
     hex16,
     host_bins,
     launch_named_package,
@@ -43,7 +44,6 @@ from src.vendor_fixtures import (
     record_requests,
     reserved_segment_package,
     setuid_package,
-    windows_only_package,
 )
 
 pytestmark = pytest.mark.command("vendor")
@@ -54,6 +54,8 @@ EXIT_CONFIG = 78
 EXIT_NOT_FOUND = 79
 
 HOST = ("-p", current_platform())
+# The platform `multi_platform_package` publishes on every host: HOST has no leaf on Windows or macOS.
+PUBLISHED = ("-p", "linux/amd64")
 posix_only = pytest.mark.skipif(
     sys.platform == "win32", reason="POSIX modes, symlinks and umask"
 )
@@ -137,10 +139,19 @@ def _snapshot(root: Path) -> dict[str, bytes | None]:
     nodes: dict[str, bytes | None] = {}
     for path in sorted(root.rglob("*")):
         rel = path.relative_to(root).as_posix()
-        if path.is_symlink():
+        # A Windows directory link is a junction, which `is_symlink` does not report.
+        if path.is_symlink() or os.path.isjunction(path):
             nodes[rel] = b"-> " + os.readlink(path).encode()
+        elif path.is_dir():
+            nodes[rel] = None
         else:
-            nodes[rel] = None if path.is_dir() else path.read_bytes()
+            try:
+                nodes[rel] = path.read_bytes()
+            except PermissionError:
+                # Windows refuses to open a reparse point whose target is gone; the node's presence is still compared.
+                if sys.platform != "win32":
+                    raise
+                nodes[rel] = b"<unreadable>"
     return nodes
 
 
@@ -371,11 +382,12 @@ def test_wasm_tool_without_a_launcher_has_no_record_path(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
     # `wasip1/wasm` has no launcher blob: `launcher_path` and `record_path` are omitted together.
-    tool = _publish(
+    # Literal `tool`, not `host_bins`: a wasm leaf is never `.exe`, on any host.
+    tool = make_package(
         ocx,
         unique_repo,
-        tmp_path,
-        "tool",
+        "1.0.0",
+        tmp_path / "tool",
         bins=["tool"],
         binaries=["tool"],
         platform="wasip1/wasm",
@@ -642,6 +654,8 @@ def test_vendor_output_carries_no_bazel_file_or_term(
         assert any(p.endswith(f"/c/{name}") for p in paths), name
 
     # Control: a planted BUILD.bazel and a planted term are found.
+    # `_tool` ships an extensionless `bin/tool`, which a Windows host gives no launcher, so `l/` may be absent.
+    (out / "l").mkdir(exist_ok=True)
     (out / "l" / "BUILD.bazel").write_text("", encoding="utf-8")
     manifest = out / "manifest.json"
     planted = json.loads(manifest.read_text(encoding="utf-8"))
@@ -974,7 +988,7 @@ def test_available_platforms_is_the_intersection_over_the_selection(
         _project(ocx, tmp_path / "p_both", {"full": full[0], "partial": partial[0]}),
         both,
         "--manifest-only",
-        *HOST,
+        *PUBLISHED,
     )
     available = set(_manifest(both)["available_platforms"])
     assert "linux/amd64" in available and "linux/arm64" in available
@@ -987,7 +1001,7 @@ def test_available_platforms_is_the_intersection_over_the_selection(
         _project(ocx, tmp_path / "p_full", {"full": full[0]}),
         only_full,
         "--manifest-only",
-        *HOST,
+        *PUBLISHED,
     )
     assert "darwin/arm64" in set(_manifest(only_full)["available_platforms"])
 
@@ -995,9 +1009,7 @@ def test_available_platforms_is_the_intersection_over_the_selection(
 def test_platform_without_host_leaf_vendors_only_when_named(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    if current_platform() == "windows/amd64":
-        pytest.fail("the fixture has only a windows/amd64 leaf; the host must differ")
-    pkg = windows_only_package(ocx, unique_repo, tmp_path / "win")
+    pkg = foreign_platform_package(ocx, unique_repo, tmp_path / "win")
     project = _project(ocx, tmp_path / "proj", {"tool": pkg})
 
     host_default = _vendor(
@@ -1006,10 +1018,10 @@ def test_platform_without_host_leaf_vendors_only_when_named(
     assert host_default.returncode == EXIT_CONFIG, host_default.stderr
 
     named = tmp_path / "named"
-    _vendor(ocx, project, named, "--manifest-only", "-p", "windows/amd64")
+    _vendor(ocx, project, named, "--manifest-only", "-p", pkg.platform)
     manifest = _manifest(named)
-    assert manifest["platform"].startswith("windows/amd64")
-    assert manifest["available_platforms"] == ["windows/amd64"]
+    assert manifest["platform"].startswith(pkg.platform)
+    assert manifest["available_platforms"] == [pkg.platform]
 
 
 # ---------------------------------------------------------------------------

@@ -139,9 +139,9 @@ def _holds_ocx(directory: Path) -> bool:
 
 
 @pytest.fixture(scope="module")
-def recorder_exe(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """A native argv recorder, compiled once (see `launcher_fixtures.build_recorder`)."""
-    return build_recorder(tmp_path_factory.mktemp("recorder"))
+def recorder_exe() -> Path:
+    """A native argv recorder, compiled once per machine (see `launcher_fixtures.build_recorder`)."""
+    return build_recorder()
 
 
 def _recorded(pin: Path) -> list[dict]:

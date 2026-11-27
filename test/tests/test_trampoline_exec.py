@@ -1231,11 +1231,11 @@ def _install_deferred_slot(bin_dir: Path, stem: str, identifier: str) -> Path:
 
 
 @pytest.fixture(scope="module")
-def recorder_exe(tmp_path_factory: pytest.TempPathFactory) -> Path:
+def recorder_exe() -> Path:
     """A native argv recorder, compiled once: a ``.cmd`` program is refused by the launcher on every rung."""
     if sys.platform != "win32":
         pytest.skip("the recorder is the Windows stand-in for write_stub_ocx")
-    return build_recorder(tmp_path_factory.mktemp("recorder"))
+    return build_recorder()
 
 
 def _pin_recorder(recorder: Path, directory: Path) -> Path:

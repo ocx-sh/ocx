@@ -30,6 +30,7 @@ from src.vendor_fixtures import (
     assert_short_layout,
     cmake_with_ccache,
     env_template_package,
+    foreign_platform_package,
     host_bins,
     launch_named_package,
     layer_digests,
@@ -38,7 +39,6 @@ from src.vendor_fixtures import (
     record_requests,
     reserved_segment_package,
     wasm_file_package,
-    windows_only_package,
 )
 
 pytestmark = pytest.mark.command("package_vendor")
@@ -48,6 +48,8 @@ EXIT_DATA = 65
 EXIT_NOT_FOUND = 79
 
 HOST = ("-p", current_platform())
+# The platform `multi_platform_package` publishes on every host: HOST has no leaf on Windows or macOS.
+PUBLISHED = ("-p", "linux/amd64")
 posix_only = pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks")
 
 
@@ -387,23 +389,21 @@ def test_package_vendor_available_platforms_is_the_intersection_over_the_identif
     full, partial = partial_platform_pair(ocx, unique_repo, tmp_path)
 
     both = tmp_path / "both"
-    _pvendor(ocx, both, "--manifest-only", *HOST, full[0].fq, partial[0].fq)
+    _pvendor(ocx, both, "--manifest-only", *PUBLISHED, full[0].fq, partial[0].fq)
     available = set(_manifest(both)["available_platforms"])
     assert "linux/amd64" in available and "linux/arm64" in available
     assert "darwin/arm64" not in available
 
     # Control: the identifier without the partial package lists darwin/arm64.
     only_full = tmp_path / "only_full"
-    _pvendor(ocx, only_full, "--manifest-only", *HOST, full[0].fq)
+    _pvendor(ocx, only_full, "--manifest-only", *PUBLISHED, full[0].fq)
     assert "darwin/arm64" in set(_manifest(only_full)["available_platforms"])
 
 
 def test_package_vendor_platform_without_host_leaf_vendors_only_when_named(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    if current_platform() == "windows/amd64":
-        pytest.fail("the fixture has only a windows/amd64 leaf; the host must differ")
-    pkg = windows_only_package(ocx, unique_repo, tmp_path / "win")
+    pkg = foreign_platform_package(ocx, unique_repo, tmp_path / "win")
 
     host_default = _pvendor(
         ocx, tmp_path / "host", "--manifest-only", pkg.fq, check=False
@@ -416,10 +416,10 @@ def test_package_vendor_platform_without_host_leaf_vendors_only_when_named(
     assert pulled.returncode == host_default.returncode, pulled.stderr
 
     named = tmp_path / "named"
-    _pvendor(ocx, named, "--manifest-only", "-p", "windows/amd64", pkg.fq)
+    _pvendor(ocx, named, "--manifest-only", "-p", pkg.platform, pkg.fq)
     manifest = _manifest(named)
-    assert manifest["platform"].startswith("windows/amd64")
-    assert manifest["available_platforms"] == ["windows/amd64"]
+    assert manifest["platform"].startswith(pkg.platform)
+    assert manifest["available_platforms"] == [pkg.platform]
 
 
 # ---------------------------------------------------------------------------
@@ -431,11 +431,12 @@ def test_package_vendor_wasm_package_has_files_and_no_launcher(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
     wasm_file = wasm_file_package(ocx, unique_repo, tmp_path / "file")
-    wasm_tool = _publish(
+    # Literal `tool`, not `host_bins`: a wasm leaf is never `.exe`, on any host.
+    wasm_tool = make_package(
         ocx,
         f"{unique_repo}_tool",
-        tmp_path,
-        "tool",
+        "1.0.0",
+        tmp_path / "tool",
         bins=["tool"],
         binaries=["tool"],
         platform="wasip1/wasm",
