@@ -12,7 +12,7 @@ use crate::{api, conventions, options};
 /// Resolves each package via the index and verifies that its content is present
 /// in the local object store, then updates the per-repo `current` symlink to
 /// point at the package root (consumers traverse `<current>/content/`,
-/// `<current>/entrypoints/`, or `<current>/metadata.json`). The same per-repo
+/// `<current>/launchers/`, or `<current>/metadata.json`). The same per-repo
 /// `.select.lock` that `install --select` acquires is held here as well, and
 /// closure-scoped entrypoint name collisions surface at consumption time
 /// (`ocx env`, `ocx exec`) rather than at select. No downloading is performed.

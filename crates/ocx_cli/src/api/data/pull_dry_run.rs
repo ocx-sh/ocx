@@ -34,7 +34,7 @@ impl fmt::Display for PullStatus {
 /// A single dry-run preview row.
 ///
 /// `path` is the package root directory (parent of `content/` and
-/// `entrypoints/`) for `cached` rows and absent for `would_fetch` rows, where
+/// `launchers/`) for `cached` rows and absent for `would_fetch` rows, where
 /// nothing has been materialised yet.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct DryRunEntry {

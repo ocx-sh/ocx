@@ -291,7 +291,7 @@ fn a_launcher_without_its_sidecar_exits_78_naming_the_path() {
     assert!(stderr_of(&output).contains("tool.launch"), "{}", stderr_of(&output));
 }
 
-/// V-L08 end to end: a launcher beside only a sidecar of an older kind never reads it.
+/// End to end: a launcher beside only a sidecar of an older kind never reads it.
 #[test]
 fn a_launcher_beside_only_an_old_sidecar_exits_78_naming_the_record() {
     for extension in ["shim", "shimref", "exec", "direct"] {

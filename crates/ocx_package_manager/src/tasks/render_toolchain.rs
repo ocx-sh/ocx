@@ -4891,7 +4891,7 @@ mod tests {
         );
     }
 
-    /// R-W19(b), case 35 — the case-fold answer is a **probe of the real
+    /// The case-fold answer is a **probe of the real
     /// directory**, not a `cfg!(target_os)` branch.
     ///
     /// Asserted against a probe the test performs itself on the same
@@ -5448,7 +5448,7 @@ mod tests {
         );
     }
 
-    /// R-W19(a) — `ensure_home_root` reports whether **this** call created the
+    /// `ensure_home_root` reports whether **this** call created the
     /// root, and creates every missing ancestor owner-only-write.
     #[cfg(unix)]
     #[test]
@@ -6354,7 +6354,7 @@ mod tests {
         );
     }
 
-    // ── 12. The review round's regressions (B1…B5, W8) ──────────────────────
+    // ── 12. The review round's regressions ──────────────────────
 
     /// The directory's own `mtime`.
     ///
@@ -6503,7 +6503,7 @@ mod tests {
         assert_eq!(std::fs::read_link(honest.join("cmake")).unwrap(), target);
     }
 
-    /// S1 — `publish_link` refuses a symlinked **`links/`**, one level above
+    /// `publish_link` refuses a symlinked **`links/`**, one level above
     /// the group directory it already refuses.
     ///
     /// `links` was the one tree-own directory nothing ever created under a
@@ -6775,7 +6775,7 @@ mod tests {
         );
     }
 
-    /// W6/R-W19 — a published launcher that lost its execute bit (a clone
+    /// A published launcher that lost its execute bit (a clone
     /// committing it at git mode `100644`) makes its directory stale: the next
     /// render publishes a new one rather than leaving the tool non-executable
     /// forever.
@@ -6804,7 +6804,7 @@ mod tests {
         );
     }
 
-    /// W5/R-W19(a) — **every** directory a render creates is owner-only at
+    /// **Every** directory a render creates is owner-only at
     /// create time, like the home root, and never with the ambient umask.
     ///
     /// The trampoline directory is what all three PATH routes point at, so a
@@ -7180,7 +7180,7 @@ mod tests {
         );
     }
 
-    /// B1 — a **refusal** is distinguishable from a **clean pass** at
+    /// A **refusal** is distinguishable from a **clean pass** at
     /// `heal_links`' own signature, not only at whichever call site remembered
     /// to re-take the guard.
     ///
@@ -7860,7 +7860,7 @@ mod tests {
         RenderedArtifact::RootEntry(name.to_string())
     }
 
-    // ── One published directory per content (V-L28, V-L29, V-L35) ──────────
+    // ── One published directory per content ──────────
 
     /// The `shells/default-<16 hex>` children of `home`, sorted; nothing else.
     fn published_directories(home: &ToolchainHome) -> Vec<String> {
@@ -8010,7 +8010,7 @@ mod tests {
         .expect("the render succeeds")
     }
 
-    /// V-L28 — a render with new content publishes exactly one `shells/default-<16 hex>` holding
+    /// A render with new content publishes exactly one `shells/default-<16 hex>` holding
     /// the launcher and its `toolchain` record, and `active` names it; a second identical render
     /// publishes nothing, leaves the stamp bytes alone and touches nothing under `shells/`.
     ///
@@ -8137,7 +8137,7 @@ mod tests {
         assert_eq!(stamp_v2(&tree).expect("stamp").shell_dir, published);
     }
 
-    /// V-L29, render half — an older home (`shells/default/bin` with a script and `.exec`, `active ->
+    /// Render half: an older home (`shells/default/bin` with a script and `.exec`, `active ->
     /// shells/default`, a v1 `render_stamp.json`, `entrypoints/` and `shims/…`) is byte-identical after
     /// a new render, except that `active` names the new directory.
     ///
@@ -8221,7 +8221,7 @@ mod tests {
         );
     }
 
-    /// V-L35 — the staging directory is created by an exclusive `mkdir`: an occupied name, a planted
+    /// The staging directory is created by an exclusive `mkdir`: an occupied name, a planted
     /// symlink included, is refused and never followed or reused.
     ///
     /// RED: create it with `create_dir_all` or an "existing directory is fine" helper.
@@ -8255,7 +8255,7 @@ mod tests {
         );
     }
 
-    /// V-L35 — the symlinked-home refusals run before staging: a symlink at a tree-own leaf refuses
+    /// The symlinked-home refusals run before staging: a symlink at a tree-own leaf refuses
     /// the whole render and nothing is staged, neither through the link nor beside it.
     ///
     /// RED: stage before `refuse_symlinked_home`, or shrink `tree_own_directories` to the root — a

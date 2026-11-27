@@ -619,7 +619,7 @@ pub enum DependencyError {
 
 #[cfg(test)]
 mod tests {
-    /// C-127: an internal file refused for permission answers 77 (obtain it); any other I/O kind stays 74.
+    /// An internal file refused for permission answers 77 (obtain it); any other I/O kind stays 74.
     #[test]
     fn internal_file_answers_by_io_kind() {
         use ocx_exit::{ClassifyErrorKind, Detail, ExitCode};

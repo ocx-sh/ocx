@@ -4148,7 +4148,7 @@ mod bin_mode_entry_tests {
         );
     }
 
-    // ── The v2 gate (C-133, V-L33): `active` must name the stamp's own `shell_dir` ────
+    // ── The v2 gate: `active` must name the stamp's own `shell_dir` ────
 
     const PLANTED: &str = "default-0000000000000000";
     const RENDERED: &str = "default-8d41c2e07a95b3f6";
@@ -4215,7 +4215,7 @@ mod bin_mode_entry_tests {
         assert_eq!(arena.prompt().await, Some(arena.home.bin()));
     }
 
-    /// V-L33 mutation guard: a `default-<16 hex>` name check would admit the planted directory.
+    /// Mutation guard: a `default-<16 hex>` name check would admit the planted directory.
     #[tokio::test]
     async fn v2_stamp_refuses_an_active_that_names_another_complete_directory() {
         let arena = Arena::new();

@@ -47,7 +47,7 @@ pub struct ToolchainExec {
     /// `always` composes a tool as a generated shim: its declared names reach
     /// the child's `PATH` immediately and its content downloads the first time
     /// one of them runs. The shim directory sits *below* the tool's own
-    /// `entrypoints/` and `bin/`, so a second invocation of the same name
+    /// `launchers/` and `bin/`, so a second invocation of the same name
     /// inside the same child resolves to the materialized binary directly.
     #[clap(flatten)]
     pub lazy_mode: options::LazyMode,
@@ -226,7 +226,7 @@ impl ToolchainExec {
             env,
             toolchain: Some(Box::new(toolchain.clone())),
         };
-        // Never the self view: dropping each package's own `entrypoints/` from PATH is a strictly worse toolchain.
+        // Never the self view: dropping each package's own `launchers/` from PATH is a strictly worse toolchain.
         let (mut entries, _, _, admitted) = manager
             .resolve_env_with_attribution(&install_infos, false, project_scope(composed_env.clone()), &host)
             .await?;
@@ -719,7 +719,7 @@ mod tests {
 
     /// `--self` was removed from `ocx exec` (a documented breaking change): the
     /// self view selects a package's own private surface, which by construction
-    /// drops that package's `entrypoints/` from `PATH`, so a toolchain consumer
+    /// drops that package's `launchers/` from `PATH`, so a toolchain consumer
     /// asking for it composed a strictly worse toolchain. The flag survives on
     /// the package tier, where a package's own surface is the thing being asked
     /// about — this pins only that `ToolchainExec` no longer accepts it.
