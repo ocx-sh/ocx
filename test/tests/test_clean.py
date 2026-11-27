@@ -197,7 +197,7 @@ def test_clean_preserves_committed_index_home(
 
 
 # ---------------------------------------------------------------------------
-# Launcher generations (adr_unified_launcher.md section 12; V-L30, V-L41; C-137, S-105)
+# Launcher generations (adr_unified_launcher.md section 12)
 # ---------------------------------------------------------------------------
 
 _GENERATION = re.compile(r"^[0-9a-f]{16}$")
@@ -258,7 +258,7 @@ class _Generations:
 def test_clean_retires_a_superseded_package_generation_as_launchers(
     ocx: OcxRunner, tmp_path: Path, unique_repo: str
 ) -> None:
-    """V-L41 / C-137 / S-105 -- `launchers/<G'>` is retired and reported as
+    """`launchers/<G'>` is retired and reported as
     `launchers`; the current generation stays.
 
     RED: a clean that walks no `launchers/` leaves `G'` and reports nothing.
@@ -280,7 +280,7 @@ def test_clean_retires_a_superseded_package_generation_as_launchers(
 def test_clean_retires_a_superseded_deferred_generation_as_launchers(
     ocx: OcxRunner, tmp_path: Path, unique_repo: str
 ) -> None:
-    """V-L41 / C-137 -- the whole `deferred/<G'>` subtree is retired as `launchers`.
+    """the whole `deferred/<G'>` subtree is retired as `launchers`.
 
     RED: a clean that never walks `deferred/` leaves the subtree.
     """
@@ -297,7 +297,7 @@ def test_clean_retires_a_superseded_deferred_generation_as_launchers(
 def test_clean_dry_run_reports_launcher_generations_and_removes_nothing(
     ocx: OcxRunner, tmp_path: Path, unique_repo: str
 ) -> None:
-    """V-L41 / S-105 -- `--dry-run` reports the same `launchers` entries a real
+    """`--dry-run` reports the same `launchers` entries a real
     clean would, and every directory is still there afterwards.
 
     RED: no `launchers` entry is reported, or the directories are gone.
@@ -353,7 +353,7 @@ def _render_twice(ocx: OcxRunner, tmp_path: Path) -> tuple[ToolchainProject, str
 def test_clean_retires_superseded_toolchain_directories_and_keeps_the_stamped_two(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """V-L30 / C-137 -- an older `default-<hex>`, a `.staging-<hex>` and a `.gc-<hex>`
+    """an older `default-<hex>`, a `.staging-<hex>` and a `.gc-<hex>`
     are retired as `launchers`; the stamp's `shell_dir` and `previous_shell_dir`
     stay, and so does `shells/default`.
 
@@ -395,7 +395,7 @@ def test_clean_retires_superseded_toolchain_directories_and_keeps_the_stamped_tw
 def test_clean_never_retires_a_symlink_candidate_in_shells(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """V-L30 / C-132 -- a link named like a generated directory is not a candidate.
+    """a link named like a generated directory is not a candidate.
 
     RED: a clean that removes by name alone deletes the link, or follows it and
     deletes the directory it names.
@@ -419,7 +419,7 @@ def test_clean_never_retires_a_symlink_candidate_in_shells(
 def test_clean_dry_run_reports_superseded_toolchain_directories_and_removes_nothing(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """V-L30 / S-105 -- `--dry-run` names the superseded toolchain directories and
+    """`--dry-run` names the superseded toolchain directories and
     removes none.
 
     RED: nothing is reported, or the directories are gone.

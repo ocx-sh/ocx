@@ -54,7 +54,7 @@ containment path, so the launcher never consults ``OCX_HOME``), which is what le
 them run on the one Windows job that exists — ``build-windows-shims.yml``,
 whose pytest invocation names this module alongside ``test_windows_shim.py``. The ``ocx``
 they start is a native argv recorder compiled with ``rustc`` (``launcher_fixtures.build_recorder``):
-a batch program is refused on every rung (C-108), so no ``.cmd`` stand-in exists.
+a batch program is refused on every rung, so no ``.cmd`` stand-in exists.
 """
 
 from __future__ import annotations
@@ -268,7 +268,7 @@ def stale_trampoline(project: ToolchainProject, name: str) -> Path:
 
     A byte copy is a *faithful* stale trampoline, not an approximation: the
     record bakes the project root and nothing else, and the launcher derives the
-    tool name at run time from its own file name (C-110). Copying it under a new name therefore
+    tool name at run time from its own file name. Copying it under a new name therefore
     produces exactly what a rendered tree holds after a tool is dropped from
     ``ocx.toml`` without a re-render — the state D-V1's two-home loop needs,
     and the one thing the composition itself will not provide.
@@ -417,7 +417,7 @@ def test_item22_vl40_two_project_homes_on_one_path_exit_65_through_native_launch
     ghost = f"ghost{uuid4().hex[:8]}"
     own = stale_trampoline(project_a, ghost)
     foreign = stale_trampoline(project_b, ghost)
-    # V-L40: both homes hold native launchers with `.launch` records, under `shells/default-<16 hex>/bin`.
+    # both homes hold native launchers with `.launch` records, under `shells/default-<16 hex>/bin`.
     assert_toolchain_launcher(own, project_a.directory)
     assert_toolchain_launcher(foreign, project_b.directory)
 
@@ -1040,7 +1040,7 @@ def test_item33_flipping_pinned_changes_the_composed_path_without_re_rendering(
 
 
 # ---------------------------------------------------------------------------
-# V-L07 — a toolchain launcher builds the frozen argv through the stub ocx
+# a toolchain launcher builds the frozen argv through the stub ocx
 # ---------------------------------------------------------------------------
 
 unix_only = pytest.mark.skipif(
@@ -1052,7 +1052,7 @@ unix_only = pytest.mark.skipif(
 def test_vl07_a_project_toolchain_launcher_builds_the_project_argv_and_strips_the_selectors(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """V-L07 / C-107: `ocx --project <root> exec -- NAME args…`; OCX_GLOBAL and OCX_PROJECT removed; depth +1."""
+    """`ocx --project <root> exec -- NAME args…`; OCX_GLOBAL and OCX_PROJECT removed; depth +1."""
     project = locked_project(ocx, tmp_path)
     stub, log = write_stub_ocx(tmp_path / "stub")
 
@@ -1091,7 +1091,7 @@ def test_vl07_a_project_toolchain_launcher_builds_the_project_argv_and_strips_th
 def test_vl07_a_global_toolchain_launcher_builds_the_global_argv(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """V-L07 / C-107: `ocx --global exec -- NAME args…` with no value token; depth starts at 1."""
+    """`ocx --global exec -- NAME args…` with no value token; depth starts at 1."""
     label = uuid4().hex[:8]
     _, launcher = render_global_tool(ocx, tmp_path, label)
     stub, log = write_stub_ocx(tmp_path / "stub")
@@ -1116,7 +1116,7 @@ def test_vl07_a_global_toolchain_launcher_builds_the_global_argv(
 def test_vl07_a_toolchain_launcher_without_a_pin_starts_the_record_ocx_not_the_path(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """V-L10 / C-108: with no pin the record's `ocx` outranks the `PATH` walk (rung 2 before rung 3).
+    """with no pin the record's `ocx` outranks the `PATH` walk (rung 2 before rung 3).
 
     The record names the real `ocx`; a decoy `ocx` leads `PATH`. The tool's marker in
     stdout proves the record's `ocx` ran and the decoy did not.
@@ -1220,7 +1220,7 @@ def _install_deferred_slot(bin_dir: Path, stem: str, identifier: str) -> Path:
     The deferred-tool record: an OCI pinned identifier. Only the ``toolchain``
     kind removes the tier selectors, which is the whole reason this slot exists
     here — the same shipped blob dispatching through the one record kind that
-    must NOT delete them, and therefore the observable RED for C-033's case above.
+    must NOT delete them, and therefore the observable RED for the case above.
     """
     bin_dir.mkdir(parents=True, exist_ok=True)
     exe = bin_dir / f"{stem}.exe"
@@ -1232,7 +1232,7 @@ def _install_deferred_slot(bin_dir: Path, stem: str, identifier: str) -> Path:
 
 @pytest.fixture(scope="module")
 def recorder_exe(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """A native argv recorder, compiled once: a ``.cmd`` program is refused by the launcher on every rung (C-108)."""
+    """A native argv recorder, compiled once: a ``.cmd`` program is refused by the launcher on every rung."""
     if sys.platform != "win32":
         pytest.skip("the recorder is the Windows stand-in for write_stub_ocx")
     return build_recorder(tmp_path_factory.mktemp("recorder"))

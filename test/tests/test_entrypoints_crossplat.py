@@ -62,7 +62,7 @@ def get_entrypoints_dir(ocx: OcxRunner, pkg: PackageInfo) -> Path | None:
 def test_linux_unix_launcher_exists_and_is_executable(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    """C-128: Linux home launcher exists, is mode 0755 and is a native program, not a script."""
+    """Linux home launcher exists, is mode 0755 and is a native program, not a script."""
     pkg = _make_pkg(
         ocx, unique_repo, tmp_path,
         entrypoints=["hello"],
@@ -115,7 +115,7 @@ def test_linux_install_writes_only_launcher_and_record(
 def test_linux_every_launcher_of_a_package_is_the_same_bytes(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    """C-128: every launcher of a package is a byte copy of one embedded blob, link count 1."""
+    """every launcher of a package is a byte copy of one embedded blob, link count 1."""
     pkg = _make_pkg(
         ocx, unique_repo, tmp_path,
         entrypoints=["hello", "other"],
@@ -197,7 +197,7 @@ def test_macos_path_with_spaces_in_ocx_home(
 def test_windows_native_launcher_exists_no_script_no_cmd(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    """V-L38, C-128: Windows holds `<name>.exe` + `<name>.launch` after install --select, nothing else.
+    """V-L38: Windows holds `<name>.exe` + `<name>.launch` after install --select, nothing else.
 
     No extensionless script, `.cmd`, `.shim`, `.shimref` or `.exec`; the `.exe` is
     a copy of the embedded blob with link count 1. This test only runs on Windows

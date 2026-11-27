@@ -1,40 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 The OCX Authors
-"""Acceptance tests for the rendered toolchain tree.
+"""Acceptance tests for the rendered toolchain tree, traced to ``.claude/artifacts/adr_toolchain_activation.md``.
 
-Two halves, both traced to design record ``.claude/artifacts/adr_toolchain_activation.md``:
+Two halves: every composing emitter heals the groups it is about to emit, not just the default
+one; and the render / prune / stamp / config-refusal suite at the *tree* level. Where
+``test_toolchain_cli.py`` covers the CLI half of an item, the case here observes the tree: which
+artefacts survive, what the stamp records, whether two renders are byte-identical.
 
-* Every composing emitter heals the groups it is about to emit, not just the
-  default one.
-* The render / prune / stamp / config-refusal suite, at the *tree* level.
+Why ``ocx exec -g ci`` discriminates: the non-composing ``bin``-mode prompt path is narrowed to
+the default group, and that narrowing must not leak here. Without the per-group heal,
+``ocx exec -g ci`` composes through a stale ``ci/<entry>`` link after a branch switch and runs the
+previous package while the lock says otherwise. **RED for the two heal cases: narrow the heal back
+to the default group.** The unit half of the per-entry degrade lives in
+``crates/ocx_package_manager/src/composer.rs``; these cases prove the ``-g`` set reaches
+``ToolchainLinks::groups`` through the CLI.
 
-Where WP-8's ``test_toolchain_cli.py`` already covers the CLI half of an item
-(does ``pull`` render, does ``remove`` prune, does a skip roll the commit back),
-the case here observes the **tree**: which artefacts survive, what the stamp
-records, and whether two renders are byte-identical. It is not a second copy of
-the same assertion.
-
-Why ``ocx exec -g ci`` is the discriminating invocation
--------------------------------------------------------
-C-062 narrows the *non-composing* ``bin``-mode prompt path to the default
-group, and that narrowing must not leak here. Without C-070, ``ocx exec -g ci``
-in the following lane composes through a stale ``ci/<entry>`` link after a
-branch switch and runs the previous package while the lock says otherwise —
-S-006's stamp protection covers the default group only, so nothing else catches
-it. **RED for the two C-070 cases: narrow the heal back to the default group.**
-
-The unit half of C-067's per-entry degrade lives in
-``crates/ocx_package_manager/src/composer.rs``; these cases exist because
-nothing there can prove the ``-g`` set actually reaches ``ToolchainLinks::groups``
-through the CLI.
-
-Identity, not spelling
-----------------------
-``bin/<name>`` is keyed on the exposed **binary name**; ``<group>/<entry>`` on
-the ``[tools]`` **key**. ``src.toolchain_fixtures`` mints a distinct
-UUID-prefixed spelling for each namespace, so no assertion about one can be
-satisfied by the other — see
-:func:`~src.toolchain_fixtures.assert_key_and_binary_namespaces_stay_disjoint`.
+Identity, not spelling: ``bin/<name>`` is keyed on the exposed **binary name**, ``<group>/<entry>``
+on the ``[tools]`` **key**. ``src.toolchain_fixtures`` mints a distinct UUID-prefixed spelling for
+each, so no assertion about one can be satisfied by the other (see
+:func:`~src.toolchain_fixtures.assert_key_and_binary_namespaces_stay_disjoint`).
 """
 
 from __future__ import annotations
@@ -228,7 +212,7 @@ def test_a_tools_key_is_never_a_bin_entry_and_a_binary_name_is_never_a_link(
 def test_a_hostile_project_path_is_data_in_the_launch_record_and_never_runs(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """Item 2 / C-030 / V-L28 — a project directory whose name carries ``$(...)``
+    """Item 2 — a project directory whose name carries ``$(...)``
     and a backtick is baked into the ``NAME.launch`` record as a JSON string, and
     nothing executes.
 
@@ -1182,7 +1166,7 @@ def test_clean_and_clean_force_leave_the_global_toolchain_tree_alone(
 def test_an_orphan_launcher_never_reaches_the_directory_the_next_render_publishes(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """Item 31, class 1 / C-044 / V-L28, V-L30 — a ``bin/`` name outside the
+    """Item 31, class 1 — a ``bin/`` name outside the
     computed set, planted in a published directory, is not carried into the next
     one, and the directory it was planted in is left as found.
 
@@ -1411,7 +1395,7 @@ def test_an_empty_orphan_group_directory_is_removed_and_a_populated_one_is_only_
 def test_an_orphan_directory_in_bin_is_left_whole_and_absent_from_the_next_directory(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """Item 31, class 4 / RUL-32 / V-L30 — an orphan that is itself a **directory**
+    """Item 31, class 4 — an orphan that is itself a **directory**
     occupying a ``bin/`` name slot of a published directory is never removed and
     never carried over; the render continues into a new directory.
 
@@ -1501,7 +1485,7 @@ def test_the_render_stamp_covers_every_name_body_and_link_target(
 def test_shifting_a_launchers_mtime_perturbs_neither_the_stamp_nor_the_tree(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """Item 32, second half / C-003 / V-L28 — **mtime is not consulted**.
+    """Item 32, second half — **mtime is not consulted**.
 
     No field of the stamp records one, a shifted-but-byte-identical record
     re-renders to the same stamp, and nothing is published (no new directory,
@@ -1572,7 +1556,7 @@ def test_shifting_a_launchers_mtime_perturbs_neither_the_stamp_nor_the_tree(
 
 
 # ---------------------------------------------------------------------------
-# V-L28 / V-L30 / C-131 / C-132 — one new directory per new content
+# one new directory per new content
 # ---------------------------------------------------------------------------
 
 
@@ -1601,7 +1585,7 @@ def _with_another_tool(
 def test_a_render_with_new_content_publishes_a_new_directory_and_switches_active(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """V-L28 / C-131 — the first render publishes ``shells/default-<16 hex>/bin/{NAME,
+    """the first render publishes ``shells/default-<16 hex>/bin/{NAME,
     NAME.launch}`` from a staging directory and ``active`` names it.
 
     RED: render in place into ``shells/default`` (the older layout) — no
@@ -1640,7 +1624,7 @@ def test_a_render_with_new_content_publishes_a_new_directory_and_switches_active
 def test_a_render_writes_the_v2_stamp_naming_the_active_directory_and_no_v1_stamp(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """V-L28 / C-131 / C-132 — the new render's stamp is ``render_stamp.v2.json`` with
+    """the new render's stamp is ``render_stamp.v2.json`` with
     ``v == 2`` and ``shell_dir`` equal to the name ``active`` carries; it writes no
     ``render_stamp.json``.
 
@@ -1666,7 +1650,7 @@ def test_a_render_writes_the_v2_stamp_naming_the_active_directory_and_no_v1_stam
 
 
 def test_a_repeated_render_writes_nothing(ocx: OcxRunner, tmp_path: Path) -> None:
-    """V-L28 / C-131 — a second render with the same content publishes no directory,
+    """a second render with the same content publishes no directory,
     leaves ``active`` and the stamp bytes alone.
 
     RED: a render that ignores the stamp fingerprint — a second ``default-<hex>``
@@ -1701,7 +1685,7 @@ def test_a_repeated_render_writes_nothing(ocx: OcxRunner, tmp_path: Path) -> Non
 def test_a_render_with_changed_content_publishes_another_directory_and_keeps_the_old_one(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """V-L28 / V-L30 (render half) / C-131 — new content means another
+    """Render half — new content means another
     ``default-<hex>``; the v2 stamp's ``previous_shell_dir`` names the directory
     ``active`` named before, and that directory stays byte-identical.
 
@@ -1741,7 +1725,7 @@ def test_a_render_with_changed_content_publishes_another_directory_and_keeps_the
 def test_a_render_never_touches_shells_default_or_the_older_stamp_an_older_ocx_wrote(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """C-132 / V-L29 — after ``ocx-previous`` rendered ``shells/default`` and its v1
+    """after ``ocx-previous`` rendered ``shells/default`` and its v1
     stamp, a new render adds beside them and leaves both byte-identical.
 
     The older render also heals ``active`` to ``shells/default`` (``adr_unified_launcher.md``
@@ -2602,13 +2586,10 @@ def test_a_home_restored_at_the_same_absolute_path_passes_the_gate(
     }
     assert ids_before, "the control: there are trampolines to churn"
 
-    # Stage the restore *while the original is still on disk*, then swap it in.
-    # Copying back after `rmtree` lets ext4 hand the just-freed inode straight
-    # back -- measured on both a developer host and the CI runner, the single
-    # trampoline came back on the identical inode number -- which reds the
-    # control below on a restore that did happen, and leaves the row asserting
-    # nothing. Staging first cannot reuse a live inode, and `os.replace` keeps
-    # the staged ones, so the churn this row needs is deterministic.
+    # Stage the restore while the original is still on disk, then swap it in. Copying back after
+    # `rmtree` lets ext4 hand the freed inode straight back (measured on a dev host and the CI
+    # runner), which reds the control below on a restore that did happen. Staging first cannot
+    # reuse a live inode and `os.replace` keeps the staged ones, so the churn is deterministic.
     home_staged = home.with_name(home.name + ".restored")
     state_staged = state.with_name(state.name + ".restored")
     # No retarget: the restored junctions must still name the original path.
@@ -2847,13 +2828,9 @@ def test_a_legacy_group_directory_at_the_home_root_is_reported_and_never_deleted
 # §C.5 — the `[active-only]` rows this package owns (WP-5)
 # ---------------------------------------------------------------------------
 #
-# Rows 21, 22, 26, 27, 28, 31 and 33 are WP-2's, at the unit layer. Row 29 is
-# **void**: it asserts a `RenderStamp` field C-079's own blockquote strikes
-# ("no new `RenderStamp` field, no wire-format change"), so its red — "derive
-# the field from config instead of `read_link`" — is unreachable against a field
-# that does not exist. Row 30 is the behaviour row 29 was meant to protect and
-# is sufficient. That leaves this package **four** runnable rows plus one
-# Windows-only label, not six.
+# Rows 21, 22, 26, 27, 28, 31 and 33 live at the unit layer. Row 29 is void: it asserts a
+# `RenderStamp` field the record strikes, so its red is unreachable; row 30 is the behaviour it
+# meant to protect. That leaves four runnable rows plus one Windows-only label.
 
 
 def test_an_escaping_active_link_is_repointed_and_nothing_is_written_through_it(

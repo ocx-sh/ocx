@@ -71,7 +71,7 @@ pytestmark = pytest.mark.command("patch*", "install", "env", "toolchain_env")
 
 
 def _package_launcher_dir(pkg_root: Path) -> Path:
-    """``<pkg_root>/launchers/<G>`` -- the one 16-hex generation directory (C-129).
+    """``<pkg_root>/launchers/<G>`` -- the one 16-hex generation directory.
 
     A test does not compute ``G``; it reads the single child ``launchers/`` holds.
     """

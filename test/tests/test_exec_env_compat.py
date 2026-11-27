@@ -731,14 +731,14 @@ def test_a_previous_release_trampoline_in_the_middle_of_a_chain_layers_its_proje
 
 
 # ---------------------------------------------------------------------------
-# Launchers an older ocx wrote start through this ocx (V-L09, S-101)
+# Launchers an older ocx wrote start through this ocx
 # ---------------------------------------------------------------------------
 
 
 def test_an_old_package_launcher_an_older_ocx_wrote_starts_its_tool_through_this_ocx(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    """V-L09, S-101: `entrypoints/NAME[.exe]` from `ocx-previous` starts through this ocx's `launcher exec` grammar.
+    """`entrypoints/NAME[.exe]` from `ocx-previous` starts through this ocx's `launcher exec` grammar.
 
     Holds today on Linux (the old script's frozen line is still served): a guard on a
     property that already holds, red the day the `launcher exec` grammar changes. On
@@ -775,7 +775,7 @@ def test_an_old_package_launcher_an_older_ocx_wrote_starts_its_tool_through_this
 def test_an_old_toolchain_trampoline_with_an_exec_sidecar_starts_its_tool_through_this_ocx(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    """V-L09: an old `.exe` + `.exec` (project root, baked ocx) runs `ocx --project <root> exec -- NAME` on this ocx.
+    """an old `.exe` + `.exec` (project root, baked ocx) runs `ocx --project <root> exec -- NAME` on this ocx.
 
     The old `.exe` is the one `ocx-previous` writes for an entry point; the `.exec`
     is the old two-line sidecar. `whoami` is a System32 program, so the project needs

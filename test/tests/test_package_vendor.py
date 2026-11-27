@@ -161,7 +161,7 @@ def test_package_vendor_writes_manifest_content_and_launchers(
 
 
 # ---------------------------------------------------------------------------
-# Names ocx never writes (V-L27 vendor half, V-L56)
+# Names ocx never writes (vendor half)
 # ---------------------------------------------------------------------------
 
 
@@ -462,7 +462,7 @@ def test_package_vendor_wasm_package_has_files_and_no_launcher(
 
 
 # ---------------------------------------------------------------------------
-# `index_digest` (V-L54), a bare platform manifest (V-L59), `--index` (V-L60)
+# `index_digest`, a bare platform manifest, `--index`
 # ---------------------------------------------------------------------------
 
 

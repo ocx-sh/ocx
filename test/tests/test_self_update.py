@@ -260,24 +260,11 @@ def test_version_json_reports_the_contract_versions(ocx: OcxRunner) -> None:
 
 
 # ---------------------------------------------------------------------------
-# URI-1 — End-to-end self-update install path via `__OCX_TESTING_SELF_IMAGE` seam
-#
-# Two versions of a stand-in "ocx" package are published to the loopback
-# registry and the canonical `ocx.sh/ocx/cli` identifier is redirected onto
-# them through the private seam, so the whole update runs against real OCI
-# content with the older version pre-installed.
-#
-# `ocx self update` pulls **without selecting** and then re-executes the newly
-# pulled binary as `ocx self setup <tag>@<digest> --handoff`; that child's
-# first phase performs the select and its later phases write every setup
-# surface with the new version's own code. The 0.0.2 stand-in is therefore not
-# a passive trap script — it records what it was handed (see `_stand_in_ocx`)
-# and then either re-execs the real ocx so the whole setup runs, or refuses.
-# The recorded receipt is what tells "the child did the work" apart from "the
-# parent did it", which no observable on the finished machine can.
-#
-# The tests are Linux/macOS only — the seam exists on every platform but the
-# stand-in binary is a POSIX shell script (Windows requires a .bat shim).
+# URI-1 — end-to-end self-update through the `__OCX_TESTING_SELF_IMAGE` seam: two stand-in "ocx"
+# versions on the loopback registry, the older one pre-installed. `ocx self update` pulls without
+# selecting and re-executes the new binary as `ocx self setup <tag>@<digest> --handoff`; the 0.0.2
+# stand-in records what it was handed (`_stand_in_ocx`), and only that receipt tells the child's
+# work from the parent's. POSIX only: the stand-in is a shell script.
 # ---------------------------------------------------------------------------
 
 
@@ -870,14 +857,14 @@ def test_self_update_renders_the_global_toolchain_into_a_new_directory(
     tmp_path: Path,
     unique_repo: str,
 ) -> None:
-    """V-L42 / C-136 / S-103 -- phase 1.6 of the hand-off's setup renders the global
+    """phase 1.6 of the hand-off's setup renders the global
     home: afterwards `active` names a new `shells/default-<16 hex>` directory.
 
     The older render here is an older `ocx`'s (``active -> shells/default``, a v1
     stamp, ``$OCX_HOME/ocx.lock`` present). The hand-off child is the build
     under test, so the blob does not change between the two; the contract still
     holds because the old render carries no v2 stamp. A render failure that
-    warns and lets setup succeed (S-103's second half) cannot be provoked
+    warns and lets setup succeed (its second half) cannot be provoked
     through the CLI without a new seam, so it stays a unit test.
 
     RED: no phase 1.6 -- `active` still names `shells/default`.
