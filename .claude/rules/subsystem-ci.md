@@ -296,7 +296,7 @@ Cross-builds the `ocx_shim` launcher for six targets (`{x86_64,aarch64}-{unknown
 | Job | Runner | Purpose |
 |-----|--------|---------|
 | `gate` | `ubuntu-latest` | Host-runnable shim + launcher spec tests (`cargo nextest run -p ocx_shim -p ocx_store -p ocx_package_manager --locked` — `ocx_store` owns the committed blob, `ocx_package_manager` owns the launcher spec; nextest comes from `taiki-e/install-action`, the toolchain action does not ship it). Every other job carries `needs: gate`. |
-| `build` (matrix) | `ubuntu-latest` | Per-target `task rust:shim:build TARGET=${{ matrix.target }}` (six legs), then blob validation (image magic per format, size budget of 512 KiB per blob (V-L57), `LC_CODE_SIGNATURE` on aarch64-apple-darwin), SLSA attestation, artifact upload. `fail-fast: false` so one target's status never masks another's. |
+| `build` (matrix) | `ubuntu-latest` | Per-target `task rust:shim:build TARGET=${{ matrix.target }}` (six legs), then blob validation (image magic per format, size budget of 640 KiB per blob (V-L57), `LC_CODE_SIGNATURE` on aarch64-apple-darwin), SLSA attestation, artifact upload. `fail-fast: false` so one target's status never masks another's. |
 | `acceptance-windows` | `windows-latest` | Native `cargo build -p ocx_shim --locked`, then `uv run pytest tests/test_windows_shim.py` with `OCX_SHIM_BINARY` set. Registry-independent (`OCX_TESTS_NO_REGISTRY=1`) — the `registry:2` fixture is Linux-only. Without this job the module is green-by-skip. |
 | `native-blobs` | each blob's own runner | Calls `launcher-blobs.yml`: the committed blobs, not a fresh build, started natively (see below). |
 

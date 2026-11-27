@@ -15,8 +15,8 @@
 
 use ocx_oci::{Architecture, OperatingSystem, Platform};
 
-/// Upper bound on each embedded blob, checked per blob by a unit test.
-pub const SHIM_SIZE_BUDGET: usize = 512 * 1024;
+/// Upper bound on each embedded blob, checked per blob by a unit test. The unified launcher carries four record kinds, the image-path read and the runfiles manifest lookup (largest: x86_64 Windows, 534016 bytes); the earlier 256 to 512 KiB raise is in `adr_shim_hermetic_zigbuild.md`.
+pub const SHIM_SIZE_BUDGET: usize = 640 * 1024;
 
 /// One embedded launcher: its target triple and bytes.
 struct Blob {
@@ -100,27 +100,27 @@ mod tests {
     const RECORDED_SHA256: [(&str, &str); 6] = [
         (
             "x86_64-unknown-linux-musl",
-            "f52510809eae90f4765c8ae9b1c0c11141f5a04c4e2ecb0b8940aa3f683dbb3f",
+            "7b8ccff775b2fa863782bbd4fd9f315552475b4569fcf897069365a9e5bcce47",
         ),
         (
             "aarch64-unknown-linux-musl",
-            "4c989c4129c95f9d28892b5f1a3a7d1cbaf4126f5136813247f085147ad61f64",
+            "94dde06a6a8e98a5171656151e6b3660e2ae3d3b81758b9cd85e6626e9a255d8",
         ),
         (
             "x86_64-apple-darwin",
-            "868424e4f2f26242bf39d86bd1d1ba74907950f31b9eab4766e28e55107e2b7b",
+            "dbc746aebf838830cafb1d0b74a941ea549f997f56b5e12232548d60af796c28",
         ),
         (
             "aarch64-apple-darwin",
-            "58ce752e8896b3eec3ded062064adb9734330a2e32c0b3aeffa247db40519851",
+            "7d746097373894986a1925a76d7bf5559b168b6793dd6a5b6f17eac986344741",
         ),
         (
             "x86_64-pc-windows-gnullvm",
-            "9c664ed9a7425cba73b53659b3eeb23007ed84fd3b7a65e93165c87659520005",
+            "59fb072835d217c5f3ea148f3a4a154213f773edbe7df40f850701d9b0657857",
         ),
         (
             "aarch64-pc-windows-gnullvm",
-            "97c42fd20a19d81a7943370c859a3e47138ad21f8dd498f8fba175d4d2b67945",
+            "4ba744896b297f6aeab0413de1a2cd3cc4a036ce57bd36be637b04779773a03e",
         ),
     ];
 
@@ -306,17 +306,17 @@ mod tests {
 
     // ── C-035 blob-freshness canary ───────────────────────────────────────
 
-    /// The committed Windows blobs must carry the `.exec` grammar `crates/ocx_shim` gained in WP-6.
+    /// The committed Windows blobs must be built from the current launcher source.
     ///
     /// The blobs are committed binaries, so changing `crates/ocx_shim/src/**` changes nothing that ships until
-    /// the blob is rebuilt, and the size, magic and sha256 checks all pass on an untouched blob. It scans for two
-    /// literals `build_child_command_line`'s root-flag arm emits and no earlier shim could contain, in their
-    /// plain-ASCII rodata form; not a PE parser. Reds on a shim source change with no blob refresh, a
-    /// truncated blob, or a rebuild whose root-flag arm stops emitting either literal.
+    /// the blob is rebuilt, and the size, magic and sha256 checks all pass on an untouched blob. It scans for
+    /// three literals the launcher emits as separate argv elements or names (`--project`, `--global`, `.launch`),
+    /// the last of which no pre-unified-launcher blob contains; not a PE parser. Reds on a shim source change
+    /// with no blob refresh, a truncated blob, or a rebuild that stops emitting any of them.
     #[test]
-    fn committed_windows_blobs_carry_the_exec_sidecar_grammar() {
-        /// Both, not either: one short needle could match by coincidence, and a partial rebuild shows.
-        const EXEC_GRAMMAR_LITERALS: [&str; 2] = [" --project ", " --global"];
+    fn committed_windows_blobs_carry_the_launcher_literals() {
+        /// All, not any: one short needle could match by coincidence, and a stale blob shows.
+        const LAUNCHER_LITERALS: [&str; 3] = ["--project", "--global", ".launch"];
 
         let windows: Vec<_> = BLOBS.iter().filter(|b| b.target.ends_with("windows-gnullvm")).collect();
         assert_eq!(windows.len(), 2, "both Windows blobs must be scanned");
@@ -326,11 +326,11 @@ mod tests {
                 "FAIL-CLOSED: {} is empty, so scanning it proves nothing",
                 blob.target
             );
-            for literal in EXEC_GRAMMAR_LITERALS {
+            for literal in LAUNCHER_LITERALS {
                 let needle = literal.as_bytes();
                 assert!(
                     blob.bytes.windows(needle.len()).any(|window| window == needle),
-                    "{} predates the `.exec` sidecar grammar: it carries no `{literal}`. The shim SOURCE \
+                    "{} predates the current launcher: it carries no `{literal}`. The launcher SOURCE \
                      changed but the committed blob did not. Rebuild via `task rust:shim:build` and \
                      re-record its sha256 in RECORDED_SHA256.",
                     blob.target

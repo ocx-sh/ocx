@@ -214,7 +214,7 @@ These modules have no dedicated subsystem rule — serve multiple subsystems. Ea
 | `ocx_util` (the whole crate) | Extension traits + async + fs helpers — see [Utility Catalog](#utility-catalog) below | Everywhere (`ocx_util::prelude` for the extension traits) |
 | `ocx_util::compression` | Compression level config | Archive, OCI push |
 | `codesign/` | macOS ad-hoc code signing for Mach-O binaries | Package extraction |
-| `shim.rs` | Arch-gated `include_bytes!` embed of the committed launcher blobs (six targets, each ≤ 512 KiB) + per-target `RECORDED_SHA256` canary; `host_blob()` is `None` on a host with no blob. `launcher_generation.rs` hashes blob + record schema + revision into `LauncherGeneration`. See `adr_unified_launcher.md`. | Launcher generation (`launcher::generate`) |
+| `shim.rs` | Arch-gated `include_bytes!` embed of the committed launcher blobs (six targets, each ≤ 640 KiB) + per-target `RECORDED_SHA256` canary; `host_blob()` is `None` on a host with no blob. `launcher_generation.rs` hashes blob + record schema + revision into `LauncherGeneration`. See `adr_unified_launcher.md`. | Launcher generation (`launcher::generate`) |
 
 ## Utility Catalog
 
