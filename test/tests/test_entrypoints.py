@@ -83,8 +83,9 @@ def test_entrypoint_launcher_files_created_after_select(
     assert entrypoints_dir.is_dir(), (
         f"current/launchers/<G>/ must exist after install --select: {entrypoints_dir}"
     )
-    assert (entrypoints_dir / "hello").exists(), (
-        f"unix launcher must be reachable at current/launchers/<G>/hello: {entrypoints_dir / 'hello'}"
+    launcher = entrypoints_dir / ("hello.exe" if sys.platform == "win32" else "hello")
+    assert launcher.exists(), (
+        f"launcher must be reachable at current/launchers/<G>/{launcher.name}: {launcher}"
     )
     assert (entrypoints_dir / "hello.launch").is_file(), "the record NAME.launch must sit beside the launcher"
     assert not (entrypoints_dir.parents[1] / "entrypoints").exists(), "entrypoints/ is never written"

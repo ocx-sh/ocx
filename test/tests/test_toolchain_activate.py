@@ -360,8 +360,13 @@ class _WindowsIdentity(str):
         return f"{str.__repr__(self)} (bash: {posix_shell_path(str(self))!r})"
 
 
-def _segments(result: subprocess.CompletedProcess[str], label: str = "path") -> list[str]:
+def _segments(
+    result: subprocess.CompletedProcess[str], label: str = "path", *, older_release: bool = False
+) -> list[str]:
     """The session's ``PATH``, realpath'd, or a failure naming the dead shell.
+
+    ``older_release`` skips the ``:``-joined POSIX check: the current ``ocx`` owes Git Bash that spelling,
+    a release that predates it writes native ``C:\\`` entries and is only asked what it exposes.
 
     The assertion is the non-vacuity half: ``matrix.probes()`` answers ``{}``
     for a shell that never ran, so without it every "X is absent" row below
@@ -374,7 +379,7 @@ def _segments(result: subprocess.CompletedProcess[str], label: str = "path") -> 
     )
     assert found[label] != matrix.ABSENT, f"PATH was unset in the session (probe {label!r})"
     segments = [_real(segment) for segment in matrix.native_path_list(found[label])]
-    if not _WINDOWS:
+    if not _WINDOWS or older_release:
         return segments
     raw = found.get(f"{label}_raw", "")
     fault = matrix.posix_path_list_fault(raw)
@@ -1482,7 +1487,9 @@ def test_a_branch_switch_at_the_same_path_never_dereferences_the_other_branch(
 # ---------------------------------------------------------------------------
 
 
-def _bin_mode_segments(arena: Arena, project_directory: Path) -> list[str]:
+def _bin_mode_segments(
+    arena: Arena, project_directory: Path, *, older_release: bool = False
+) -> list[str]:
     """The ``PATH`` a ``bin``-mode prompt of ``arena.binary`` leaves in a bash session."""
     result = _session(
         arena,
@@ -1492,7 +1499,7 @@ def _bin_mode_segments(arena: Arena, project_directory: Path) -> list[str]:
         cwd=project_directory,
         extra_env={"OCX_TOOLCHAIN_ACTIVATE": "bin"},
     )
-    return _segments(result)
+    return _segments(result, older_release=older_release)
 
 
 def _launcher_output(
@@ -1556,7 +1563,7 @@ def test_two_ocx_versions_alternate_on_one_home_and_every_launcher_starts(
     )
 
     # 2. the older prompt while `active` names the new directory
-    withheld = _bin_mode_segments(older, project.directory)
+    withheld = _bin_mode_segments(older, project.directory, older_release=True)
     assert active_shell(home) == published, "C-080 — the older prompt is read-only"
     assert _real(shell_bin(home)) not in withheld, (
         f"S-102 — the older prompt omits the project entry while `active` names {published!r}: {withheld}"
@@ -1568,7 +1575,7 @@ def test_two_ocx_versions_alternate_on_one_home_and_every_launcher_starts(
     assert active_shell(home) == "default", (
         f"S-102 — the older render repoints `active` to `shells/default`; it names {active_shell(home)!r}"
     )
-    assert _real(shell_bin(home)) in _bin_mode_segments(older, project.directory), (
+    assert _real(shell_bin(home)) in _bin_mode_segments(older, project.directory, older_release=True), (
         "S-102 — the older prompt exposes `shells/default` again"
     )
     assert _real(shell_bin(home)) in _bin_mode_segments(arena, project.directory), (

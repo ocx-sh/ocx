@@ -330,6 +330,11 @@ def test_two_consecutive_pulls_produce_a_byte_identical_tree(
     )
 
 
+def _as_json_text(path: Path) -> bytes:
+    """`path` as it reads inside a JSON record body: a Windows path's backslashes are doubled."""
+    return json.dumps(str(path), ensure_ascii=False)[1:-1].encode()
+
+
 def test_rendering_the_same_project_from_a_different_directory_rewrites_every_body(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
@@ -359,7 +364,7 @@ def test_rendering_the_same_project_from_a_different_directory_rewrites_every_bo
         "from a different absolute directory must produce different bytes; the "
         "byte-identity assertion above cannot discriminate otherwise"
     )
-    assert str(moved).encode() in relocated_body, (
+    assert _as_json_text(moved) in relocated_body, (
         f"C-028 — the relocated body must bake the relocated root; body:\n"
         f"{relocated_body!r}"
     )
@@ -2545,7 +2550,7 @@ def test_a_copied_tree_still_bakes_the_source_root_until_a_render_runs(
     body = trampoline_body(
         shell_bin(toolchain_home(moved)) / trampoline_name(project.default_binary)
     ).read_bytes()
-    assert str(project.directory).encode() in body, (
+    assert _as_json_text(project.directory) in body, (
         "the control: a copied trampoline body names the source project root"
     )
 

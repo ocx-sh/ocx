@@ -755,7 +755,9 @@ def test_environment_variable_names_fold_case_on_windows(
         tmp_path / "pkg",
         ["probe"],
         bins=["probe"],
-        extra_files={"bin/probe.cmd": "@set\r\n"},
+        # On Windows `bins=["probe"]` writes `bin/probe.bat`, and the default PATHEXT order takes `.bat` before `.cmd`,
+        # so the probe overwrites that file; a `probe.cmd` beside it would never run.
+        extra_files={"bin/probe.bat": "@set\n"},
         env=[PATH_ENTRY],
     )
     out, manifest = _vendor_project(ocx, tmp_path / "proj", {"probe": pkg})
@@ -770,7 +772,7 @@ def test_environment_variable_names_fold_case_on_windows(
     path_lines = [
         line for line in result.stdout.splitlines() if line.upper().startswith("PATH=")
     ]
-    assert len(path_lines) == 1, path_lines
+    assert len(path_lines) == 1, (path_lines, result.stdout)
     assert str(out / package["package_dir"]).replace("/", "\\") in path_lines[0]
 
     # Control: `set` reports the caller's own spelling, so a second spelling would show.

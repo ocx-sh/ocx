@@ -107,8 +107,15 @@ def _manifest(out: Path) -> dict[str, Any]:
 
 def _store_to_token(text: str, ocx: OcxRunner) -> str:
     """The manifest's rewrite of an installed content path: `<home>/packages/<registry>/<alg>/<2>/<30>/content` -> `@VENDOR_DIR@/p/<HEX16>/c`."""
-    home = re.escape((ocx.ocx_home / "packages").as_posix())
-    pattern = re.compile(home + r"/[^/]+/[^/]+/([0-9a-f]{2})/([0-9a-f]{30})/content")
+    # `ocx env` prints the store path in the host's spelling: backslashes on Windows, where the report
+    # carries `C:\...\content/bin`; both separators match.
+    home = re.escape(str(ocx.ocx_home / "packages").replace("\\", "/")).replace(
+        "/", r"[\\/]"
+    )
+    pattern = re.compile(
+        home
+        + r"[\\/][^\\/]+[\\/][^\\/]+[\\/]([0-9a-f]{2})[\\/]([0-9a-f]{30})[\\/]content"
+    )
     return pattern.sub(lambda m: f"{VENDOR_TOKEN}/p/{(m[1] + m[2])[:16]}/c", text)
 
 
@@ -177,8 +184,9 @@ def _parse_probe(stdout: str) -> tuple[list[str], dict[str, str]]:
 
 # Only `ocx exec` writes these; the launcher is specified not to (design § 4.2).
 _EXEC_ONLY = {"__OCX_ENV_STATE", "OCX_BINARY_PIN"}
-# Set by the probe's own shell, not by the launcher or `ocx exec`.
-_SHELL_NOISE = {"_", "SHLVL", "OLDPWD"}
+# Set by the probe's own shell, or by macOS for a process linked against CoreFoundation (`ocx exec`'s child
+# is one; the sh launcher's is not), not by the launcher or `ocx exec`.
+_SHELL_NOISE = {"_", "SHLVL", "OLDPWD", "__CF_USER_TEXT_ENCODING"}
 
 
 def _comparable(
