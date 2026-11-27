@@ -939,7 +939,8 @@ const SHORT_BUFFER_ERRORS: [u32; 2] = [122, 234];
 /// and ignored otherwise. A short buffer comes back in three forms and each grows it: a zero return with
 /// [`SHORT_BUFFER_ERRORS`] (`GetMappedFileNameW`, `GetModuleFileNameW` on some systems), a return equal to the
 /// capacity (a truncated name), and a return above it (`GetFinalPathNameByHandleW`: the size, NUL included, to retry
-/// with). A return below the capacity is the name's length, NUL excluded.
+/// with). A return of `capacity - 1` may be a name cut to keep room for the NUL, so it grows too, and the retry returns
+/// the same length when the name did fit. A return below that is the name's length, NUL excluded.
 #[cfg(any(windows, test))]
 fn fill_wide(max_units: usize, mut call: impl FnMut(&mut [u16]) -> (usize, u32)) -> Result<Vec<u16>, WideFillFailure> {
     let mut capacity: usize = 512;
@@ -951,7 +952,7 @@ fn fill_wide(max_units: usize, mut call: impl FnMut(&mut [u16]) -> (usize, u32))
                 return Err(WideFillFailure::Failed(error));
             }
             capacity * 2
-        } else if written < capacity {
+        } else if written + 1 < capacity {
             buffer.truncate(written);
             return Ok(buffer);
         } else {
@@ -2165,17 +2166,27 @@ mod tests {
         assert_eq!(located.root, "/runfiles/_main");
     }
 
-    /// A NUL in a value ends its `KEY=VALUE` entry in a Windows environment block, so the rest would be a new entry.
-    /// A fake of the three "short buffer" forms: `name` is what the API would write into a large enough buffer.
+    /// A fake of the five short-buffer forms of [`fill_wide`]: `name` is what the API would write into a large enough
+    /// buffer. `truncate-minus-one` copies `capacity - 1` units and returns that count, as a call that keeps room for a NUL.
     fn fake_call(name: &[u16], form: &str) -> impl FnMut(&mut [u16]) -> (usize, u32) {
         let name = name.to_vec();
         let form = form.to_string();
         move |buffer| {
-            if name.len() < buffer.len() {
+            let room = if form == "truncate-minus-one" {
+                buffer.len() - 1
+            } else {
+                buffer.len()
+            };
+            if name.len() < room {
                 buffer[..name.len()].copy_from_slice(&name);
                 return (name.len(), 0);
             }
             match form.as_str() {
+                "truncate-minus-one" => {
+                    let n = buffer.len() - 1;
+                    buffer[..n].copy_from_slice(&name[..n]);
+                    (n, 0)
+                }
                 "more-data" => (0, 234),
                 "insufficient" => (0, 122),
                 "truncate" => {
@@ -2190,7 +2201,7 @@ mod tests {
 
     #[test]
     fn a_wide_name_of_any_length_up_to_the_nt_limit_fills_in_every_short_buffer_form() {
-        for form in ["more-data", "insufficient", "truncate", "required-size"] {
+        for form in ["more-data", "insufficient", "truncate", "truncate-minus-one", "required-size"] {
             for units in [1usize, 511, 512, 513, 1024, 5000, 32767] {
                 let name: Vec<u16> = (0..units).map(|i| 0x41 + (i % 26) as u16).collect();
                 let filled = fill_wide(64 * 1024, fake_call(&name, form));
@@ -2210,6 +2221,7 @@ mod tests {
         );
     }
 
+    /// A NUL in a value ends its `KEY=VALUE` entry in a Windows environment block, so the rest would be a new entry.
     #[test]
     fn a_nul_in_an_env_value_exits_78() {
         let value = r#"[{"key":"K","value":"x\u0000OCX_SIGNING_KEY=s","kind":"constant"}]"#;
