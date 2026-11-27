@@ -2747,6 +2747,13 @@ const UNARMED_AT_THE_BOUNDARY: &[(&str, &str, &str)] = &[
          that reaches the CLI is never this type",
     ),
     (
+        "ocx_env_apply/src/launch.rs",
+        "RecordError",
+        "a std-only crate cannot derive a classification; the launcher writer wraps the error as the \
+         `source` of the armed `LauncherRecordRefused` (exit 65), so the value that reaches the CLI is \
+         never this type",
+    ),
+    (
         "ocx_oci/src/manifest.rs",
         "InvalidImageIndex",
         "WP-24: `manifest::validate_image_index` raises it; every caller either `?`s it into \

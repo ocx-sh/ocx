@@ -15287,7 +15287,7 @@
       "name": "OCX_BINARY_PIN",
       "value": "path",
       "visibility": "public",
-      "summary": " Absolute path to the running `ocx`, set on every spawn so a child OCX runs the",
+      "summary": " Absolute path to the running `ocx`, set on every spawn so a child OCX runs the same",
       "secret": false,
       "accepts_reference": false,
       "propagation": "binary_pin",
