@@ -869,7 +869,7 @@ pub(super) fn plan_launch(
 fn checked_image_link(target: &str) -> Result<String, ShimError> {
     if target.ends_with(" (deleted)") {
         return Err(refuse(format!(
-            "the launcher image {target} was deleted after it started"
+            "the launcher {target} was deleted after it started; run it from its installed location"
         )));
     }
     Ok(target.to_string())
@@ -2275,7 +2275,11 @@ mod tests {
     fn vl18_an_image_path_the_kernel_marks_deleted_is_refused() {
         let err = checked_image_link("/store/render/bin/cmake (deleted)").unwrap_err();
         assert_eq!(err.exit_code(), 78, "{}", err.stderr_message());
-        assert!(err.stderr_message().contains("deleted"), "{}", err.stderr_message());
+        assert!(
+            err.stderr_message().contains("was deleted after it started"),
+            "{}",
+            err.stderr_message()
+        );
         assert_eq!(
             checked_image_link("/store/render/bin/cmake").unwrap(),
             "/store/render/bin/cmake"

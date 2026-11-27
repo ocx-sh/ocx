@@ -646,3 +646,33 @@ fn a_home_launcher_starts_from_a_deleted_working_directory() {
         ]
     );
 }
+
+/// The image link of a launcher whose file was unlinked after the exec ends in ` (deleted)`; the lookup refuses it
+/// rather than read the record of another directory. Starting through `/proc/self/fd` keeps the file alive while its
+/// path is gone.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_launcher_whose_file_was_deleted_exits_78_saying_so() {
+    let vendor = Vendor::new("deleted-image");
+    vendor.install("[]", "[]", "[]");
+    let launcher = vendor.launcher();
+    // `ETXTBSY` from a sibling thread's fork makes the shell's `exec` fail with 126; see `run_launcher`.
+    let output = (0..100)
+        .map(|_| {
+            std::fs::copy(LAUNCHER_BINARY, &launcher).unwrap();
+            Command::new("/bin/sh")
+                .args(["-c", r#"exec 3<"$1" && rm "$1" && exec /proc/self/fd/3"#, "sh"])
+                .arg(&launcher)
+                .env_clear()
+                .output()
+                .unwrap()
+        })
+        .find(|output| output.status.code() != Some(126) && !stderr_of(output).contains("Text file busy"))
+        .expect("the launcher starts within 100 attempts");
+    assert_eq!(output.status.code(), Some(78), "{}", stderr_of(&output));
+    assert!(
+        stderr_of(&output).contains("was deleted after it started"),
+        "{}",
+        stderr_of(&output)
+    );
+}
