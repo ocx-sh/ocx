@@ -27,11 +27,10 @@ enum ShimError {
     ContainmentViolation { path: String },
     /// `GetModuleFileNameW` failed or yielded no usable stem. Exit 74 (`EX_IOERR`).
     SelfPathFailure,
-    /// `ocx` was not found. Exit 69 (`EX_UNAVAILABLE`).
+    /// The resolved absolute `ocx` is not there. Exit 69 (`EX_UNAVAILABLE`).
     ///
-    /// `pinned` names an explicitly resolved program (pin or the record's baked `ocx`); `None` means the literal-`ocx`
-    /// PATH search missed.
-    OcxNotFound { pinned: Option<String> },
+    /// A `PATH` walk that finds none is a 78 (`DirectRefused`), never this.
+    OcxNotFound { program: String },
     /// `CreateProcessW` failed otherwise: exit 74, or 77 when `win32` is `ERROR_ACCESS_DENIED`.
     SpawnFailure { win32: u32, program: String },
     /// The launcher refused: its `.launch` record missing, unreadable or malformed, or no vendored root accepted. Exit 78.
@@ -98,13 +97,10 @@ impl ShimError {
                 format!("ocx-shim: package root outside OCX home: {path}")
             }
             ShimError::SelfPathFailure => "ocx-shim: cannot determine own path".to_string(),
-            ShimError::OcxNotFound { pinned: None } => {
-                "ocx-shim: ocx not found (set OCX_BINARY_PIN or add ocx to PATH)".to_string()
-            }
-            ShimError::OcxNotFound { pinned: Some(p) } => {
+            ShimError::OcxNotFound { program } => {
                 format!(
                     "ocx-shim: pinned ocx not found: {} (OCX_BINARY_PIN points at a missing path)",
-                    escape_controls(p)
+                    escape_controls(program)
                 )
             }
             ShimError::SpawnFailure { win32, program } => {
@@ -125,12 +121,12 @@ impl ShimError {
 
     /// The clause a failed Windows spawn gains when a path-length limit is its plausible cause.
     ///
-    /// A pinned `ocx` that was not found carries no Win32 code; it is judged as `ERROR_PATH_NOT_FOUND`, the code a
+    /// An `ocx` that was not found carries no Win32 code; it is judged as `ERROR_PATH_NOT_FOUND`, the code a
     /// too-long path gives.
     fn length_limit_hint(&self, working_directory_units: usize) -> Option<String> {
         match self {
             ShimError::SpawnFailure { win32, program } => length_limit_hint(*win32, working_directory_units, program),
-            ShimError::OcxNotFound { pinned: Some(program) } => length_limit_hint(3, working_directory_units, program),
+            ShimError::OcxNotFound { program } => length_limit_hint(3, working_directory_units, program),
             _ => None,
         }
     }
@@ -267,62 +263,28 @@ fn run() -> Result<i32, ShimError> {
 
 /// Starts `ocx` for a home-kind record: `home` picks the wire verb, `stem` is the tool name passed after `--`.
 #[cfg(windows)]
-fn run_home(home: &core::HomeLaunch, stem: &str) -> Result<i32, ShimError> {
-    use std::os::windows::ffi::OsStrExt;
+fn run_home(home: &core::HomeLaunch, started: &str, stem: &str) -> Result<i32, ShimError> {
     use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND};
 
-    // Containment runs only when `OCX_HOME` resolves; `launcher exec`'s `validate_launcher_pkg_root` stays
-    // authoritative. A `pkg_root` that fails to resolve under a good `OCX_HOME` is suspicious: delegate, but say so.
-    #[expect(clippy::disallowed_methods, reason = "no ocx_env edge: the shim's size budget")]
-    let ocx_home = std::env::var_os("OCX_HOME");
-    if let (Some(pkg_root), Some(ocx_home)) = (home.containment_path(), ocx_home)
-        && let Ok(canon_home) = dunce::canonicalize(std::path::Path::new(&ocx_home))
-    {
-        match dunce::canonicalize(pkg_root) {
-            Ok(canon_root) => {
-                if !core::pkg_root_allowed(&canon_home, &canon_root) {
-                    return Err(ShimError::ContainmentViolation {
-                        path: canon_root.display().to_string(),
-                    });
-                }
-            }
-            Err(err) => {
-                eprintln!(
-                    "ocx-shim: cannot canonicalize package root {pkg_root} ({err}); delegating containment to `launcher exec`"
-                );
-            }
-        }
+    let start = direct::prepare_home(home, started, true)?;
+    let mut caller_args: Vec<String> = Vec::new();
+    for argument in std::env::args_os().skip(1) {
+        caller_args.push(argument.into_string().map_err(|_| ShimError::DirectArgumentRefused {
+            reason: format!("an argument for {} is not valid Unicode", start.program),
+        })?);
     }
+    let command_line = core::build_child_command_line(&start.program, home, stem, &caller_args);
+    let block = direct::environment_block(&start.environment);
 
-    if core::strips_tier_selectors(home) {
-        use windows_sys::Win32::System::Environment::SetEnvironmentVariableW;
-
-        // The child inherits this process's environment (`lpEnvironment = NULL`), so deleting here strips the child's.
-        for name in ["OCX_GLOBAL", "OCX_PROJECT"] {
-            let name_w: Vec<u16> = std::ffi::OsStr::new(name).encode_wide().chain(Some(0)).collect();
-            // SAFETY: `name_w` is NUL-terminated and outlives the call; a NULL `lpValue` deletes. Failure means the
-            // name was already absent, the wanted state, so the result is ignored.
-            unsafe { SetEnvironmentVariableW(name_w.as_ptr(), std::ptr::null()) };
-        }
-    }
-
-    // Defined-but-empty must stay `Some`: `core::resolve_program` treats it as a pin.
-    #[expect(clippy::disallowed_methods, reason = "no ocx_env edge: the shim's size budget")]
-    let pin = std::env::var_os("OCX_BINARY_PIN").map(|v| v.to_string_lossy().into_owned());
-    let program = core::resolve_program(pin.as_deref(), home.baked_ocx());
-
-    let argv: Vec<String> = std::env::args().skip(1).collect();
-    let command_line = core::build_child_command_line(&program.token, home, stem, &argv);
-
-    // A pinned or baked program gets its own `lpApplicationName` buffer, so `CreateProcessW` neither parses it from
-    // the command line (CWE-428: `C:\Program Files\…` → `C:\Program.exe`) nor searches directories for it.
-    spawn_child(program.application_name(), &command_line, None).map_err(|last| match last {
+    // The program is absolute and passed as `lpApplicationName`, so `CreateProcessW` neither parses it out of the
+    // command line (CWE-428: `C:\Program Files\…` → `C:\Program.exe`) nor searches any directory for it (CWE-427).
+    spawn_child(Some(&start.program), &command_line, Some(&block)).map_err(|last| match last {
         ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND => ShimError::OcxNotFound {
-            pinned: program.application_name().map(str::to_string),
+            program: start.program.clone(),
         },
         other => ShimError::SpawnFailure {
             win32: other,
-            program: program.token.clone(),
+            program: start.program.clone(),
         },
     })
 }
@@ -673,7 +635,7 @@ fn run() -> Result<i32, ShimError> {
 #[cfg(test)]
 mod tests {
     use super::ShimError;
-    use super::core::{HomeLaunch, ToolchainHome, build_child_command_line, derive_stem, resolve_program};
+    use super::core::{HomeLaunch, ToolchainHome, build_child_command_line, derive_stem};
     use std::ffi::OsStr;
 
     /// A `package` record carrying `value` as its package root — the
@@ -758,9 +720,7 @@ mod tests {
             .length_limit_hint(10)
             .expect("a long relative path");
         assert!(hint.contains("cannot take the \\\\?\\ prefix"), "{hint}");
-        let pinned = ShimError::OcxNotFound {
-            pinned: Some(batch.clone()),
-        };
+        let pinned = ShimError::OcxNotFound { program: batch.clone() };
         assert!(
             pinned.length_limit_hint(10).is_some(),
             "a pinned ocx is judged as error 3"
@@ -804,7 +764,7 @@ mod tests {
             "ocx-shim: failed to start C:\\v\\to\\u{1b}[31mol.exe: win32 error 2"
         );
         let pinned = ShimError::OcxNotFound {
-            pinned: Some("C:\\o\ncx.exe".to_string()),
+            program: "C:\\o\ncx.exe".to_string(),
         };
         assert!(
             pinned.stderr_message().contains("C:\\o\\ncx.exe"),
@@ -834,10 +794,11 @@ mod tests {
     fn e5_ocx_not_found_exits_69() {
         // Win32-mock / acceptance-level: the *trigger* (CreateProcessW
         // ERROR_FILE_NOT_FOUND) needs Windows, but the code mapping is pure.
-        // Uses the new `OcxNotFound { pinned }` variant shape (amendment R2);
-        // red-by-COMPILE until the builder adds the `pinned` field.
         assert_eq!(
-            ShimError::OcxNotFound { pinned: None }.exit_code(),
+            ShimError::OcxNotFound {
+                program: "C:\\ocx.exe".to_string()
+            }
+            .exit_code(),
             69,
             "E5 ocx not found → EX_UNAVAILABLE (69)"
         );
@@ -904,40 +865,12 @@ mod tests {
         );
     }
 
-    // ── E5 OcxNotFound — pinned-vs-unset stderr branch (amendment R2) ───────
-    //
-    // Spec-to-builder (variant-shape change, red-by-COMPILE + behavior):
-    // `ShimError::OcxNotFound` MUST carry whether `OCX_BINARY_PIN` was
-    // DEFINED so the stderr line can name the pinned program instead of the
-    // misleading "add ocx to PATH" hint. Pinned shape pinned here:
-    //
-    //   OcxNotFound { pinned: Option<String> }
-    //
-    // - `pinned: None`  (env unset)        → message unchanged:
-    //       "ocx-shim: ocx not found (set OCX_BINARY_PIN or add ocx to PATH)"
-    // - `pinned: Some(p)` (env defined)    → names `p`, and MUST NOT contain
-    //       "add ocx to PATH" (the pin was the resolution path, not PATH).
-    //
-    // exit_code() stays 69 (EX_UNAVAILABLE) for both. These tests construct
-    // the new variant shape so they FAIL TO COMPILE until the builder adds
-    // the `pinned` field — that is the accepted red for a variant-shape
-    // contract. Builder: implement `OcxNotFound { pinned: Option<String> }`.
-
-    #[test]
-    fn e5_ocx_not_found_unset_pin_keeps_path_hint_and_exits_69() {
-        let err = ShimError::OcxNotFound { pinned: None };
-        assert_eq!(err.exit_code(), 69, "E5 ocx not found → EX_UNAVAILABLE (69)");
-        assert_eq!(
-            err.stderr_message(),
-            "ocx-shim: ocx not found (set OCX_BINARY_PIN or add ocx to PATH)",
-            "unset OCX_BINARY_PIN → the original hint mentioning both OCX_BINARY_PIN and PATH"
-        );
-    }
+    // ── E5 OcxNotFound — the stderr line names the resolved program ─────────
 
     #[test]
     fn e5_ocx_not_found_pinned_names_program_and_drops_path_hint() {
         let err = ShimError::OcxNotFound {
-            pinned: Some("C:\\tools\\ocx.exe".to_string()),
+            program: "C:\\tools\\ocx.exe".to_string(),
         };
         assert_eq!(
             err.exit_code(),
@@ -997,95 +930,6 @@ mod tests {
         let stem = derive_stem(OsStr::new("C:\\pkg\\entrypoints\\tool.exe.exe"))
             .expect("double-suffix is still a valid module path");
         assert_eq!(stem, "tool.exe", "strip exactly one trailing `.exe`, not all");
-    }
-
-    // ── resolve_program — pin ▸ baked ▸ literal (Wire-ABI matrix + V-9) ────
-
-    #[test]
-    fn resolve_program_no_pin_and_no_baked_falls_back_to_ocx() {
-        let program = resolve_program(None, None);
-        assert_eq!(
-            program.token, "ocx",
-            "OCX_BINARY_PIN unset and no baked line → literal `ocx`, parity with `.cmd` ELSE branch"
-        );
-        assert!(
-            !program.explicit,
-            "and it is the ONE rung spawned with lpApplicationName = NULL"
-        );
-    }
-
-    #[test]
-    fn resolve_program_set_nonempty_pin_uses_value() {
-        let program = resolve_program(Some("C:\\tools\\ocx.exe"), None);
-        assert_eq!(
-            program.token, "C:\\tools\\ocx.exe",
-            "OCX_BINARY_PIN set non-empty → that value, parity with `.cmd` IF DEFINED branch"
-        );
-        assert!(program.explicit, "a real path is always resolved explicitly (CWE-428)");
-    }
-
-    #[test]
-    fn resolve_program_set_empty_pin_takes_pin_branch_not_ocx() {
-        // Reconciled ABI decision (ADR §Error Taxonomy note E5/E6; plan
-        // parity matrix "set empty → take pin branch"). The shim mirrors the
-        // Windows `.cmd` `IF DEFINED OCX_BINARY_PIN` semantics: *defined at
-        // all* (even empty) → pin branch. It must NOT fall back to `ocx`
-        // (that is the Unix `${VAR:-ocx}` behaviour, deliberately out of
-        // scope here).
-        assert_eq!(
-            resolve_program(Some(""), None).token,
-            "",
-            "OCX_BINARY_PIN defined-but-empty → pin branch (empty value), NOT `ocx` fallback"
-        );
-        assert_ne!(
-            resolve_program(Some(""), None).token,
-            "ocx",
-            "empty pin must not collapse to the unset/`ocx` branch (parity-by-decision)"
-        );
-        assert!(
-            resolve_program(Some(""), None).explicit,
-            "and it still resolves explicitly, so the spawn fails deterministically \
-             rather than silently parsing the command line"
-        );
-    }
-
-    /// V-9: with no pin, a baked `ocx` is what the trampoline spawns — and it
-    /// is spawned EXPLICITLY, which is the half that closes the defect.
-    ///
-    /// A baked value that only won the token race would still be searched for
-    /// by `CreateProcessW`, and that search starts in `<home>/toolchain/active/bin`,
-    /// where `bin\ocx.exe` sits. `explicit` is therefore not a detail of the
-    /// return shape; it is the fix.
-    ///
-    /// RED: return `explicit: false` for the baked rung, or drop `baked` from
-    /// the `or` chain.
-    #[test]
-    fn resolve_program_prefers_a_baked_ocx_over_the_bare_literal() {
-        let program = resolve_program(None, Some("C:\\Users\\u\\.ocx\\bin\\ocx.exe"));
-        assert_eq!(
-            program.token, "C:\\Users\\u\\.ocx\\bin\\ocx.exe",
-            "the baked absolute wins over the literal `ocx`"
-        );
-        assert_eq!(
-            program.application_name(),
-            Some("C:\\Users\\u\\.ocx\\bin\\ocx.exe"),
-            "and CreateProcessW gets it as lpApplicationName, so NO directory search runs — \
-             a co-resident `bin\\ocx.exe` can never be reached"
-        );
-    }
-
-    /// The pin still wins over the baked line, on both platforms.
-    ///
-    /// The POSIX body spells it `exec "${OCX_BINARY_PIN:-${__ocx_binary}}"`;
-    /// this is the same precedence. Without this row, V-9's fix would silently
-    /// take the operator's override away.
-    #[test]
-    fn resolve_program_pin_outranks_a_baked_ocx() {
-        let program = resolve_program(Some("C:\\tools\\ocx.exe"), Some("C:\\baked\\ocx.exe"));
-        assert_eq!(
-            program.token, "C:\\tools\\ocx.exe",
-            "OCX_BINARY_PIN is the override and outranks the baked line (POSIX `${{VAR:-…}}` parity)"
-        );
     }
 
     /// The two positional grammars carry no baked program and never could —
@@ -1454,47 +1298,6 @@ mod tests {
         assert!(
             !super::core::use_std_handles(false, false, false),
             "a fully no-console parent (all handles NULL/INVALID) → must NOT set STARTF_USESTDHANDLES"
-        );
-    }
-
-    // ── application_name — B2 / CWE-428 + V-9 program-resolution policy ────
-
-    #[test]
-    fn application_name_is_null_only_for_the_bare_literal() {
-        // The literal `ocx` is the ONLY rung spawned with a NULL
-        // lpApplicationName, and that is not a free choice: the NULL search
-        // begins at the calling image's own directory, so this rung is exactly
-        // where V-9's co-resident `bin\ocx.exe` can win. It survives because
-        // it is the last resort, reached only when nothing absolute resolved.
-        assert_eq!(
-            resolve_program(None, None).application_name(),
-            None,
-            "no pin, no baked line → lpApplicationName = NULL (the accepted narrow risk)"
-        );
-    }
-
-    #[test]
-    fn application_name_pinned_is_explicit_never_parsed() {
-        // A pinned program (even a spaced `C:\Program Files\…`) MUST be passed
-        // explicitly via lpApplicationName so CreateProcessW does NO
-        // command-line program parsing (CWE-428: `C:\Program.exe` misresolve).
-        assert_eq!(
-            resolve_program(Some("C:\\Program Files\\ocx\\ocx.cmd"), None).application_name(),
-            Some("C:\\Program Files\\ocx\\ocx.cmd"),
-            "pinned program → explicit lpApplicationName (no command-line program search, CWE-428 closed)"
-        );
-    }
-
-    #[test]
-    fn application_name_empty_pin_still_explicit() {
-        // Reconciled `.cmd` IF DEFINED parity: defined-but-empty pin still
-        // takes the pin branch and resolves explicitly (an empty
-        // lpApplicationName then fails the spawn deterministically rather than
-        // silently parsing the command line).
-        assert_eq!(
-            resolve_program(Some(""), None).application_name(),
-            Some(""),
-            "defined-but-empty pin → still explicit lpApplicationName (parity-by-decision; deterministic fail, no silent cmdline parse)"
         );
     }
 

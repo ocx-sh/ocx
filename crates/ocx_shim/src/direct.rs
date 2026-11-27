@@ -85,7 +85,7 @@ pub(super) struct Located {
     pub root: String,
 }
 
-fn refuse(reason: String) -> ShimError {
+pub(super) fn refuse(reason: String) -> ShimError {
     ShimError::DirectRefused { reason }
 }
 
@@ -140,7 +140,7 @@ pub(super) fn read_regular_bounded(path: &Path) -> Result<Option<Vec<u8>>, ReadE
     Ok(Some(bytes))
 }
 
-fn is_absolute(path: &str, windows: bool) -> bool {
+pub(super) fn is_absolute(path: &str, windows: bool) -> bool {
     if windows {
         is_absolute_any_host(path)
     } else {
@@ -148,7 +148,7 @@ fn is_absolute(path: &str, windows: bool) -> bool {
     }
 }
 
-fn separators(windows: bool) -> &'static [char] {
+pub(super) fn separators(windows: bool) -> &'static [char] {
     if windows { &['/', '\\'] } else { &['/'] }
 }
 
@@ -182,7 +182,7 @@ fn strip_exe(path: &str) -> &str {
 }
 
 /// `path` split after its last separator into the directory (separator kept) and the file name.
-fn split_file_name(path: &str, windows: bool) -> (&str, &str) {
+pub(super) fn split_file_name(path: &str, windows: bool) -> (&str, &str) {
     match path.rfind(separators(windows)) {
         Some(at) => path.split_at(at + 1),
         None => ("", path),
@@ -190,7 +190,7 @@ fn split_file_name(path: &str, windows: bool) -> (&str, &str) {
 }
 
 /// Folds a path for a lexical comparison: on Windows ASCII case and `\` fold, on Unix nothing does.
-fn fold(text: &str, windows: bool) -> String {
+pub(super) fn fold(text: &str, windows: bool) -> String {
     if windows {
         text.to_ascii_lowercase().replace('\\', "/")
     } else {
@@ -485,6 +485,108 @@ impl LookupFs for RealFs {
     }
 }
 
+impl core::ProgramFs for RealFs {
+    fn is_program_file(&self, path: &str) -> bool {
+        #[cfg(unix)]
+        {
+            self.is_executable_file(path)
+        }
+        #[cfg(windows)]
+        {
+            self.is_regular_file(path)
+        }
+    }
+
+    fn is_regular_file(&self, path: &str) -> bool {
+        std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file())
+    }
+}
+
+/// What a home launch starts: the absolute program and the complete child environment.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct HomeStart {
+    pub program: String,
+    pub environment: Vec<(OsString, OsString)>,
+}
+
+/// Decides what a home launch starts over `inherited`: the depth guard and the environment first, then the program.
+///
+/// Nothing starts here, so every refusal is a 78 before the first process of the chain.
+pub(super) fn plan_home(
+    home: &core::HomeLaunch,
+    launcher_directory: &str,
+    inherited: Vec<(OsString, OsString)>,
+    windows: bool,
+    fs: &dyn core::ProgramFs,
+) -> Result<HomeStart, ShimError> {
+    let environment = core::home_environment(inherited, home, windows)?;
+    let pin = match core::environment_value(&environment, "OCX_BINARY_PIN", windows) {
+        Some(value) => Some(
+            value
+                .to_str()
+                .ok_or_else(|| refuse("OCX_BINARY_PIN is not valid Unicode".to_string()))?,
+        ),
+        None => None,
+    };
+    let path = core::environment_value(&environment, "PATH", windows).map(|value| value.to_string_lossy());
+    let program = core::resolve_program(
+        &core::ProgramInputs {
+            pin,
+            baked: home.baked_ocx(),
+            path: path.as_deref(),
+            launcher_directory,
+            windows,
+        },
+        fs,
+    )?;
+    Ok(HomeStart { program, environment })
+}
+
+#[cfg(windows)]
+fn canonicalize(path: &Path) -> std::io::Result<std::path::PathBuf> {
+    dunce::canonicalize(path)
+}
+
+#[cfg(unix)]
+fn canonicalize(path: &Path) -> std::io::Result<std::path::PathBuf> {
+    std::fs::canonicalize(path)
+}
+
+/// Refuses a package root outside the containment roots of `OCX_HOME`; `launcher exec` holds the primary check.
+///
+/// The check runs only when `OCX_HOME` resolves. A root that fails to resolve under a good `OCX_HOME` is suspicious,
+/// so it is delegated, with a line saying so.
+fn check_containment(home: &core::HomeLaunch, ocx_home: Option<&OsStr>) -> Result<(), ShimError> {
+    let (Some(pkg_root), Some(ocx_home)) = (home.containment_path(), ocx_home) else {
+        return Ok(());
+    };
+    let Ok(canonical_home) = canonicalize(Path::new(ocx_home)) else {
+        return Ok(());
+    };
+    match canonicalize(Path::new(pkg_root)) {
+        Ok(canonical_root) if !core::pkg_root_allowed(&canonical_home, &canonical_root) => {
+            Err(ShimError::ContainmentViolation {
+                path: canonical_root.display().to_string(),
+            })
+        }
+        Ok(_) => Ok(()),
+        Err(err) => {
+            eprintln!(
+                "ocx-shim: cannot canonicalize package root {pkg_root} ({err}); delegating containment to `launcher exec`"
+            );
+            Ok(())
+        }
+    }
+}
+
+/// The containment check and the plan of a home launch over the process environment; `started` names the launcher.
+pub(super) fn prepare_home(home: &core::HomeLaunch, started: &str, windows: bool) -> Result<HomeStart, ShimError> {
+    #[expect(clippy::disallowed_methods, reason = "no ocx_env edge: the shim's size budget")]
+    let inherited: Vec<(OsString, OsString)> = std::env::vars_os().collect();
+    check_containment(home, core::environment_value(&inherited, "OCX_HOME", windows))?;
+    plan_home(home, split_file_name(started, windows).0, inherited, windows, &RealFs)
+}
+
 /// The refusal for a batch target whose path holds `%`: `cmd.exe` expands `%NAME%` inside the quoted script path,
 /// which std's batch escaping does not cover, so another script could run.
 fn batch_program_refusal(program: &str) -> Option<ShimError> {
@@ -510,6 +612,24 @@ fn exec_program(program: &str, args: &[OsString], env: Vec<(OsString, OsString)>
         .env_clear()
         .envs(env)
         .exec()
+}
+
+/// Starts `ocx` for a home-kind record by replacing this process with it; returns only the failure.
+#[cfg(unix)]
+fn run_home(home: &core::HomeLaunch, started: &str, caller_args: Vec<OsString>) -> Result<i32, ShimError> {
+    let start = prepare_home(home, started, false)?;
+    let mut args: Vec<OsString> = home
+        .arguments(split_file_name(started, false).1)
+        .into_iter()
+        .map(OsString::from)
+        .collect();
+    args.extend(caller_args);
+    let error = exec_program(&start.program, &args, start.environment);
+    Err(ShimError::DirectExecFailed {
+        program: start.program,
+        permission_denied: error.kind() == std::io::ErrorKind::PermissionDenied,
+        reason: error.to_string(),
+    })
 }
 
 /// The `.launch` launcher on Unix: reads the record, finds the vendor root, builds the environment and argv, and
@@ -540,11 +660,7 @@ pub(super) fn run() -> Result<i32, ShimError> {
     };
     let located = match locate(&started, &context, &RealFs)? {
         Probed::Direct(located) => located,
-        Probed::Home(_) => {
-            return Err(refuse(format!(
-                "the sidecar beside {started} is a home record, which the Unix launcher does not run"
-            )));
-        }
+        Probed::Home(home) => return run_home(&home, &started, arguments.collect()),
     };
 
     #[expect(clippy::disallowed_methods, reason = "no ocx_env edge: the shim's size budget")]
@@ -578,7 +694,7 @@ pub(super) fn run_windows(started: &str, stem: &str) -> Result<i32, ShimError> {
     };
     let located = match locate(started, &context, &RealFs)? {
         Probed::Direct(located) => located,
-        Probed::Home(home) => return super::run_home(&home, stem),
+        Probed::Home(home) => return super::run_home(&home, started, stem),
     };
 
     #[expect(clippy::disallowed_methods, reason = "no ocx_env edge: the shim's size budget")]
@@ -611,7 +727,7 @@ pub(super) fn run_windows(started: &str, stem: &str) -> Result<i32, ShimError> {
 
 /// The `CREATE_UNICODE_ENVIRONMENT` block of `env`: `KEY=VALUE\0` entries, then one more `\0`.
 #[cfg(windows)]
-fn environment_block(env: &[(OsString, OsString)]) -> Vec<u16> {
+pub(super) fn environment_block(env: &[(OsString, OsString)]) -> Vec<u16> {
     use std::os::windows::ffi::OsStrExt;
 
     let mut block: Vec<u16> = Vec::new();
@@ -1459,5 +1575,103 @@ mod tests {
             .expect("the read must return within a second");
         assert!(matches!(outcome, Err(ReadError::NotRegular)), "{outcome:?}");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Program files named by path; every other path is absent.
+    struct Programs(&'static [&'static str]);
+
+    impl core::ProgramFs for Programs {
+        fn is_program_file(&self, path: &str) -> bool {
+            self.0.contains(&path)
+        }
+
+        fn is_regular_file(&self, path: &str) -> bool {
+            self.0.contains(&path)
+        }
+    }
+
+    fn package_home() -> core::HomeLaunch {
+        core::HomeLaunch::PackageRoot("/o/packages/p".to_string())
+    }
+
+    fn variables(pairs: &[(&str, &str)]) -> Vec<(OsString, OsString)> {
+        pairs.iter().map(|(key, value)| (key.into(), value.into())).collect()
+    }
+
+    #[test]
+    fn a_home_plan_takes_the_pin_and_path_from_the_environment_it_was_given() {
+        let programs = Programs(&["/real/ocx"]);
+        let start = plan_home(
+            &package_home(),
+            "/launcher/",
+            variables(&[("OCX_BINARY_PIN", ""), ("PATH", "/launcher:/real"), ("KEEP", "1")]),
+            false,
+            &programs,
+        )
+        .expect("an empty pin falls to the PATH walk");
+        assert_eq!(start.program, "/real/ocx");
+        assert!(
+            start.environment.contains(&("__OCX_LAUNCHER_DEPTH".into(), "1".into())),
+            "{:?}",
+            start.environment
+        );
+        assert!(start.environment.contains(&("KEEP".into(), "1".into())));
+
+        let pinned = plan_home(
+            &package_home(),
+            "/launcher/",
+            variables(&[("OCX_BINARY_PIN", "/pin/ocx"), ("PATH", "/real")]),
+            false,
+            &programs,
+        )
+        .expect("a pin wins");
+        assert_eq!(pinned.program, "/pin/ocx");
+    }
+
+    #[test]
+    fn a_windows_plan_finds_its_variables_across_case() {
+        let programs = Programs(&["D:\\real\\ocx.exe"]);
+        let start = plan_home(
+            &package_home(),
+            "C:\\launcher\\",
+            variables(&[("Path", "C:\\launcher;D:\\real"), ("ocx_binary_pin", "")]),
+            true,
+            &programs,
+        )
+        .expect("`Path` is `PATH` on Windows");
+        assert_eq!(start.program, "D:\\real\\ocx.exe");
+    }
+
+    #[test]
+    fn the_loop_guard_refuses_before_the_program_is_resolved() {
+        let error = plan_home(
+            &package_home(),
+            "/launcher/",
+            variables(&[("__OCX_LAUNCHER_DEPTH", "32"), ("OCX_BINARY_PIN", "relative")]),
+            false,
+            &Programs(&[]),
+        )
+        .expect_err("a loop");
+        assert!(
+            error.stderr_message().contains("launcher loop"),
+            "{}",
+            error.stderr_message()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_pin_that_is_not_unicode_is_refused() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let error = plan_home(
+            &package_home(),
+            "/launcher/",
+            vec![(OsString::from("OCX_BINARY_PIN"), OsString::from_vec(vec![b'/', 0xFF]))],
+            false,
+            &Programs(&[]),
+        )
+        .expect_err("a pin that cannot be a path string");
+        assert_eq!(error.exit_code(), 78);
     }
 }
