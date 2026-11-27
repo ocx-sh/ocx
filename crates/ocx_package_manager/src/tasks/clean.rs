@@ -337,7 +337,7 @@ impl PackageManager {
 /// Retires every `launchers/<G'>` of every package and every `deferred/<G'>` whose name is not this ocx's
 /// generation, returning the paths removed (a dry run: the paths that would be). A host with no embedded blob
 /// knows no current generation and retires nothing. `entrypoints/`, `shims/` and `.bin/ocx-shim` are never read.
-// The helper step 2 reuses for `shells/default-*`: one `retire_dir` call per candidate, `LeftForLater` logged and not reported.
+// Shared by the launcher and render-directory sweeps: one `retire_dir` call per candidate, `LeftForLater` logged and not reported.
 async fn retire_other_generations(fs: &FileStructure, dry_run: bool) -> crate::Result<Vec<PathBuf>> {
     let Some(generation) = ocx_store::launcher_generation::LauncherGeneration::host() else {
         return Ok(Vec::new());
@@ -376,7 +376,7 @@ async fn retire_superseded_shells(fs: &FileStructure, dry_run: bool) -> crate::R
     let state = fs.state.clone();
     let homes = tokio::task::spawn_blocking(move || stamped_homes(&state))
         .await
-        .map_err(|e| crate::Error::InternalFile(PathBuf::new(), std::io::Error::other(e)))?;
+        .map_err(|e| crate::Error::InternalFile(fs.state.project_state_root(), std::io::Error::other(e)))?;
     let mut retired = Vec::new();
     for stamp in homes {
         let home = ToolchainHome::new(&stamp.home);
@@ -404,12 +404,27 @@ async fn retire_superseded_shells(fs: &FileStructure, dry_run: bool) -> crate::R
             continue;
         };
         // The stamp is written after the `active` switch, so it can lag: retiring what `active` names would dangle it.
+        // An unreadable `active` is not "no active render": that home is skipped, as a locked one is.
         let active = {
             let home = ToolchainHome::new(&stamp.home);
-            tokio::task::spawn_blocking(move || home.active_target_name())
-                .await
-                .ok()
-                .flatten()
+            tokio::task::spawn_blocking(move || read_active(&home)).await
+        };
+        let active = match active {
+            Ok(Ok(active)) => active,
+            Ok(Err(e)) => {
+                log::warn!(
+                    "Toolchain home '{}' has an unreadable `active`; its render directories stay: {e}",
+                    stamp.home.display()
+                );
+                continue;
+            }
+            Err(e) => {
+                log::warn!(
+                    "Reading `active` of toolchain home '{}' failed; its render directories stay: {e}",
+                    stamp.home.display()
+                );
+                continue;
+            }
         };
         let Ok(mut entries) = tokio::fs::read_dir(&shells).await else {
             continue;
@@ -436,6 +451,16 @@ async fn retire_superseded_shells(fs: &FileStructure, dry_run: bool) -> crate::R
         }
     }
     Ok(retired)
+}
+
+/// The render directory name `active` links to: `Ok(None)` when `active` is absent or names no `shells/` child,
+/// `Err` when it exists but cannot be read as a link. Blocking.
+fn read_active(home: &ToolchainHome) -> std::io::Result<Option<String>> {
+    match std::fs::read_link(home.active()) {
+        Ok(_) => Ok(home.active_target_name()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
 }
 
 /// A render directory a clean may retire: a published `default-<16 hex>` or staging debris.
@@ -1923,6 +1948,21 @@ repository = "localhost:5000/shfmt"
         );
         assert!(kept.contains(&format!("default-{GEN_A}")) && kept.contains(&format!("default-{GEN_B}")));
         assert!(!kept.contains(&".staging-dddddddddddddddd".to_string()));
+    }
+
+    /// An `active` that cannot be read says nothing about which directory is live: the home stays whole.
+    ///
+    /// RED: read the link with `.ok().flatten()`, which calls an unreadable `active` "no active render".
+    #[tokio::test]
+    async fn clean_skips_a_home_whose_active_cannot_be_read() {
+        let (_tmp, manager, home) = global_shells_home().await;
+        // A regular file where the link belongs: `read_link` fails with something other than "not found".
+        tokio::fs::write(home.join("active"), b"not a link").await.unwrap();
+
+        let result = manager.clean(false, false).await.unwrap();
+
+        assert_eq!(survivors(&home).await.len(), SHELL_NAMES.len(), "nothing is retired");
+        assert!(result.launchers.is_empty(), "got {:?}", result.launchers);
     }
 
     #[tokio::test]
