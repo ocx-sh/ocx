@@ -161,8 +161,7 @@ pub enum Command {
         With `--format json`, each item carries `kind`, `dry_run`, `path` and `held_by`. \
         A dry run adds a `Held By` column naming the projects that pin an object it keeps.\n\n\
         The rendered project toolchain under `<home>/toolchain/` is derived state that `ocx pull` \
-        rewrites from `ocx.lock`; `clean` never walks or collects from it. Every run also removes \
-        the consent stamp of any project whose directory no longer exists, and `--dry-run` lists \
+        rewrites from `ocx.lock`; `clean` never collects packages through its links. Every run also removes the consent stamp of any project whose directory no longer exists, and `--dry-run` lists \
         those stamps without removing them. It also removes the launcher directories other OCX \
         builds wrote, a package's `launchers/<generation>/` and a superseded `shells/default-<hash>/`; \
         this build's generation and the render directories in use stay, and `--dry-run` lists what it would remove.\n\n\

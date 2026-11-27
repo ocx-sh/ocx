@@ -9,13 +9,13 @@ use crate::api;
 
 /// Remove unreferenced objects, stale temp directories and the launcher directories of other OCX builds.
 ///
-/// An object is unreferenced when its `refs/` directory is empty or absent, as
-/// after `ocx uninstall` without `--purge`. A temp directory is stale when no
-/// running process holds its `install.lock`.
+/// An object is unreferenced when its `refs/` directory is empty or absent, as after `ocx uninstall`
+/// without `--purge` or a manual symlink removal. A temp directory is stale when no running process
+/// holds its `install.lock`: a previous download was interrupted. Superseded `shells/default-<hash>`
+/// render directories are retired too, never the one `active` names or the previous one.
 ///
-/// Packages any registered project's `ocx.lock` holds are retained, even from
-/// another project directory; `--force` ignores the project registry.
-/// `--dry-run` previews without changing anything.
+/// Packages any registered project's `ocx.lock` holds are retained, even from another project
+/// directory; `--force` ignores the project registry. `--dry-run` previews without changing anything.
 #[derive(Parser)]
 pub struct Clean {
     /// Show what would be removed without actually removing anything.
