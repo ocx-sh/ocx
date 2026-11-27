@@ -8,9 +8,9 @@
 - **Tier-grammar:** 5
 - **Updated:** 2026-11-27
 - **Active phase:** 0 — second run planned (§ Second run); first run landed (ocx `9c9e32d4`, rules_ocx `401c9c4`)
-- **Step:** awaiting /hex-execute (review-fix loop; round 2 verdict Needs Work; ocx pipelines R2A…R2C)
+- **Step:** /hex-execute → integration gate (pipelines R2A…R2C merged; verify-deep on the branch is the gate)
 - **Feature branch:** ocx `hex/bazel-rbe-rules-ocx` (pipelines on `hex/bazel-rbe-rules-ocx--<pipeline>`, worktrees under `.agents/worktrees/`); rules_ocx one branch `hex/bazel-rbe-rules-ocx`, its worktree `/home/mherwig/dev/ocx-sh/rules_ocx/.agents/worktrees/hex-bazel-rbe-rules-ocx` shared by the rules_ocx pipelines of a wave (DP-43)
-- **Last update:** 2026-11-27 (after 7ebabeec: delta review round 2; fix pipelines R2A…R2C appended)
+- **Last update:** 2026-11-27 (after 5ac43824: fix pipelines R2A…R2C merged)
 - **Reviewed:** 7ebabeec (rules_ocx 83477a4)
 - **Next:** /hex-execute .claude/artifacts/plan_vendor_rules_ocx.md
 
@@ -1568,9 +1568,9 @@ on PF, IR, and act D2. Must not touch: code in either repository.
 | R1F | . | review Warns: recency gate fails on empty input, workflow names, path filter covers the launcher writer, shim tests run in the deep Windows leg | `.github/workflows/**`, `scripts/**` | 7 | X2 | | merged |
 | R1R | rules_ocx | review Warns: batch update wrapper (argument check, E12 real path, header), `facts.bzl` X2 before index read, test rows, update guide | `ocx/private/update.bat.tpl`, `ocx/private/facts.bzl`, `taskfile.yml`, `docs/**`, their tests | 7 | X2 | | merged |
 | R1I | . | review High H2 and hub files: per-OS skip ceilings and suite floors from the measured deep run, generated reference pages and goldens, red-proof log; launcher binary round 3 and dev build D3 are the meta-orchestrator's | § Run 2 — hub files (ocx) | 8 | R1A…R1F | | merged |
-| R2A | . | delta review High A1 and Warns: `ocx clean` keeps the manifests a deferred tree's claim check reads; a home whose metadata is gone still refuses with exit 81; the launcher directory listing fails closed on a read error; tests for the refusal and for the loop guard; limit files for the new cases | `crates/ocx_package_manager/src/tasks/{clean,materialize_lazy}.rs`, `crates/ocx_cli/src/command/launcher/shim.rs`, `test/tests/test_lazy_loading.py`, `test/SUITE_FLOOR`, `test/SKIP_CEILING`, `test/limits/**`, the census pins | 9 | R1I | | pending |
-| R2B | . | delta review Warns: a zero file identity is no identity in the per-prompt gate; a call-site test for the declared-binary `executable` flag | `crates/ocx_store/src/file_structure/state_store.rs`, `crates/ocx_package_manager/src/tasks/vendor.rs` (tests only) | 9 | R1I | | pending |
-| R2C | . | delta review doc Warns and convergence gaps C-137, C-RO-30: pages name the right slug, the deferred first use, the vendor refusals, the skipped home; ADR § 12 states the sweep's lock limit; this plan's C-137 and C-RO-30 lines match the code | `website/src/content/docs/**` (hand-written pages), `.claude/artifacts/adr_unified_launcher.md`, this plan's § Run 2 — component contracts | 9 | R1I | | pending |
+| R2A | . | delta review High A1 and Warns: `ocx clean` keeps the manifests a deferred tree's claim check reads; a home whose metadata is gone still refuses with exit 81; the launcher directory listing fails closed on a read error; tests for the refusal and for the loop guard; limit files for the new cases | `crates/ocx_package_manager/src/tasks/{clean,materialize_lazy}.rs`, `crates/ocx_cli/src/command/launcher/shim.rs`, `test/tests/test_lazy_loading.py`, `test/SUITE_FLOOR`, `test/SKIP_CEILING`, `test/limits/**`, the census pins | 9 | R1I | | merged |
+| R2B | . | delta review Warns: a zero file identity is no identity in the per-prompt gate; a call-site test for the declared-binary `executable` flag | `crates/ocx_store/src/file_structure/state_store.rs`, `crates/ocx_package_manager/src/tasks/vendor.rs` (tests only) | 9 | R1I | | merged |
+| R2C | . | delta review doc Warns and convergence gaps C-137, C-RO-30: pages name the right slug, the deferred first use, the vendor refusals, the skipped home; ADR § 12 states the sweep's lock limit; this plan's C-137 and C-RO-30 lines match the code | `website/src/content/docs/**` (hand-written pages), `.claude/artifacts/adr_unified_launcher.md`, this plan's § Run 2 — component contracts | 9 | R1I | | merged |
 
 ```mermaid
 graph TD

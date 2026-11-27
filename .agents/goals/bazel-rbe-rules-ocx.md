@@ -155,6 +155,13 @@ Recorded decisions, second run:
   class: input character set, reachability not confirmed. Location: `scripts/ocx_under_test.sh`, the memo file;
   class: trust in a file under a shared temporary directory, local hosts only. The DONE block reports them in
   full.
+- **Correction to the two cleaned-home entries above (2026-11-27).** Pipeline R2A measured the refusal with an
+  acceptance test: a deferred launcher whose manifest blob is missing exits 79 with `error.detail`
+  `package_not_found`, names the pinned digest, gives no remedy text, and downloads nothing. The entries above
+  said exit 81 with an `ocx install <id>` remedy; that was read from the code and never run. The binary is
+  unchanged; the page and the doc comment now state what it does. `ocx clean` keeps the manifests a deferred
+  tree reads, proven red and green by the new test. A tree an older release prepared has no such link until the
+  next render rewrites it; that gap is reported in the DONE block.
 
 ## Loop shape
 
