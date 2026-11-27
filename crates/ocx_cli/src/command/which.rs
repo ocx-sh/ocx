@@ -122,9 +122,15 @@ async fn locate(
         None
     } else {
         let resolved = manager.resolve(package, platform).await?;
-        let shim = file_structure.shims.shim_dir(&resolved.pinned);
-        // `prepare_lazy` publishes the whole tree by one rename, so existence is completeness.
-        path_exists_lossy(shim.root()).await.then(|| shim.root().to_path_buf())
+        // No launcher blob for this host: no tree was ever published.
+        match ocx_store::launcher_generation::LauncherGeneration::host() {
+            Some(generation) => {
+                let shim = file_structure.deferred(&generation).shim_dir(&resolved.pinned);
+                // `prepare_lazy` publishes the whole tree by one rename, so existence is completeness.
+                path_exists_lossy(shim.root()).await.then(|| shim.root().to_path_buf())
+            }
+            None => None,
+        }
     };
 
     located_directory(mode, package_root, shim_root).ok_or(PackageErrorKind::NotFound)

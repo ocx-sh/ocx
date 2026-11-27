@@ -187,6 +187,7 @@ impl Exec {
         // Resolved once for record and launch, or the audit trail could misname the binary. An
         // unprovided name is 65 here, never an ambient `PATH` lookup.
         let resolved = process_env.resolve_command(command)?;
+        let deferred_root = context.file_structure().deferred_root();
         let launch = Launch::recording(
             process_env,
             RecordInputs {
@@ -194,7 +195,7 @@ impl Exec {
                 admitted: &admitted,
                 executable: &resolved,
                 store_root: context.file_structure().packages.root(),
-                shim_root: context.file_structure().shims.root(),
+                shim_root: &deferred_root,
                 argv: &self.command,
                 config: context.recorded_config(),
                 insecure_registries: context.insecure_hosts(),

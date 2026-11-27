@@ -337,6 +337,7 @@ impl ToolchainExec {
                     "credential helper `{command}` is not installed; install it with `ocx pull` using other credentials (`OCX_AUTH_*`)"
                 ))),
             })?;
+        let deferred_root = context.file_structure().deferred_root();
         let launch = Launch::recording(
             process_env,
             RecordInputs {
@@ -344,7 +345,7 @@ impl ToolchainExec {
                 admitted: &admitted,
                 executable: &executable,
                 store_root: context.file_structure().packages.root(),
-                shim_root: context.file_structure().shims.root(),
+                shim_root: &deferred_root,
                 argv: &self.argv,
                 config: context.recorded_config(),
                 insecure_registries: context.insecure_hosts(),

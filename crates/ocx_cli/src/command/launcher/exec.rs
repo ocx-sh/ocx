@@ -264,6 +264,7 @@ async fn run_with_env(
         return Err(anyhow::Error::from(launch::exec(launch).await));
     }
 
+    let deferred_root = context.file_structure().deferred_root();
     let launch = Launch::recording(
         process_env,
         RecordInputs {
@@ -271,7 +272,7 @@ async fn run_with_env(
             admitted,
             executable: &executable,
             store_root: context.file_structure().packages.root(),
-            shim_root: context.file_structure().shims.root(),
+            shim_root: &deferred_root,
             argv,
             config: context.recorded_config(),
             insecure_registries: context.insecure_hosts(),

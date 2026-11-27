@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Shim-directory generation, the producer half of lazy package loading.
+//! Deferred-tree generation, the producer half of lazy package loading.
 //!
 //! Never touches `pull.rs`'s `setup_owned_impl`, or a materialized tool stops being byte-identical to an eager one.
 
@@ -10,12 +10,14 @@ use std::path::Path;
 
 use crate::error::PackageErrorKind;
 use ocx_package::metadata::BinaryName;
-use ocx_store::file_structure::{FileStructure, ShimDir};
+use ocx_store::file_structure::{FileStructure, LockedScratch, ShimDir};
+use ocx_util::fs::{Published, Retired, publish_dir, retire_dir};
 
 use super::super::PackageManager;
 use super::common::ClosureNode;
 use super::lazy_advisory::{LazyAdvisory, classify_lazy_advisories};
 use super::toolchain_names::{NotEnumerablePolicy, exposed_names};
+use crate::launcher::{host_generation, names_complete};
 
 /// Everything one [`PackageManager::prepare_lazy`] call produced.
 #[derive(Debug)]
@@ -27,14 +29,15 @@ pub struct PreparedLazy {
 }
 
 impl PackageManager {
-    /// Publishes a deferred tool's shim directory without downloading content; idempotent under concurrency.
+    /// Publishes a deferred tool's launcher tree under `deferred/<G>/` without downloading content; idempotent under
+    /// concurrency.
     ///
     /// # Errors
     ///
     /// - [`PackageErrorKind::ShimNamesNotEnumerable`] — a closure node claims neither `binaries` nor entry points.
     /// - [`PackageErrorKind::ShimNameInvalid`] — an entry point name is not a valid [`BinaryName`] (e.g. `nul`).
     /// - [`PackageErrorKind::NotFound`] — unknown tag or digest, or closure metadata unavailable.
-    /// - [`PackageErrorKind::Internal`] — offline policy block, staging or publication I/O failure.
+    /// - [`PackageErrorKind::Internal`] — offline policy block, a host without a launcher blob, staging or publication I/O failure.
     pub async fn prepare_lazy(
         &self,
         package: &ocx_oci::PackageRef,
@@ -60,36 +63,19 @@ impl PackageManager {
         )
         .await?;
 
-        let destination = fs.shims.shim_dir(&resolved.pinned);
-
-        // Probed here, or every warm `ocx env` stages and discards a full tree.
-        if ocx_util::fs::path_exists_lossy(&destination.bin()).await {
-            log::debug!("Reusing published shim dir {}", destination.root().display());
-            return Ok(PreparedLazy {
-                shim: destination,
-                closure: nodes,
-                advisories: classify_lazy_advisories(&resolved.pinned, &metadata),
-            });
-        }
-
-        // `bin/` is the completeness marker, so it is written last or a refusal leaves a tree that reads complete.
-        let staged = stage_shim_dir(fs).await?;
-        let staged_dir = ShimDir {
-            dir: staged.path().to_path_buf(),
-            marker: "bin",
-        };
-        ocx_store::file_structure::write_digest_file(&staged_dir.digest_file(), &resolved.pinned.digest())
-            .await
-            .map_err(|error| PackageErrorKind::Internal(error.into()))?;
-        link_closure_config_blobs(fs, &staged_dir, &nodes).await?;
-
         // `Refuse`: a deferred tool has no fallback for an unenumerable node.
         let names = exposed_names(&nodes, NotEnumerablePolicy::Refuse)?;
         // A claimed `ocx` is admitted; `activation.rs`'s `is_ocx_trampoline` closes the self-resolution hazard.
         let names: BTreeSet<BinaryName> = names.into_keys().collect();
-        write_shim_launchers(&staged_dir.bin(), &resolved.pinned, &names).await?;
 
-        publish_shim_dir(&staged_dir, &destination).await?;
+        let generation = host_generation().ok_or_else(|| {
+            PackageErrorKind::Internal(crate::error::file_error(
+                fs.deferred_root(),
+                std::io::Error::other("no launcher blob for this host"),
+            ))
+        })?;
+        let destination = fs.deferred(generation).shim_dir(&resolved.pinned);
+        ensure_tree(fs, &destination, &resolved.pinned, &nodes, &names).await?;
 
         Ok(PreparedLazy {
             shim: destination,
@@ -99,30 +85,98 @@ impl PackageManager {
     }
 }
 
-/// Creates a fresh, unique staging directory under `temp/`, discarded on drop.
-///
-/// Not `TempStore::path`'s identifier-keyed one: that is shared and locked, and publication here is lock-free.
-///
-/// # Errors
-///
-/// Returns an error if the temp root or the staging directory cannot be created.
-async fn stage_shim_dir(file_structure: &FileStructure) -> Result<tempfile::TempDir, PackageErrorKind> {
-    let root = file_structure.temp.root().to_path_buf();
-    tokio::fs::create_dir_all(&root)
-        .await
-        .map_err(|e| PackageErrorKind::Internal(crate::error::file_error(&root, e)))?;
-    tokio::task::spawn_blocking({
-        let root = root.clone();
-        move || tempfile::TempDir::new_in(&root)
-    })
-    .await
-    .map_err(|join_error| {
-        PackageErrorKind::Internal(crate::error::file_error(&root, std::io::Error::other(join_error)))
-    })?
-    .map_err(|e| PackageErrorKind::Internal(crate::error::file_error(&root, e)))
+fn internal(path: &Path, error: std::io::Error) -> PackageErrorKind {
+    PackageErrorKind::Internal(crate::error::file_error(path, error))
 }
 
-/// Writes one launcher per name into the staged tree's `bin_dir`, all recording the pinned `package`.
+/// Leaves a complete tree at `destination`: a complete one is kept (probed here, or every warm `ocx env` stages and
+/// discards a full tree), an incomplete one is retired and rebuilt.
+async fn ensure_tree(
+    fs: &FileStructure,
+    destination: &ShimDir,
+    package: &ocx_oci::PinnedPackageRef,
+    nodes: &[ClosureNode],
+    names: &BTreeSet<BinaryName>,
+) -> Result<(), PackageErrorKind> {
+    if tree_complete(destination, names).await {
+        log::debug!("Reusing published deferred tree {}", destination.root().display());
+        return Ok(());
+    }
+    // Retired, never edited: a published tree is only ever replaced whole.
+    if tokio::fs::symlink_metadata(destination.root()).await.is_ok() {
+        log::warn!(
+            "Replacing the incomplete deferred tree '{}'",
+            destination.root().display()
+        );
+        match retire_dir(destination.root()).await {
+            Ok(Retired::Removed | Retired::LeftForLater) => {}
+            Err(error) => return Err(internal(destination.root(), error)),
+        }
+    }
+    let staged = stage_tree(fs, destination.marker, package, nodes, names).await?;
+    publish_staged(&staged, destination, names).await
+}
+
+async fn tree_complete(tree: &ShimDir, names: &BTreeSet<BinaryName>) -> bool {
+    names_complete(&tree.bin(), names.iter().map(BinaryName::as_str)).await
+}
+
+/// Builds the tree in a locked scratch directory that `ocx clean` skips until the returned guard drops: `digest`,
+/// `refs/blobs/`, then the launchers last, so a refusal part-way never leaves a tree that reads complete.
+async fn stage_tree(
+    fs: &FileStructure,
+    marker: &'static str,
+    package: &ocx_oci::PinnedPackageRef,
+    nodes: &[ClosureNode],
+    names: &BTreeSet<BinaryName>,
+) -> Result<LockedScratch, PackageErrorKind> {
+    let scratch = fs
+        .temp
+        .scratch("deferred")
+        .await
+        .map_err(|error| internal(fs.temp.root(), std::io::Error::other(error)))?;
+    let staged = ShimDir {
+        dir: scratch.path().to_path_buf(),
+        marker,
+    };
+    ocx_store::file_structure::write_digest_file(&staged.digest_file(), &package.digest())
+        .await
+        .map_err(|error| PackageErrorKind::Internal(error.into()))?;
+    link_closure_config_blobs(fs, &staged, nodes).await?;
+    write_shim_launchers(&staged.bin(), package, names).await?;
+    Ok(scratch)
+}
+
+/// The commit point: one rename of the staged tree onto `destination`. A racer that won must have published a
+/// complete tree.
+async fn publish_staged(
+    staged: &LockedScratch,
+    destination: &ShimDir,
+    names: &BTreeSet<BinaryName>,
+) -> Result<(), PackageErrorKind> {
+    // Parents are not publications: only the tree itself is renamed in.
+    if let Some(parent) = destination.root().parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|error| internal(parent, error))?;
+    }
+    let published = publish_dir(staged.path(), destination.root())
+        .await
+        .map_err(|error| internal(destination.root(), error))?;
+    if published == Published::AlreadyThere && !tree_complete(destination, names).await {
+        return Err(internal(
+            destination.root(),
+            std::io::Error::other("another process published an incomplete deferred tree"),
+        ));
+    }
+    log::debug!(
+        "Published deferred tree {} ({published:?})",
+        destination.root().display()
+    );
+    Ok(())
+}
+
+/// Writes one launcher per name into the staged tree's launcher directory `bin_dir`, all recording the pinned `package`.
 ///
 /// Not `launcher::generate`: it takes `&Entrypoints`, and names like `c++` are not valid entry point names.
 ///
@@ -177,57 +231,10 @@ async fn link_closure_config_blobs(
     Ok(())
 }
 
-/// Publishes `staged` to `destination` by atomic rename, lock-free, converging when a concurrent call won.
-///
-/// # Errors
-///
-/// Returns an error if creating the parent fails, or the rename fails with the destination still absent.
-async fn publish_shim_dir(staged: &ShimDir, destination: &ShimDir) -> Result<(), PackageErrorKind> {
-    let marker = destination.bin();
-
-    // Without this probe a lost race burns the Windows rename retry's whole backoff (same ERROR_ACCESS_DENIED).
-    if ocx_util::fs::path_exists_lossy(&marker).await {
-        discard_staged_tree(staged, "already published").await;
-        return Ok(());
-    }
-
-    if let Some(parent) = destination.root().parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|e| PackageErrorKind::Internal(crate::error::file_error(parent, e)))?;
-    }
-
-    // Never `move_dir`: it `remove_dir_all`s the destination, deleting a live tree under a concurrent exec.
-    match ocx_util::fs::rename_with_windows_retry(staged.root(), destination.root()).await {
-        Ok(()) => {
-            log::debug!("Published shim dir {}", destination.root().display());
-            Ok(())
-        }
-        // The winner's tree is byte-identical (same digest, closure and bodies), so converge.
-        Err(_) if ocx_util::fs::path_exists_lossy(&marker).await => {
-            discard_staged_tree(staged, "lost the publish race").await;
-            Ok(())
-        }
-        // Whatever blocked the rename is not a published tree, and not this call's to remove.
-        Err(e) => Err(PackageErrorKind::Internal(crate::Error::InternalFile(
-            staged.root().to_path_buf(),
-            e,
-        ))),
-    }
-}
-
-/// Removes an already-published staged tree; a failure is only logged, or it fails a call that succeeded.
-async fn discard_staged_tree(staged: &ShimDir, reason: &str) {
-    log::debug!("Discarding staged shim tree ({reason}): {}", staged.root().display());
-    if let Err(e) = tokio::fs::remove_dir_all(staged.root()).await {
-        log::debug!("Could not remove staged shim tree {}: {e}", staged.root().display());
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
 
     use super::*;
     use ocx_package::metadata::Binaries;
@@ -279,33 +286,6 @@ mod tests {
             dir: path,
             marker: "bin",
         }
-    }
-
-    /// Stages a shim tree at `dir` whose `bin/` holds one file named `marker`,
-    /// so a publish assertion can tell one tree from another.
-    fn stage_tree(dir: &Path, marker: &str) -> ShimDir {
-        let staged = shim_dir_at(dir.to_path_buf());
-        std::fs::create_dir_all(staged.bin()).expect("stage bin/");
-        std::fs::write(staged.bin().join(marker), b"launcher").expect("stage marker");
-        staged
-    }
-
-    /// Every path under `root`, so a "nothing else was created" assertion can
-    /// name what it found.
-    fn walk_paths(root: &Path) -> Vec<PathBuf> {
-        let mut found = Vec::new();
-        let mut stack = vec![root.to_path_buf()];
-        while let Some(dir) = stack.pop() {
-            let Ok(entries) = std::fs::read_dir(&dir) else { continue };
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    stack.push(path.clone());
-                }
-                found.push(path);
-            }
-        }
-        found
     }
 
     // ── the generated launchers ──────────────────────────────
@@ -460,97 +440,142 @@ mod tests {
         }
     }
 
-    // ── lock-free, all-or-nothing publication ────────────────────────
+    // ── all-or-nothing publication under `deferred/<G>/` ────────────────────────────
 
-    /// Steps (2) and (3): create the destination's parent, then rename
-    /// onto an absent destination. And the lock-free clause: nothing resembling
-    /// a lock file is left behind — `publish_shim_dir` has no locks root to
-    /// write one into, so any lock it took would be a sidecar.
-    #[tokio::test]
-    async fn publish_shim_dir_renames_a_staged_tree_onto_an_absent_destination() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let staged = stage_tree(&tempdir.path().join("staged"), "cmake");
-        let destination = shim_dir_at(tempdir.path().join("shims/example.com/ns/cmake/sha256/aa/bb"));
-
-        publish_shim_dir(&staged, &destination)
-            .await
-            .expect("an absent destination is published to");
-
-        assert!(
-            destination.bin().join("cmake").is_file(),
-            "the staged tree must land whole at the destination"
-        );
-        assert!(
-            !staged.root().exists(),
-            "the staged tree must no longer be at its temp path"
-        );
-
-        let litter: Vec<_> = walk_paths(tempdir.path())
-            .into_iter()
-            .filter(|p| {
-                p.file_name()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.contains(".lock") || n == "locks")
-            })
-            .collect();
-        assert!(litter.is_empty(), "publication takes no lock, found: {litter:?}");
+    fn generation() -> Option<ocx_store::launcher_generation::LauncherGeneration> {
+        ocx_store::launcher_generation::LauncherGeneration::host()
     }
 
-    /// Step (1): a destination whose completeness marker is already
-    /// present means a concurrent call won. Converge — return `Ok`, discard the
-    /// temp, and leave the winner's tree **byte-for-byte as it was**. The last
-    /// assertion is the one that would have caught `move_dir`, which
-    /// `remove_dir_all`s its destination.
-    #[tokio::test]
-    async fn publish_shim_dir_leaves_a_published_destination_untouched() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let staged = stage_tree(&tempdir.path().join("staged"), "loser");
-        let destination = stage_tree(&tempdir.path().join("published"), "winner");
-
-        publish_shim_dir(&staged, &destination)
-            .await
-            .expect("a lost race converges rather than failing");
-
-        assert!(
-            destination.bin().join("winner").is_file(),
-            "the winner's tree must survive intact"
-        );
-        assert!(
-            !destination.bin().join("loser").exists(),
-            "the loser's tree must not overwrite the winner's"
-        );
-        assert!(!staged.root().exists(), "the losing temp tree must be discarded");
+    fn names_of(names: &[&str]) -> BTreeSet<BinaryName> {
+        names.iter().map(|n| BinaryName::try_from(*n).unwrap()).collect()
     }
 
-    /// Step (4), the absent half: the marker is still absent after a
-    /// failed rename, so the error propagates — and the destination that
-    /// blocked the rename is left alone. `move_dir` would instead
-    /// `remove_dir_all` it and report success, deleting data this call never
-    /// published.
+    /// Removes what `ocx clean` removes from `temp/`: every entry `stale_entries` offers.
+    fn sweep_temp(fs: &FileStructure) {
+        for entry in fs.temp.stale_entries().expect("temp listing") {
+            let dir = match entry {
+                ocx_store::file_structure::StaleEntry::Locked(acquired) => acquired.dir.dir.clone(),
+                ocx_store::file_structure::StaleEntry::Orphan(dir) => dir,
+            };
+            std::fs::remove_dir_all(dir).expect("sweep removes a stale entry");
+        }
+    }
+
+    /// V-L26: a tree being staged survives the sweep `ocx clean` runs over `temp/`, and the publish then lands at
+    /// `deferred/<G>/<reg>/<repo>/<alg>/<2>/<30>/` with `digest`, `refs/blobs/` and `l/`; nothing is written to `shims/`.
     #[tokio::test]
-    async fn publish_shim_dir_never_deletes_a_destination_it_could_not_rename_onto() {
+    async fn a_deferred_tree_being_staged_survives_the_temp_sweep_and_publishes_under_deferred() {
+        let Some(generation) = generation() else { return };
         let tempdir = tempfile::tempdir().unwrap();
-        let staged = stage_tree(&tempdir.path().join("staged"), "cmake");
+        let fs = FileStructure::with_root(tempdir.path().to_path_buf());
+        let package = pinned("ns/cmake", "a");
+        let nodes = vec![node_with_config_digest(package.clone(), digest_from("1"), true)];
+        let names = names_of(&["cmake"]);
+        let destination = fs.deferred(&generation).shim_dir(&package);
 
-        // A destination that exists and is non-empty but carries no `bin/`:
-        // the pre-check reads "absent", the rename then fails on a non-empty
-        // directory, and the re-check still reads "absent".
-        let destination = shim_dir_at(tempdir.path().join("half-built"));
-        std::fs::create_dir_all(destination.root()).unwrap();
-        std::fs::write(destination.root().join("digest"), b"sha256:...").unwrap();
-
-        let error = publish_shim_dir(&staged, &destination)
+        let staged = stage_tree(&fs, destination.marker, &package, &nodes, &names)
             .await
-            .expect_err("a rename failure with the marker still absent propagates");
+            .expect("staging");
+        sweep_temp(&fs);
+        assert!(
+            staged.path().join("l").join("cmake.launch").is_file(),
+            "ocx clean must not delete a tree that is being staged"
+        );
 
+        publish_staged(&staged, &destination, &names).await.expect("publish");
+
+        let tree = fs
+            .root()
+            .join("deferred")
+            .join(generation.as_str())
+            .join("example.com")
+            .join("ns")
+            .join("cmake")
+            .join("sha256")
+            .join("aa")
+            .join("a".repeat(30));
+        assert_eq!(destination.root(), tree);
+        assert!(tree.join("l").join("cmake.launch").is_file());
+        assert!(tree.join("digest").is_file());
+        assert!(tree.join("refs").join("blobs").is_dir());
+        assert!(!fs.root().join("shims").exists(), "nothing is written under shims/");
+    }
+
+    /// A tree missing a record is retired and rebuilt; a complete one is returned as it is.
+    #[tokio::test]
+    async fn ensure_tree_rebuilds_an_incomplete_tree_and_keeps_a_complete_one() {
+        let Some(generation) = generation() else { return };
+        let tempdir = tempfile::tempdir().unwrap();
+        let fs = FileStructure::with_root(tempdir.path().to_path_buf());
+        let package = pinned("ns/cmake", "a");
+        let nodes = vec![node_with_config_digest(package.clone(), digest_from("1"), true)];
+        let names = names_of(&["cmake"]);
+        let destination = fs.deferred(&generation).shim_dir(&package);
+        std::fs::create_dir_all(destination.bin()).unwrap();
+        std::fs::write(destination.bin().join("stale"), b"x").unwrap();
+
+        ensure_tree(&fs, &destination, &package, &nodes, &names)
+            .await
+            .expect("rebuild");
+        assert!(destination.bin().join("cmake.launch").is_file());
         assert!(
-            matches!(error, PackageErrorKind::Internal(_)),
-            "expected an I/O failure, got {error:?}"
+            !destination.bin().join("stale").exists(),
+            "the incomplete tree was replaced whole"
         );
+
+        std::fs::write(destination.bin().join("keep"), b"x").unwrap();
+        ensure_tree(&fs, &destination, &package, &nodes, &names)
+            .await
+            .expect("reuse");
         assert!(
-            destination.root().join("digest").is_file(),
-            "a destination this call did not publish must not be removed"
+            destination.bin().join("keep").is_file(),
+            "a complete tree is not touched"
         );
+    }
+
+    /// A tree another process published incomplete is an error, never converged on.
+    #[tokio::test]
+    async fn publish_staged_refuses_an_incomplete_winner() {
+        let Some(generation) = generation() else { return };
+        let tempdir = tempfile::tempdir().unwrap();
+        let fs = FileStructure::with_root(tempdir.path().to_path_buf());
+        let package = pinned("ns/cmake", "a");
+        let names = names_of(&["cmake"]);
+        let destination = fs.deferred(&generation).shim_dir(&package);
+        std::fs::create_dir_all(destination.bin()).unwrap();
+        std::fs::write(destination.bin().join("other"), b"x").unwrap();
+        let staged = stage_tree(&fs, destination.marker, &package, &[], &names)
+            .await
+            .unwrap();
+
+        let error = publish_staged(&staged, &destination, &names)
+            .await
+            .expect_err("an incomplete winner is refused");
+
+        assert!(matches!(error, PackageErrorKind::Internal(_)), "{error:?}");
+        assert!(
+            destination.bin().join("other").is_file(),
+            "the destination is left alone"
+        );
+    }
+
+    /// Golden: the exact bytes of a deferred record, and the launcher's own decoder reads them back as deferred.
+    #[test]
+    fn the_deferred_record_is_the_exact_compact_form_and_decodes_as_deferred() {
+        let package = ocx_oci::PinnedPackageRef::try_from(
+            ocx_oci::PackageRef::new_registry("ns/cmake", "example.com")
+                .clone_with_digest(ocx_oci::Digest::Sha256("ab".repeat(32))),
+        )
+        .unwrap();
+        let bytes = crate::launcher::deferred_record(&package).unwrap().encode();
+
+        let expected = format!(
+            "{{\"kind\":\"deferred\",\"schema_version\":1,\"identifier\":\"example.com/ns/cmake@sha256:{}\"}}\n",
+            "ab".repeat(32)
+        );
+        assert_eq!(String::from_utf8(bytes.clone()).unwrap(), expected);
+        let decoded = ocx_env_apply::launch::LaunchRecord::decode(&bytes, false).expect("the launcher accepts it");
+        assert_eq!(decoded.kind(), ocx_env_apply::launch::LaunchKind::Deferred);
     }
 
     // ── advisories have a return channel ───────────────────────

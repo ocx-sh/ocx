@@ -14,13 +14,16 @@ use ocx_project::lazy::LazyReport;
 use super::super::PackageManager;
 
 impl PackageManager {
-    /// The interface names a deferred tool's shim directory claims: one `<name>.launch` record per name under `bin/`.
+    /// The interface names a deferred tool's tree claims: one `<name>.launch` record per name under `deferred/<G>/…/l/`.
     ///
     /// # Errors
     ///
     /// Propagates an I/O failure reading `bin/`; a non-UTF-8 or non-[`BinaryName`] file name is skipped.
     pub async fn claimed_shim_names(&self, package: &ocx_oci::PinnedPackageRef) -> crate::Result<BTreeSet<BinaryName>> {
-        let bin = self.file_structure().shims.shim_dir(package).bin();
+        let Some(generation) = crate::launcher::host_generation() else {
+            return Ok(BTreeSet::new());
+        };
+        let bin = self.file_structure().deferred(generation).shim_dir(package).bin();
         let mut entries = match tokio::fs::read_dir(&bin).await {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -205,7 +208,10 @@ mod tests {
         let manager = manager_for(&file_structure);
         let package = pinned(&ocx_oci::Algorithm::Sha256.hash(b"content"));
 
-        let bin = file_structure.shims.shim_dir(&package).bin();
+        let Some(generation) = crate::launcher::host_generation() else {
+            return;
+        };
+        let bin = file_structure.deferred(generation).shim_dir(&package).bin();
         tokio::fs::create_dir_all(&bin).await.unwrap();
         for file in [
             "cmake",

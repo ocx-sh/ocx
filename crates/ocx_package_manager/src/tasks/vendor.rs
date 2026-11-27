@@ -2385,6 +2385,7 @@ mod tests {
             .file_structure()
             .shims
             .shim_dir(&selection.closures.roots[0].pinned);
+        let generation = ocx_store::launcher_generation::LauncherGeneration::host().expect("host launcher blob");
         // Each store directory the digest lane names becomes the vendored one `VendorLayout` names.
         let swaps: Vec<(String, String)> = selection
             .closures
@@ -2395,7 +2396,10 @@ mod tests {
                 let key = &selection.keys[&node.identifier.digest()];
                 [
                     (store.join("content"), VendorLayout::relative_content_dir(key)),
-                    (store.join("entrypoints"), VendorLayout::relative_entrypoint_dir(key)),
+                    (
+                        store.join("launchers").join(generation.as_str()),
+                        VendorLayout::relative_entrypoint_dir(key),
+                    ),
                 ]
             })
             .map(|(store, vendored)| (store.to_string_lossy().into_owned(), format!("{DIR_TOKEN}/{vendored}")))

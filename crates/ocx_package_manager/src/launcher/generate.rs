@@ -15,7 +15,9 @@ use super::direct::write_direct_launcher_for;
 use super::safety::LauncherSafeString;
 use crate::tasks::toolchain_names::is_record_name;
 use crate::tasks::vendor::VendorError;
-use ocx_env_apply::launch::{DirectRecord, LaunchKind, LaunchRecord, PackageRecord, RECORD_EXTENSION, SCHEMA_VERSION};
+use ocx_env_apply::launch::{
+    DirectRecord, LaunchKind, LaunchRecord, PackageRecord, RECORD_EXTENSION, SCHEMA_VERSION, is_fully_qualified,
+};
 
 /// Writes the launchers of a package's entry points into `dest`, each recording `pkg_root`; empty `entries` does not
 /// create `dest`. `pkg_root` is the package's final directory, not the temp one it is written beside.
@@ -23,7 +25,8 @@ use ocx_env_apply::launch::{DirectRecord, LaunchKind, LaunchRecord, PackageRecor
 /// # Errors
 ///
 /// A failed write, a host without a launcher blob, or a `pkg_root` that is not UTF-8 or holds a
-/// [`LauncherSafeString`]-unsafe character.
+/// [`LauncherSafeString`]-unsafe character, or one the target's launcher would refuse to read (a Windows target needs a
+/// drive or UNC root).
 pub async fn generate(pkg_root: &Path, entries: &Entrypoints, dest: &Path) -> Result<(), crate::Error> {
     if entries.is_empty() {
         return Ok(());
@@ -45,6 +48,19 @@ pub(super) async fn generate_for(
 
     // Not `to_string_lossy`: its U+FFFD passes `LauncherSafeString` and records a root that names nothing.
     let package_root = LauncherSafeString::new(utf8_baked_path(pkg_root)?)?;
+    // The launcher exits 78 on a root without a drive letter on Windows; a record it cannot read is never written.
+    if !is_fully_qualified(package_root.as_str(), windows) {
+        return Err(crate::error::file_error(
+            dest,
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "package root '{}' is not fully qualified for the launcher target",
+                    package_root.as_str()
+                ),
+            ),
+        ));
+    }
     let record = LaunchRecord::Package(PackageRecord {
         kind: LaunchKind::Package,
         schema_version: SCHEMA_VERSION,
@@ -83,14 +99,18 @@ fn fault_before(index: usize) -> bool {
 /// Whether `dir` is a complete launcher directory for `entries`: a real directory (`lstat`, no link) holding, per
 /// name that gets a launcher, `NAME[.exe]` and `NAME.launch` as regular files.
 pub(crate) async fn launchers_complete(dir: &Path, entries: &Entrypoints) -> bool {
+    names_complete(dir, entries.iter().map(|(name, _entry)| name.as_str())).await
+}
+
+/// [`launchers_complete`] for any set of claimed names.
+pub(crate) async fn names_complete<'a>(dir: &Path, names: impl IntoIterator<Item = &'a str>) -> bool {
     async fn is_file(path: PathBuf) -> bool {
         tokio::fs::symlink_metadata(path).await.is_ok_and(|m| m.is_file())
     }
     if !tokio::fs::symlink_metadata(dir).await.is_ok_and(|m| m.is_dir()) {
         return false;
     }
-    for (name, _entry) in entries.iter().filter(|(name, _)| !is_record_name(name.as_str())) {
-        let name = name.as_str();
+    for name in names.into_iter().filter(|name| !is_record_name(name)) {
         let launcher = if cfg!(windows) {
             format!("{name}.exe")
         } else {
@@ -104,7 +124,7 @@ pub(crate) async fn launchers_complete(dir: &Path, entries: &Entrypoints) -> boo
 }
 
 /// The launcher generation of this host, hashed once; `None` on a host with no launcher blob.
-fn host_generation() -> Option<&'static LauncherGeneration> {
+pub(crate) fn host_generation() -> Option<&'static LauncherGeneration> {
     static HOST: std::sync::OnceLock<Option<LauncherGeneration>> = std::sync::OnceLock::new();
     HOST.get_or_init(LauncherGeneration::host).as_ref()
 }
@@ -642,7 +662,7 @@ mod tests {
         let dest = tmp.path().join("pkg").join("launchers");
 
         super::generate_for(
-            &tmp.path().join("pkg"),
+            std::path::Path::new("C:/ocx/pkg"),
             &entries_for(&["cmake", "ctest"]),
             &dest,
             host_blob(),
@@ -656,6 +676,26 @@ mod tests {
             ["cmake.exe", "cmake.launch", "ctest.exe", "ctest.launch"],
             "no extensionless script, no `.shim`, no `.cmd`"
         );
+    }
+
+    /// A Windows target refuses a package root without a drive letter, which the launcher would exit 78 on, and
+    /// writes nothing.
+    #[tokio::test]
+    async fn a_windows_target_refuses_a_package_root_without_a_drive() {
+        let tmp = tempdir().unwrap();
+        let dest = tmp.path().join("pkg").join("launchers");
+
+        let result = super::generate_for(
+            std::path::Path::new("/no/drive"),
+            &entries_for(&["cmake"]),
+            &dest,
+            host_blob(),
+            true,
+        )
+        .await;
+
+        assert!(result.is_err(), "a driveless root on a Windows target is refused");
+        assert!(!dest.exists(), "no directory, no file");
     }
 
     /// A non-Windows target lists exactly `NAME` and `NAME.launch` per name.

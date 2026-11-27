@@ -22,7 +22,8 @@ pub use generate::{binary_pin_value, generate, generate_direct};
 /// absent because only [`body::exec_sidecar_body`] spells that literal.
 pub(crate) use body::{TrampolineTarget, exec_sidecar_body, unix_trampoline_body};
 pub(crate) use generate::{
-    EntryPointDir, entry_point_dir, first_use, host_launcher_blob, trampoline_ocx_binary, write_launcher,
+    EntryPointDir, entry_point_dir, first_use, host_generation, host_launcher_blob, names_complete,
+    trampoline_ocx_binary, write_launcher,
 };
 
 use ocx_env_apply::launch::{DeferredRecord, LaunchKind, LaunchRecord, SCHEMA_VERSION};
