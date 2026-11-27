@@ -48,7 +48,7 @@ pub struct Env {
     ///
     /// `always` composes a package as a generated shim: its declared names
     /// reach `PATH` immediately and its content downloads on first use. The
-    /// shim directory sits *below* the package's own `entrypoints/` and `bin/`
+    /// shim directory sits *below* the package's own `launchers/` and `bin/`
     /// in the composed `PATH`, so the same exported environment stops routing
     /// through it once the first invocation has materialized the package.
     ///

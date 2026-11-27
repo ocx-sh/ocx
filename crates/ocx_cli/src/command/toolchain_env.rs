@@ -85,7 +85,7 @@ pub struct ToolchainEnv {
     ///
     /// `always` composes a tool as a generated shim: its declared names reach
     /// `PATH` immediately and its content downloads on first use. The shim
-    /// directory sits *below* the tool's own `entrypoints/` and `bin/` in the
+    /// directory sits *below* the tool's own `launchers/` and `bin/` in the
     /// composed `PATH`, so the same exported environment stops routing through
     /// it once the first invocation has materialized the package. Combined with
     /// `--no-pull`, a tool whose metadata is not already local is reported on

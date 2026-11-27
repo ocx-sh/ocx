@@ -12,7 +12,7 @@ use serde::Serialize;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum PathKind {
-    /// The package root: the parent of `content/` and `entrypoints/`.
+    /// The package root: the parent of `content/` and `launchers/`.
     Package,
     /// The generated shim directory of a deferred tool. Its `bin/` holds one
     /// launcher per declared name; the package directory does not exist yet.

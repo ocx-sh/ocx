@@ -355,7 +355,7 @@ pub enum Package {
     ///
     /// The package is deselected but not uninstalled: its candidate symlink and object-store
     /// content stay. Removing the `current` symlink also makes the package's entry-point launchers
-    /// unreachable through `current/entrypoints/`.
+    /// unreachable through `current/launchers/`.
     ///
     /// Removing an already-absent link is not an error. Use `ocx package uninstall` to remove the
     /// installed files too.
@@ -513,7 +513,7 @@ pub enum Package {
         Resolve installed packages and print their package-root (or, with \
         `--candidate`/`--current`, install-symlink) paths.\n\n\
         Operates on OCI identifiers and never consults `ocx.toml`. The package root holds \
-        `content/` (installed files), `entrypoints/` (generated launchers) and per-package files \
+        `content/` (installed files), `launchers/<generation>/` (generated launchers) and per-package files \
         such as `metadata.json`.\n\n\
         By default the content-addressed package root is printed; `--candidate`, `--current` and \
         `--link` print the stable install symlink instead, which targets the same root.\n\n\

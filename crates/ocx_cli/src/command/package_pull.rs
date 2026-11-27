@@ -15,8 +15,8 @@ use crate::{api, conventions, options};
 /// matters and symlink management is unnecessary.
 ///
 /// Reports the package root directory for each package — the parent of
-/// `content/` and `entrypoints/`. Traverse into `<root>/content/` for the
-/// installed files or `<root>/entrypoints/` for generated launchers.
+/// `content/` and `launchers/`. Traverse into `<root>/content/` for the
+/// installed files or `<root>/launchers/<generation>/` for generated launchers.
 #[derive(Parser, Clone)]
 pub struct PackagePull {
     #[clap(flatten)]

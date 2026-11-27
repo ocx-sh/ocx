@@ -68,7 +68,7 @@ pub struct Exec {
     /// `always` composes a package as a generated shim: its declared names
     /// reach the child's `PATH` immediately and its content downloads the first
     /// time one of them runs. The shim directory sits *below* the package's own
-    /// `entrypoints/` and `bin/`, so a second invocation of the same name
+    /// `launchers/` and `bin/`, so a second invocation of the same name
     /// inside the same child resolves to the materialized binary directly.
     ///
     /// Only this flag and `OCX_LAZY_MODE` apply here: the `ocx.toml` tiers
