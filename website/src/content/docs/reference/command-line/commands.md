@@ -80,6 +80,8 @@ With `--format json`, each item carries `kind`, `dry_run`, `path` and `held_by`.
 
 The rendered project toolchain under `<home>/toolchain/` is derived state that `ocx pull` rewrites from `ocx.lock`; `clean` never walks or collects from it. Every run also removes the consent stamp of any project whose directory no longer exists, and `--dry-run` lists those stamps without removing them.
 
+It also removes the launcher directories other ocx builds wrote, a package's `launchers/<generation>/` and a superseded `shells/default-<hash>/`; this build's generation and the render directories in use stay, and `--dry-run` lists what it would remove.
+
 Do not run `clean` while other OCX commands are running: a concurrent install may reference an object that `clean` is about to remove.
 
 ```text
@@ -295,7 +297,7 @@ The command is transactional: either every binding resolves and the file is rewr
 
 When no binding's resolved content changed, `generated_at` is preserved so diffs stay minimal. After a successful write it prints a one-line stderr advisory when `.gitattributes` does not declare `ocx.lock merge=union`.
 
-Re-renders the project toolchain into `<project>/.ocx/toolchain/`, or under the `toolchain_dir` root when one is configured. The `links/<group>/<entry>` tree and the `shells/default/bin` launchers reached through the `active` link match the lock just written.
+Re-renders the project toolchain into `<project>/.ocx/toolchain/`, or under the `toolchain_dir` root when one is configured. The `links/<group>/<entry>` tree and the launchers in the `shells/default-<hash>/bin` directory the `active` link names match the lock just written.
 
 That directory carries its own `.gitignore`, so `git status` stays clean.
 
@@ -356,7 +358,7 @@ Pre-warm the object store, then render the project toolchain.
 
 Fetches the digest-pinned `ocx.lock` entries of the selected groups into the local object store: the default group without `-g`, every group with `-g all`. Naming bindings narrows the pull to those entries.
 
-Then it renders the project toolchain into `<project>/.ocx/toolchain/`, or under the `toolchain_dir` root when one is configured. That is one link per `links/<group>/<entry>`, plus the `shells/default/bin` launchers for the default group, reached through the `active` link.
+Then it renders the project toolchain into `<project>/.ocx/toolchain/`, or under the `toolchain_dir` root when one is configured. That is one link per `links/<group>/<entry>`, plus the launchers for the default group in the `shells/default-<hash>/bin` directory the `active` link names.
 
 That directory carries its own `.gitignore`, so `git status` stays clean.
 
@@ -395,7 +397,7 @@ When one name appears in more than one group (for example in `[tools]` and `[gro
 
 Drops each binding from `ocx.lock` as well. Then it re-renders the project toolchain into `<project>/.ocx/toolchain/`, or under the `toolchain_dir` root when one is configured.
 
-The removed tools leave the `links/<group>/<entry>` tree and the `shells/default/bin` launchers reached through the `active` link. That directory carries its own `.gitignore`, so `git status` stays clean.
+The removed tools leave the `links/<group>/<entry>` tree and the launchers in the `shells/default-<hash>/bin` directory the `active` link names. That directory carries its own `.gitignore`, so `git status` stays clean.
 
 Only the reference is removed; `ocx clean`, or `--purge` right away, deletes a package nothing else references.
 
@@ -459,7 +461,7 @@ Because it holds both the old lock and the new one, it reports what moved. A tab
 
 Those that held still are summarized behind a hint line unless `--verbose` lists them too. Unlike `ocx lock`, which re-resolves only the bindings whose `ocx.toml` entry changed, `ocx update` consults the registry every time.
 
-Re-renders the project toolchain into `<project>/.ocx/toolchain/`, or under the `toolchain_dir` root when one is configured. The `links/<group>/<entry>` tree and the `shells/default/bin` launchers reached through the `active` link follow the advanced lock.
+Re-renders the project toolchain into `<project>/.ocx/toolchain/`, or under the `toolchain_dir` root when one is configured. The `links/<group>/<entry>` tree and the launchers in the `shells/default-<hash>/bin` directory the `active` link names follow the advanced lock.
 
 That directory carries its own `.gitignore`, so `git status` stays clean.
 

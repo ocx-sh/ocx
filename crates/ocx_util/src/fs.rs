@@ -138,14 +138,6 @@ pub fn persist_temp_file(tmp: tempfile::NamedTempFile, target: &std::path::Path)
     persist_with_retry(tmp, |tmp| persist_at(tmp, target, Replace::Existing))
 }
 
-/// [`persist_temp_file`], except an existing `target` is left alone and reported as `AlreadyExists`. Blocking.
-///
-/// For a destination whose file identity matters: a replacing racer orphans what hardlinks the winner's file.
-/// For ocx-owned paths only; a file the user owns takes [`replace_user_file`].
-pub fn persist_temp_file_if_absent(tmp: tempfile::NamedTempFile, target: &std::path::Path) -> std::io::Result<()> {
-    persist_with_retry(tmp, |tmp| persist_at(tmp, target, Replace::Never))
-}
-
 /// Outcome of a no-clobber publish attempt — see [`persist_temp_file_noclobber`].
 #[derive(Debug)]
 #[must_use]

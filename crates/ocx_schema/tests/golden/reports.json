@@ -979,13 +979,13 @@
           "items": {
             "$ref": "#/$defs/CleanEntry"
           },
-          "description": "One entry per resource: objects, then temp directories, then consent stamps."
+          "description": "One entry per resource: objects, then temp directories, then consent stamps, then launcher directories."
         }
       },
       "required": [
         "items"
       ],
-      "description": "Objects, temp directories and consent stamps a clean removed, or would remove in a dry run."
+      "description": "Objects, temp directories, consent stamps and launcher directories a clean removed, or would remove in a dry run."
     },
     "CleanEntry": {
       "type": "object",
@@ -1033,6 +1033,10 @@
         {
           "value": "consent",
           "description": "A `state/projects/<key>/` directory whose consent stamp was swept."
+        },
+        {
+          "value": "launchers",
+          "description": "A superseded launcher generation directory."
         }
       ]
     },
@@ -2377,7 +2381,7 @@
         },
         "entrypoints": {
           "$ref": "#/$defs/Entrypoints",
-          "description": "Named entrypoints that `ocx install` generates launchers for.\n\nEach entry produces a Unix `.sh` script and, on Windows, a native\n`.exe` shim plus its `.shim` sidecar under the package's\n`entrypoints/` sibling directory at install time.\nAbsent or empty means no launchers are generated."
+          "description": "Named entrypoints that `ocx install` generates launchers for.\n\nEach entry produces a launcher `NAME` (`NAME.exe` on Windows) and its\n`NAME.launch` record under the package's `launchers/<generation>/`\ndirectory at install time.\nAbsent or empty means no launchers are generated."
         },
         "binaries": {
           "description": "Publisher-declared, unverified claim of interface-surface executable\nnames exposed on `PATH` by this package. Absent means undeclared\n(predates this field); `[]` means the publisher asserts zero interface\nbinaries. Deliberately distinct wire states.",
@@ -4238,7 +4242,7 @@
       "x-ocx-enum": [
         {
           "value": "package",
-          "description": "The package root: the parent of `content/` and `entrypoints/`."
+          "description": "The package root: the parent of `content/` and `launchers/`."
         },
         {
           "value": "shim",
@@ -4298,7 +4302,7 @@
         "package",
         "status"
       ],
-      "description": "A single dry-run preview row.\n\n`path` is the package root directory (parent of `content/` and\n`entrypoints/`) for `cached` rows and absent for `would_fetch` rows, where\nnothing has been materialised yet."
+      "description": "A single dry-run preview row.\n\n`path` is the package root directory (parent of `content/` and\n`launchers/`) for `cached` rows and absent for `would_fetch` rows, where\nnothing has been materialised yet."
     },
     "PullStatus": {
       "description": "Whether a locked tool is already in the object store or would be\nfetched on a real `ocx pull`.",
@@ -8461,14 +8465,14 @@
           "items": {
             "$ref": "#/$defs/CleanEntry"
           },
-          "description": "One entry per resource: objects, then temp directories, then consent stamps."
+          "description": "One entry per resource: objects, then temp directories, then consent stamps, then launcher directories."
         }
       },
       "required": [
         "schema_version",
         "items"
       ],
-      "description": "Objects, temp directories and consent stamps a clean removed, or would remove in a dry run."
+      "description": "Objects, temp directories, consent stamps and launcher directories a clean removed, or would remove in a dry run."
     },
     "ConfigSetupDataRoot": {
       "type": "object",

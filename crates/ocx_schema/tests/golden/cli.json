@@ -15944,6 +15944,16 @@
       "on_invalid": "default"
     },
     {
+      "name": "__OCX_LAUNCHER_DEPTH",
+      "value": "integer",
+      "visibility": "plumbing",
+      "summary": " How many launchers have started one another in this process chain; a launcher refuses past the limit.",
+      "secret": false,
+      "accepts_reference": false,
+      "propagation": "user_input",
+      "on_invalid": "default"
+    },
+    {
       "name": "CI",
       "value": "bool",
       "visibility": "foreign",

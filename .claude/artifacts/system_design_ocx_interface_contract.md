@@ -383,7 +383,7 @@ Lint codes (`L`, `C`) and differ codes (`B`, `R`, `G`, `U`, `D`) are disjoint na
 
 `ocx_sdkgen::compat::diff(base: &Value, current: &Value, kind: Kind) -> Vec<Finding>`; test `tests/compat_gate.rs` (phase 2). Comparison is structural: `$ref`s are resolved, `$def` names are not contract (buf `WIRE_JSON`); recursion enters `items` and `additionalProperties` with the same rules. Every keyword is classified by the § 3.7 allowlist; an unlisted keyword in either document is `U01`, breaking. The differ also counts keywords read against an independent raw count and reds below it. Excluded: the `schema_version` property and `$id` (the version step owns them), and each unknown-variant arm's `not.enum` list, which the differ derives from the known arms and skips (else a variant addition reads as an enum change inside `not`, and a removal reports twice).
 
-**Roots and commands, three algorithms.** *Surviving* (in both): structural diff, findings attributed to every root that reaches the pointer. *Added*: no structural diff; must be lint-clean and at version 1. *Removed*: one finding `B01`/`G01` naming it; needs a ledger entry; no version check. `$defs` reachable from no root are ignored (no wire).
+**Roots and commands, three algorithms.** *Surviving* (in both): structural diff, findings attributed to every root that reaches the pointer. *Added*: no structural diff; must be lint-clean and at version 1, or at 2 when a ledger entry lists it. *Removed*: one finding `B01`/`G01` naming it; needs a ledger entry; no version check. `$defs` reachable from no root are ignored (no wire).
 
 | Code | Breaking (output documents) | Code | Breaking (`cli.json`, input direction) |
 |---|---|---|---|

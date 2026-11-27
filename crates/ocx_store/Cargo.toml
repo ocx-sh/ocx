@@ -7,11 +7,6 @@ license.workspace = true
 publish = false
 
 [features]
-# Internal-only escape hatch, the project's one seam convention
-# (`subsystem-tests.md` "Test-Only Seams"). Gates no seam in this crate itself;
-# it forwards `ocx_env`'s, which declares the `__OCX_TESTING_*` seams.
-__testing = ["ocx_env/__testing"]
-
 # The seams `ocx_lib`'s own tests drive across the crate boundary, which a bare
 # `#[cfg(test)]` cannot reach. Deliberately NOT forwarded by `ocx`'s
 # `__testing`, so it never reaches the acceptance binary: `BlobStore`'s write

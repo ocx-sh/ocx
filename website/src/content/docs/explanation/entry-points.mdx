@@ -176,6 +176,8 @@ The launcher's pre-child exit codes are stable and scriptable:
 
 | Code | Meaning | Operator action |
 |------|---------|-----------------|
+| `64` | An argument is not valid Unicode, or cannot reach a batch-file program safely (a line break); the stderr line names the argument by position, never its text | Remove the line break from the argument, or pass the value to the program another way |
+| `69` | The `ocx` the launcher resolved is no longer at its path when `CreateProcessW` starts it | Fix [`OCX_BINARY_PIN`][env-ocx-binary-pin] or reinstall `ocx`; the stderr line names the path |
 | `74` | `CreateProcessW` failed, with the Win32 error code on the stderr line | Inspect the reported Win32 code; usually a corrupt binary or a transient OS condition. Retry, then re-run `ocx package install` |
 | `77` | Permission denied (`ERROR_ACCESS_DENIED`) starting the child, or the package root in the record resolves outside the OCX home | For access denied, check execution policy / AppLocker / antivirus blocking the launcher and grant execute on the package root. For a root outside the OCX home, re-run [`ocx package install`][cmd-install] |
 | `78` | No `ocx` found, a relative or batch-file `OCX_BINARY_PIN`, a missing or unreadable `<name>.launch`, or a launcher loop | Put `ocx` on `$PATH` or fix [`OCX_BINARY_PIN`][env-ocx-binary-pin]. A launcher found beside only an older sidecar names `<name>.launch` and needs a new launcher directory |
