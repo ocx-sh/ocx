@@ -12,6 +12,7 @@ use futures::future::join_all;
 use tokio::task::JoinSet;
 
 use crate::{error::DependencyError, error::PackageErrorKind};
+use ocx_oci::Digest;
 use ocx_package::{
     install_info::DeferredComposition, install_info::InstallInfo, metadata, metadata::binary::Binaries,
     metadata::binary::BinaryName, metadata::dependency::DependencyName, metadata::entrypoint::EntrypointName,
@@ -23,8 +24,9 @@ use ocx_package::{
 };
 use ocx_project::{ProjectConfig, ProjectLock, ladder::Ladder, lazy::LazyMode, lazy::LazyModeLadder};
 use ocx_store::{
-    file_structure::FileStructure, file_structure::PackageDir, file_structure::PackageStore,
-    file_structure::RenderStampScope, file_structure::ShimDir, file_structure::ToolchainHome,
+    file_structure::FileStructure, file_structure::PackageDir, file_structure::PackageKey,
+    file_structure::PackageStore, file_structure::RenderStampScope, file_structure::ShimDir,
+    file_structure::ToolchainHome, file_structure::VendorLayout,
 };
 
 use super::tasks::common;
@@ -298,7 +300,7 @@ async fn compose_gated(
         let done_by_index = visible_entries.iter().map(|(_, _, done)| *done);
         for ((meta, dep_resolved, dep_id), done) in loaded.into_iter().flatten().zip(done_by_index) {
             // Digest lane: a dependency is not a lock entry, so no link names it.
-            let dep_pkg = paths.install_path_for(&store.package_dir(&dep_id), PathLane::Digest);
+            let dep_pkg = paths.install_path_for(&store.package_dir(&dep_id), &dep_id.digest(), PathLane::Digest)?;
             let dep_content = dep_pkg.content();
 
             if carrier_crosses_on(Binaries::IMPLICIT_VISIBILITY, false, axes)
@@ -314,12 +316,12 @@ async fn compose_gated(
             }
 
             // The dep's own direct deps, never the root's.
-            let dep_dep_contexts = build_dep_context_map(&meta, &dep_resolved, store, paths);
+            let dep_dep_contexts = build_dep_context_map(&meta, &dep_resolved, store, paths)?;
 
             if collect_integrations {
                 // `INTEGRATION_TOKENS`, not the default: a hostile registry skips the publish check, and `${self.env.*}` would leak a private value.
-                let resolver = metadata::template::TemplateResolver::new(&dep_content, &dep_dep_contexts)
-                    .usage(INTEGRATION_TOKENS);
+                let resolver =
+                    metadata::template::TemplateResolver::new(dep_content, &dep_dep_contexts).usage(INTEGRATION_TOKENS);
                 admitted_integrations.extend(
                     meta.integrations()
                         .resolve(&resolver)?
@@ -330,8 +332,8 @@ async fn compose_gated(
 
             emit_dep_path_block(
                 &meta,
-                &dep_pkg,
-                &dep_content,
+                dep_pkg.entrypoints(),
+                dep_content,
                 &dep_dep_contexts,
                 axes,
                 done,
@@ -369,16 +371,16 @@ async fn compose_gated(
             );
         }
 
-        let root_dep_contexts = build_dep_context_map(root.metadata(), root.resolved(), store, paths);
+        let root_dep_contexts = build_dep_context_map(root.metadata(), root.resolved(), store, paths)?;
 
         // Following lane: an explicit root is a lock entry, so a trusted link may name it.
-        let root_pkg = paths.install_path_for(root.dir(), PathLane::Following);
+        let root_pkg = paths.install_path_for(root.dir(), &root.identifier().digest(), PathLane::Following)?;
         let root_content = root_pkg.content();
 
         // An earlier reach on the interface axis already collected these.
         if collect_integrations && !done.has_interface() {
             let resolver =
-                metadata::template::TemplateResolver::new(&root_content, &root_dep_contexts).usage(INTEGRATION_TOKENS);
+                metadata::template::TemplateResolver::new(root_content, &root_dep_contexts).usage(INTEGRATION_TOKENS);
             admitted_integrations.extend(
                 root.metadata()
                     .integrations()
@@ -392,7 +394,7 @@ async fn compose_gated(
             log_vars_off_axes(root, axes);
             emit_package_vars(
                 root.metadata(),
-                &root_content,
+                root_content,
                 &root_dep_contexts,
                 |visibility| crosses_anew(visibility, axes, done),
                 content_state,
@@ -406,8 +408,8 @@ async fn compose_gated(
             }
             emit_root_path_block(
                 root.metadata(),
-                &root_pkg,
-                &root_content,
+                root_pkg.entrypoints(),
+                root_content,
                 &root_dep_contexts,
                 axes,
                 content_state,
@@ -484,7 +486,7 @@ fn build_dep_context_map(
     resolved: &ResolvedPackage,
     store: &PackageStore,
     paths: &ComposePaths,
-) -> HashMap<DependencyName, DependencyContext> {
+) -> crate::Result<HashMap<DependencyName, DependencyContext>> {
     let resolved_id_map: HashMap<ocx_oci::Repository, &ocx_oci::PinnedPackageRef> = resolved
         .dependencies
         .iter()
@@ -498,9 +500,10 @@ fn build_dep_context_map(
             let key = ocx_oci::Repository::from(d.identifier.as_identifier());
             let install_id = resolved_id_map.get(&key).copied().unwrap_or(&d.identifier);
             let install_path = paths
-                .install_path_for(&store.package_dir(install_id), PathLane::Digest)
-                .content();
-            (name, DependencyContext::path_only(install_id.clone(), install_path))
+                .install_path_for(&store.package_dir(install_id), &install_id.digest(), PathLane::Digest)?
+                .content()
+                .to_path_buf();
+            Ok((name, DependencyContext::path_only(install_id.clone(), install_path)))
         })
         .collect()
 }
@@ -566,7 +569,7 @@ fn emit_package_vars(
 )]
 fn emit_dep_path_block(
     dep_metadata: &metadata::Metadata,
-    dep_pkg: &PackageDir,
+    dep_entrypoints: &Path,
     dep_content: &Path,
     dep_dep_contexts: &HashMap<DependencyName, DependencyContext>,
     axes: Visibility,
@@ -588,7 +591,7 @@ fn emit_dep_path_block(
         && let Some(eps) = dep_metadata.entrypoints()
         && !eps.is_empty()
     {
-        entries.push(synth_entrypoints_path_for(dep_pkg));
+        entries.push(synth_entrypoints_path_for(dep_entrypoints));
     }
 
     Ok(())
@@ -598,7 +601,7 @@ fn emit_dep_path_block(
 /// [`emit_dep_path_block`].
 fn emit_root_path_block(
     root_metadata: &metadata::Metadata,
-    root_dir: &PackageDir,
+    root_entrypoints: &Path,
     root_content: &Path,
     root_dep_contexts: &HashMap<DependencyName, DependencyContext>,
     axes: Visibility,
@@ -619,7 +622,7 @@ fn emit_root_path_block(
         && let Some(eps) = root_metadata.entrypoints()
         && !eps.is_empty()
     {
-        entries.push(synth_entrypoints_path_for(root_dir));
+        entries.push(synth_entrypoints_path_for(root_entrypoints));
     }
 
     Ok(())
@@ -756,11 +759,11 @@ fn record_repo_identifier(
     seen.push(id.clone());
 }
 
-/// Construct the synthetic `PATH ⊳ <pkg_root>/entrypoints` entry for `pkg`.
-fn synth_entrypoints_path_for(pkg: &PackageDir) -> Entry {
+/// Construct the synthetic `PATH ⊳ <entrypoints dir>` entry for a package.
+fn synth_entrypoints_path_for(entrypoints: &Path) -> Entry {
     Entry {
         key: "PATH".to_string(),
-        value: pkg.entrypoints().to_string_lossy().into_owned(),
+        value: entrypoints.to_string_lossy().into_owned(),
         kind: ModifierKind::Path,
         separator: None,
     }
@@ -792,14 +795,37 @@ pub(crate) struct ComposePaths {
     vendor: Option<VendorLane>,
 }
 
-/// Where a vendor composition roots its paths.
+/// Where a vendor composition roots its paths, and the key each package of the run is named by.
 struct VendorLane {
     token_root: PathBuf,
+    keys: BTreeMap<Digest, PackageKey>,
 }
 
-/// Components of a package root kept under the token: `packages/<registry>/<algorithm>/<2 hex>/<30 hex>`.
-// The relative path `VendorLayout::relative_package_dir` names (design § 4.1), derived here so the composer needs no filesystem view.
-const VENDOR_PACKAGE_SUFFIX_COMPONENTS: usize = 5;
+/// The `content` and entry-point directories one package composes to.
+///
+/// Two paths rather than joins on a root, because the vendored names (`c`, `e`) are not the home's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct InstallPaths {
+    content: PathBuf,
+    entrypoints: PathBuf,
+}
+
+impl InstallPaths {
+    fn of(package: &PackageDir) -> Self {
+        Self {
+            content: package.content(),
+            entrypoints: package.entrypoints(),
+        }
+    }
+
+    pub(crate) fn content(&self) -> &Path {
+        &self.content
+    }
+
+    pub(crate) fn entrypoints(&self) -> &Path {
+        &self.entrypoints
+    }
+}
 
 /// The toolchain tree one composing invocation may follow, as the emitter resolved it.
 #[derive(Debug, Clone)]
@@ -829,12 +855,13 @@ impl ComposePaths {
         }
     }
 
-    /// Install paths rooted at `token_root` (the `@VENDOR_DIR@` token), touching no filesystem and no shim slot.
-    pub(crate) fn vendor(token_root: impl Into<PathBuf>) -> Self {
+    /// Install paths rooted at `token_root` (the `@VENDOR_DIR@` token) and named by `keys`, touching no filesystem and no shim slot.
+    pub(crate) fn vendor(token_root: impl Into<PathBuf>, keys: BTreeMap<Digest, PackageKey>) -> Self {
         Self {
             trusted: HashMap::new(),
             vendor: Some(VendorLane {
                 token_root: token_root.into(),
+                keys,
             }),
         }
     }
@@ -925,41 +952,48 @@ impl ComposePaths {
         Ok(Self { trusted, vendor: None })
     }
 
-    /// The install path one package composes to: its trusted link on the following lane, else its digest root.
-    pub(crate) fn install_path_for(&self, package: &PackageDir, lane: PathLane) -> PackageDir {
+    /// The install paths one package composes to: its trusted link on the following lane, else its digest root.
+    ///
+    /// `digest` names the package for the vendor lane and is ignored by the others.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::Error::InternalPathInvalid`] when a vendor composition has no key for `digest`: the keys are built
+    /// over the run's packages, so a miss is a defect and never answered with a digest path.
+    pub(crate) fn install_path_for(
+        &self,
+        package: &PackageDir,
+        digest: &Digest,
+        lane: PathLane,
+    ) -> crate::Result<InstallPaths> {
         // A vendor composition has no host paths, so no lane the caller names may reach one.
         let lane = if self.is_vendor() { PathLane::Vendor } else { lane };
         match lane {
-            PathLane::Digest => package.clone(),
-            PathLane::Vendor => self
-                .vendor
-                .as_ref()
-                .map_or_else(|| package.clone(), |vendor| vendor.package_dir(package)),
-            PathLane::Following => self
-                .trusted
-                .get(package.root())
-                .map_or_else(|| package.clone(), |link| PackageDir::with_root(link.clone())),
+            PathLane::Digest => Ok(InstallPaths::of(package)),
+            PathLane::Vendor => match &self.vendor {
+                Some(vendor) => vendor.install_paths(package, digest),
+                None => Ok(InstallPaths::of(package)),
+            },
+            PathLane::Following => Ok(self.trusted.get(package.root()).map_or_else(
+                || InstallPaths::of(package),
+                |link| InstallPaths::of(&PackageDir::with_root(link.clone())),
+            )),
         }
     }
 }
 
 impl VendorLane {
-    /// `<token root>/packages/…`, `/`-joined on every host because the manifest stores `/`.
-    fn package_dir(&self, package: &PackageDir) -> PackageDir {
-        let mut tail: Vec<String> = package
-            .root()
-            .components()
-            .rev()
-            .take(VENDOR_PACKAGE_SUFFIX_COMPONENTS)
-            .map(|component| component.as_os_str().to_string_lossy().into_owned())
-            .collect();
-        tail.reverse();
-        // The trailing `/` is the separator `content()` and `entrypoints` join on; without it a Windows host joins `\`.
-        PackageDir::with_root(PathBuf::from(format!(
-            "{}/{}/",
-            self.token_root.to_string_lossy(),
-            tail.join("/")
-        )))
+    /// `<token root>/p/<HEX16>/c` and `/e`, `/`-joined on every host because the manifest stores `/`.
+    fn install_paths(&self, package: &PackageDir, digest: &Digest) -> crate::Result<InstallPaths> {
+        let key = self
+            .keys
+            .get(digest)
+            .ok_or_else(|| crate::Error::InternalPathInvalid(package.root().to_path_buf()))?;
+        let token = self.token_root.to_string_lossy();
+        Ok(InstallPaths {
+            content: PathBuf::from(format!("{token}/{}", VendorLayout::relative_content_dir(key))),
+            entrypoints: PathBuf::from(format!("{token}/{}", VendorLayout::relative_entrypoint_dir(key))),
+        })
     }
 }
 
@@ -3686,7 +3720,7 @@ mod tests {
         let mut entries = Vec::new();
         emit_dep_path_block(
             &dep_metadata,
-            &dep_pkg,
+            &dep_pkg.entrypoints(),
             &dep_content,
             &dep_dep_contexts,
             surface_axes(false),
@@ -3767,7 +3801,7 @@ mod tests {
         let mut entries = Vec::new();
         emit_dep_path_block(
             &dep_metadata,
-            &dep_pkg,
+            &dep_pkg.entrypoints(),
             &dep_content,
             &dep_dep_contexts,
             surface_axes(false),
@@ -3847,7 +3881,7 @@ mod tests {
         let mut entries = Vec::new();
         emit_root_path_block(
             &root_metadata,
-            &root_dir,
+            &root_dir.entrypoints(),
             &root_content,
             &root_dep_contexts,
             surface_axes(false), // consumer surface (default exec)
@@ -3900,7 +3934,7 @@ mod tests {
         let mut entries = Vec::new();
         emit_root_path_block(
             &metadata,
-            &root_dir,
+            &root_dir.entrypoints(),
             &content,
             &std::collections::HashMap::new(),
             surface_axes(false),
@@ -3954,7 +3988,7 @@ mod tests {
         let mut entries = Vec::new();
         emit_root_path_block(
             &root_metadata,
-            &root_dir,
+            &root_dir.entrypoints(),
             &root_content,
             &root_dep_contexts,
             surface_axes(true), // --self surface
@@ -4448,7 +4482,7 @@ mod tests {
         let mut entries = Vec::new();
         emit_root_path_block(
             meta,
-            &root_dir,
+            &root_dir.entrypoints(),
             content,
             dep_contexts,
             surface_axes(self_view),
@@ -4468,7 +4502,7 @@ mod tests {
         let mut entries = Vec::new();
         emit_dep_path_block(
             meta,
-            &dep_pkg,
+            &dep_pkg.entrypoints(),
             content,
             &dep_contexts,
             surface_axes(self_view),
@@ -5790,7 +5824,7 @@ mod tests {
         emit_shim_slot(&root, surface_axes(false), &mut entries);
         emit_root_path_block(
             root.metadata(),
-            root.dir(),
+            &root.dir().entrypoints(),
             &root.dir().content(),
             &std::collections::HashMap::new(),
             surface_axes(false),
@@ -7195,8 +7229,15 @@ mod wp15_following_lane_spec_tests {
         /// What one package's install path composes to on the following lane.
         fn following(&self, paths: &ComposePaths, digest_root: &std::path::Path) -> PathBuf {
             paths
-                .install_path_for(&PackageDir::with_root(digest_root.to_path_buf()), PathLane::Following)
-                .root()
+                .install_path_for(
+                    &PackageDir::with_root(digest_root.to_path_buf()),
+                    &ocx_oci::Digest::Sha256("0".repeat(64)),
+                    PathLane::Following,
+                )
+                .expect("the following lane cannot fail")
+                .content()
+                .parent()
+                .expect("content sits under the package root")
                 .to_path_buf()
         }
     }
@@ -7965,9 +8006,14 @@ mod wp15_following_lane_spec_tests {
         );
         assert_eq!(
             paths
-                .install_path_for(&PackageDir::with_root(digest_root.clone()), PathLane::Digest)
-                .root(),
-            digest_root,
+                .install_path_for(
+                    &PackageDir::with_root(digest_root.clone()),
+                    &ocx_oci::Digest::Sha256("0".repeat(64)),
+                    PathLane::Digest,
+                )
+                .expect("the digest lane cannot fail")
+                .content(),
+            digest_root.join("content"),
             "RUL-78 — the digest lane never consults the map"
         );
     }
@@ -8137,36 +8183,63 @@ mod wp15_following_lane_spec_tests {
 #[cfg(test)]
 mod vendor_lane_tests {
     use super::{ComposePaths, PathLane};
-    use ocx_store::file_structure::PackageDir;
+    use ocx_oci::Digest;
+    use ocx_store::file_structure::{PackageDir, VendorLayout};
 
+    const HEX: &str = "1f2e3d4c5b6a79881f2e3d4c5b6a79881f2e3d4c5b6a79881f2e3d4c5b6a7988";
     const SHARD: &str = "packages/ocx.sh/sha256/1f/2e3d4c5b6a79881f2e3d4c5b6a7988";
+
+    fn digest() -> Digest {
+        Digest::Sha256(HEX.to_string())
+    }
+
+    fn vendor_paths(digests: &[Digest]) -> ComposePaths {
+        ComposePaths::vendor(
+            "@VENDOR_DIR@",
+            VendorLayout::package_keys(digests).expect("distinct keys"),
+        )
+    }
 
     /// The package need not exist: the vendor lane never touches the filesystem.
     #[test]
     fn vendor_lane_roots_install_paths_at_the_token() {
-        let paths = ComposePaths::vendor("@VENDOR_DIR@");
+        let paths = vendor_paths(&[digest()]);
         let package = PackageDir::with_root(std::path::PathBuf::from("/nonexistent/home").join(SHARD));
 
-        let installed = paths.install_path_for(&package, PathLane::Vendor);
+        let installed = paths
+            .install_path_for(&package, &digest(), PathLane::Vendor)
+            .expect("the digest has a key");
 
-        assert_eq!(
-            installed.root(),
-            std::path::Path::new("@VENDOR_DIR@").join(SHARD).as_path()
-        );
+        assert!(installed.content().starts_with("@VENDOR_DIR@/p/1f2e3d4c5b6a7988"));
     }
 
-    /// The manifest stores `/` paths, so the content directory is `/`-joined on every host, Windows included.
+    /// The manifest stores `/` paths, so the content and entry-point directories are `/`-joined on every host, Windows included.
     #[test]
-    fn vendor_lane_content_dir_is_slash_joined() {
-        let paths = ComposePaths::vendor("@VENDOR_DIR@");
+    fn vendor_lane_content_and_entrypoint_dirs_are_slash_joined_vendor_names() {
+        let paths = vendor_paths(&[digest()]);
         let package = PackageDir::with_root(std::path::PathBuf::from("/nonexistent/home").join(SHARD));
 
-        let installed = paths.install_path_for(&package, PathLane::Vendor);
+        let installed = paths
+            .install_path_for(&package, &digest(), PathLane::Vendor)
+            .expect("the digest has a key");
 
         assert_eq!(
             installed.content().to_string_lossy(),
-            format!("@VENDOR_DIR@/{SHARD}/content")
+            "@VENDOR_DIR@/p/1f2e3d4c5b6a7988/c"
         );
+        assert_eq!(
+            installed.entrypoints().to_string_lossy(),
+            "@VENDOR_DIR@/p/1f2e3d4c5b6a7988/e"
+        );
+    }
+
+    /// A package the keys do not name is a programming error, never a digest path in a vendored value.
+    #[test]
+    fn vendor_lane_refuses_a_package_without_a_key() {
+        let paths = vendor_paths(&[]);
+        let package = PackageDir::with_root(std::path::PathBuf::from("/nonexistent/home").join(SHARD));
+
+        assert!(paths.install_path_for(&package, &digest(), PathLane::Vendor).is_err());
     }
 
     /// Existing lanes ignore the vendor constructor's token: the digest lane returns the package as given.
@@ -8174,8 +8247,11 @@ mod vendor_lane_tests {
     fn digest_lane_is_unchanged_beside_the_vendor_lane() {
         let package = PackageDir::with_root(std::path::PathBuf::from("/home").join(SHARD));
 
-        let installed = ComposePaths::digest_only().install_path_for(&package, PathLane::Digest);
+        let installed = ComposePaths::digest_only()
+            .install_path_for(&package, &digest(), PathLane::Digest)
+            .expect("the digest lane cannot fail");
 
-        assert_eq!(installed.root(), package.root());
+        assert_eq!(installed.content(), package.content());
+        assert_eq!(installed.entrypoints(), package.entrypoints());
     }
 }

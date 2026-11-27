@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use futures::{StreamExt, TryStreamExt};
 use ocx_env_apply::ApplyKind;
-use ocx_env_apply::launch::{DirectRecord, EnvRecord, LaunchKind, SCHEMA_VERSION as SIDECAR_VERSION};
+use ocx_env_apply::launch::{DirectRecord, EnvRecord, LaunchKind, RECORD_EXTENSION, SCHEMA_VERSION as SIDECAR_VERSION};
 use ocx_oci::{Digest, OperatingSystem, PackageRef, PinnedPackageRef, Platform};
 use ocx_package::install_info::InstallInfo;
 use ocx_package::metadata::Entrypoints;
@@ -22,14 +22,14 @@ use ocx_package::vendor::{
     vendor_id,
 };
 use ocx_project::{LockedTool, SelectedTool, ToolSource, resolve_selected_tools};
-use ocx_store::file_structure::{StagedTree, VendorLayout, normalise_written_file};
+use ocx_store::file_structure::{PackageKey, StagedTree, VendorLayout, normalise_written_file};
 use ocx_util::fs::{DirWalker, EmptyOrAbsentError, WalkDecision, ensure_empty_or_absent};
 
 use super::common::ClosureNode;
 use super::inspect::{InspectOptions, InspectResult};
 use super::pull::{SetupGroups, VendorTarget, setup_vendored};
-use super::resolve::EnvScope;
-use super::toolchain_names::{NotEnumerablePolicy, exposed_names, fold_case_insensitive};
+use super::resolve::{ChainRole, EnvScope};
+use super::toolchain_names::{NotEnumerablePolicy, exposed_names, fold_case_insensitive, is_record_name};
 use crate::PackageManager;
 use crate::error::{PackageError, PackageErrorKind};
 
@@ -141,6 +141,8 @@ impl PackageManager {
             write_content(self, &request, &selection, &mut manifest, staged.path()).await?;
             VendorContent::Present
         };
+        // After the last index read; `None` without `--index`.
+        manifest.index_lookups = self.index_lookups();
         let written_size = publish(&request.output, staged, &manifest).await?;
         Ok(VendorOutcome {
             manifest_path: VendorLayout::new(&request.output).manifest_file(),
@@ -178,6 +180,8 @@ async fn ensure_output_is_free(output: &Path) -> Result<(), VendorError> {
 #[derive(Debug)]
 struct Selection {
     closures: ClosureSet,
+    /// The vendored name of every package of the run, built once so every path writer agrees.
+    keys: BTreeMap<Digest, PackageKey>,
     /// The platforms on which every root has a leaf, computed before any leaf was chosen.
     available_platforms: Vec<String>,
 }
@@ -206,6 +210,8 @@ struct SelectedRoot {
     /// As the selection named it: a lock leaf, or the identifier on the command line.
     requested: PackageRef,
     pinned: PinnedPackageRef,
+    /// The image index the request resolved through; `None` when it named a platform manifest.
+    index_digest: Option<Digest>,
     /// Where this root's closure sits in [`ClosureSet::surface`].
     nodes: Range<usize>,
 }
@@ -252,8 +258,10 @@ async fn select(manager: &PackageManager, request: &VendorRequest) -> Result<Sel
     };
     let closures = read_closures(manager, picked, &request.platform).await?;
     verify_selection(manager, &closures).await?;
+    let keys = package_keys_of(&closures.surface)?;
     Ok(Selection {
         closures,
+        keys,
         available_platforms,
     })
 }
@@ -334,6 +342,7 @@ async fn read_closures(
     for (root, result) in picked.into_iter().zip(inspected) {
         let InspectResult::Resolved {
             pinned,
+            chain,
             closure: Some(closure),
             ..
         } = result
@@ -348,10 +357,16 @@ async fn read_closures(
         };
         let start = surface.len();
         surface.extend(closure.nodes);
+        let index_digest = chain
+            .chain
+            .first()
+            .filter(|blob| blob.role == ChainRole::Index)
+            .map(|blob| blob.identifier.digest());
         roots.push(SelectedRoot {
             binding: root.binding,
             requested: root.requested,
             pinned,
+            index_digest,
             nodes: start..surface.len(),
         });
     }
@@ -362,6 +377,8 @@ async fn read_closures(
 ///
 /// Sequential: a closure is a handful of packages and the first refusal must be the same one on every run.
 async fn verify_selection(manager: &PackageManager, closures: &ClosureSet) -> Result<(), VendorError> {
+    // `--index DIR` is a read-only input: a vendor run never grows it.
+    let manager = &manager.read_only_view();
     let mut verified: Vec<(PinnedPackageRef, bool)> = Vec::new();
     for root in &closures.roots {
         for node in closures.nodes(root) {
@@ -445,13 +462,25 @@ async fn build_manifest(
     let roots = compose_roots_of(manager, closures).await?;
     check_declared_values(&roots, closures)?;
     let forbidden = host_paths(manager, &request.output);
-    let selection_items = environment_items(manager, &roots, false, platform, &forbidden).await?;
+    let keys = &selection.keys;
+    let selection_items = environment_items(manager, &roots, false, platform, &forbidden, keys).await?;
 
     // Every package once, keyed by digest, which is also the order the manifest lists them in.
     let mut nodes: BTreeMap<String, &ClosureNode> = BTreeMap::new();
     for node in &closures.surface {
         nodes.entry(node.identifier.digest().to_string()).or_insert(node);
     }
+    // Only a root names the index that selected it; a dependency edge pins a platform manifest.
+    let index_digests: HashMap<String, String> = closures
+        .roots
+        .iter()
+        .filter_map(|root| {
+            Some((
+                root.pinned.digest().to_string(),
+                root.index_digest.as_ref()?.to_string(),
+            ))
+        })
+        .collect();
     let by_repository: HashMap<(&str, &str), &String> = nodes
         .iter()
         .map(|(digest, node)| ((node.identifier.registry(), node.identifier.repository()), digest))
@@ -460,9 +489,9 @@ async fn build_manifest(
     let mut packages = Vec::with_capacity(nodes.len());
     let mut entrypoint_environments = Vec::new();
     for (digest, node) in &nodes {
-        let layout_digest = node.identifier.digest();
-        let package_dir = VendorLayout::relative_package_dir(node.identifier.registry(), &layout_digest);
-        let content_dir = VendorLayout::relative_content_dir(node.identifier.registry(), &layout_digest);
+        let key = key_of(keys, &node.identifier.digest())?;
+        let package_dir = VendorLayout::relative_package_dir(key);
+        let content_dir = VendorLayout::relative_content_dir(key);
 
         let mut dependencies: Vec<String> = node
             .dependencies
@@ -485,17 +514,17 @@ async fn build_manifest(
         let mut entrypoints = Vec::with_capacity(names.len());
         if !names.is_empty() {
             let own = entrypoint_root(manager, &roots, node, platform).await?;
-            let items = environment_items(manager, std::slice::from_ref(&own), true, platform, &forbidden).await?;
+            let items =
+                environment_items(manager, std::slice::from_ref(&own), true, platform, &forbidden, keys).await?;
             for name in names {
-                let launcher_path = checked_path(
-                    format!("{package_dir}/entrypoints/{name}{}", exe_suffix(windows)),
-                    windows,
-                )?;
+                let launcher_path =
+                    checked_path(VendorLayout::relative_entrypoint_launcher(key, name, windows), windows)?;
+                let record_path = checked_path(VendorLayout::relative_entrypoint_record(key, name), windows)?;
                 let id = format!("entrypoint:{digest}:{name}");
                 entrypoints.push(EntryPoint {
                     name: name.to_owned(),
                     launcher_path,
-                    record_path: None,
+                    record_path: Some(record_path),
                     environment: id.clone(),
                 });
                 entrypoint_environments.push(Environment {
@@ -512,7 +541,7 @@ async fn build_manifest(
         packages.push(Package {
             identifier: node.identifier.to_string(),
             digest: digest.clone(),
-            index_digest: None,
+            index_digest: index_digests.get(digest).cloned(),
             package_dir,
             content_dir,
             dependencies,
@@ -524,7 +553,6 @@ async fn build_manifest(
     }
     entrypoint_environments.sort_by(|a, b| a.id.cmp(&b.id));
 
-    let launcher_dir = VendorLayout::relative_launcher_dir(SELECTION_ID);
     let mut exposed = exposed_names(&closures.surface, NotEnumerablePolicy::Skip).map_err(crate::Error::from)?;
     // Windows and macOS default to case-folding filesystems: two names differing by case would share one launcher file.
     if folds_case(platform) {
@@ -534,6 +562,7 @@ async fn build_manifest(
     let mut tools = Vec::with_capacity(exposed.len());
     for (name, owner) in &exposed {
         let name = name.as_str();
+        refuse_record_name(name)?;
         let owner_digest = owner.tool.digest().to_string();
         let package = packages
             .iter()
@@ -548,7 +577,7 @@ async fn build_manifest(
         let (kind, target_path) = if is_entrypoint {
             (
                 ToolKind::Entrypoint,
-                format!("{}/entrypoints/{name}{}", package.package_dir, exe_suffix(windows)),
+                VendorLayout::relative_entrypoint_launcher(key_of(keys, &owner.tool.digest())?, name, windows),
             )
         } else {
             let directory = metadata_of(&roots, &owner.tool)
@@ -560,6 +589,14 @@ async fn build_manifest(
                 format!("{}/{directory}{name}{}", package.content_dir, exe_suffix(windows)),
             )
         };
+        let (launcher_path, record_path) = if launchers {
+            (
+                Some(checked_path(VendorLayout::relative_launcher(name, windows), windows)?),
+                Some(checked_path(VendorLayout::relative_record(name), windows)?),
+            )
+        } else {
+            (None, None)
+        };
         tools.push(Tool {
             name: name.to_owned(),
             selection: SELECTION_ID.to_owned(),
@@ -567,10 +604,8 @@ async fn build_manifest(
             package: owner_digest,
             environment: SELECTION_ENVIRONMENT.to_owned(),
             target_path: checked_path(target_path, windows)?,
-            launcher_path: launchers
-                .then(|| checked_path(format!("{launcher_dir}/{name}{}", exe_suffix(windows)), windows))
-                .transpose()?,
-            record_path: None,
+            launcher_path,
+            record_path,
         });
     }
 
@@ -610,11 +645,21 @@ async fn build_manifest(
                 .map(|root| root.pinned.digest().to_string())
                 .collect(),
             environment: SELECTION_ENVIRONMENT.to_owned(),
-            launcher_dir,
+            launcher_dir: VendorLayout::relative_launcher_dir().to_owned(),
         }],
         tools,
         index_lookups: None,
     })
+}
+
+/// A name ending in `.launch` would be some launcher's record file; the same on every target.
+fn refuse_record_name(name: &str) -> Result<(), VendorError> {
+    if is_record_name(name) {
+        return Err(VendorError::PathUnrepresentable {
+            path: format!("{name} (a name ending in .{RECORD_EXTENSION} collides with a launcher record)"),
+        });
+    }
+    Ok(())
 }
 
 fn exe_suffix(windows: bool) -> &'static str {
@@ -754,6 +799,28 @@ fn host_paths(manager: &PackageManager, output: &Path) -> Vec<String> {
         .collect()
 }
 
+/// The vendored name of every package in `surface`.
+///
+/// # Errors
+///
+/// [`VendorError::PathUnrepresentable`] when two packages of the run share a name.
+fn package_keys_of(surface: &[ClosureNode]) -> Result<BTreeMap<Digest, PackageKey>, VendorError> {
+    let digests: Vec<Digest> = surface.iter().map(|node| node.identifier.digest()).collect();
+    VendorLayout::package_keys(&digests).map_err(|clash| VendorError::PathUnrepresentable {
+        path: format!(
+            "packages {} and {} share one vendored directory name",
+            clash.first, clash.second
+        ),
+    })
+}
+
+/// `digest`'s vendored name; every package of the surface has one.
+fn key_of<'a>(keys: &'a BTreeMap<Digest, PackageKey>, digest: &Digest) -> Result<&'a PackageKey, VendorError> {
+    keys.get(digest).ok_or_else(|| VendorError::PathUnrepresentable {
+        path: format!("package {digest} has no vendored directory name"),
+    })
+}
+
 /// The environment `roots` compose in the vendor lane (no patches, no caller entries), as manifest items.
 ///
 /// # Errors
@@ -765,9 +832,11 @@ async fn environment_items(
     self_view: bool,
     platform: &Platform,
     forbidden: &[String],
+    keys: &BTreeMap<Digest, PackageKey>,
 ) -> Result<Vec<EnvironmentItem>, VendorError> {
     let scope = EnvScope::Vendor {
         token_root: PathBuf::from(DIR_TOKEN),
+        keys: keys.clone(),
     };
     let entries = manager
         .resolve_env(roots, self_view, scope, platform)
@@ -929,8 +998,19 @@ async fn write_content(
         nodes.entry(node.identifier.digest().to_string()).or_insert(node);
     }
     let placed: Vec<PlacedPackage> = futures::stream::iter(nodes)
-        .map(|(digest, node)| place_package(manager, platform, &layout, groups.clone(), digest, node))
-        .buffer_unordered(PULL_CONCURRENCY)
+        .map(|(digest, node)| {
+            let key = key_of(&selection.keys, &node.identifier.digest())?;
+            Ok::<_, VendorError>(place_package(
+                manager,
+                platform,
+                &layout,
+                groups.clone(),
+                digest,
+                node,
+                key,
+            ))
+        })
+        .try_buffer_unordered(PULL_CONCURRENCY)
         .try_collect()
         .await?;
 
@@ -948,7 +1028,7 @@ async fn write_content(
         }
     }
     manifest.content = Content::Present;
-    ensure_binary_targets_exist(&layout, &manifest.tools).await?;
+    ensure_binary_targets_exist(&layout, &manifest.tools, &manifest.packages).await?;
 
     // No blob for the platform means no launcher and no sidecar; the manifest then lists no `launcher_path`.
     if let Some(blob) = ocx_store::shim::blob_for(platform) {
@@ -977,17 +1057,26 @@ async fn write_content(
 /// Refuses a binary whose manifest `target_path` is not a regular file of the staged tree.
 ///
 /// The path is derived from metadata alone, so `--manifest-only` and a full run emit the same one; this is
-/// where a full run proves it.
-async fn ensure_binary_targets_exist(layout: &VendorLayout, tools: &[Tool]) -> Result<(), VendorError> {
+/// where a full run proves it. The claim is the publisher's, so the message names the package that made it.
+async fn ensure_binary_targets_exist(
+    layout: &VendorLayout,
+    tools: &[Tool],
+    packages: &[Package],
+) -> Result<(), VendorError> {
     for tool in tools.iter().filter(|tool| tool.kind == ToolKind::Binary) {
         let is_file = tokio::fs::metadata(layout.resolve(&tool.target_path))
             .await
             .is_ok_and(|metadata| metadata.is_file());
         if !is_file {
+            let owner = packages
+                .iter()
+                .find(|package| package.digest == tool.package)
+                .map_or(tool.package.as_str(), |package| package.identifier.as_str());
             return Err(VendorError::PathUnrepresentable {
                 path: format!(
-                    "binary `{}` is expected at {}, which the package content does not hold as a file; \
-                     a package whose program is a batch file or lives outside its first PATH directory must expose it as an entry point",
+                    "{owner}: its `binaries` claim lists `{}`, a program the content does not hold (expected at {}); \
+                     the publisher must correct the claim, or expose a batch file or a program outside the first PATH \
+                     directory as an entry point",
                     tool.name, tool.target_path
                 ),
             });
@@ -1004,7 +1093,10 @@ async fn place_package(
     groups: SetupGroups,
     digest: String,
     node: &ClosureNode,
+    key: &PackageKey,
 ) -> Result<PlacedPackage, VendorError> {
+    // `--index DIR` is a read-only input: a vendor run never grows it.
+    let manager = &manager.read_only_view();
     let requested: PackageRef = node.identifier.clone().into();
     let pull_failed = |kind| {
         VendorError::Package(crate::Error::InstallFailed(vec![PackageError::new(
@@ -1017,12 +1109,11 @@ async fn place_package(
         .await
         .map_err(&pull_failed)?;
     let pinned = resolved.pinned.clone();
-    let target = VendorTarget::new(layout, &node.identifier);
+    let target = VendorTarget::new(layout, key);
     let info = setup_vendored(manager, &pinned, resolved, platform.clone(), groups, &target, None)
         .await
         .map_err(&pull_failed)?;
-    let content_dir = VendorLayout::relative_content_dir(node.identifier.registry(), &node.identifier.digest());
-    let tree = list_tree(layout, &content_dir, is_windows(platform)).await?;
+    let tree = list_tree(layout, &VendorLayout::relative_content_dir(key), is_windows(platform)).await?;
     Ok(PlacedPackage {
         digest,
         tree,
@@ -1030,7 +1121,7 @@ async fn place_package(
     })
 }
 
-/// Each package's own launchers under `<package_dir>/entrypoints/`, started with the package's private environment.
+/// Each package's own launchers under `<package_dir>/e/`, started with the package's private environment.
 async fn write_entrypoint_launchers(
     layout: &VendorLayout,
     manifest: &VendorManifest,
@@ -1092,7 +1183,15 @@ async fn write_entrypoint_launchers(
                 ),
             );
         }
-        let dir = layout.resolve(&format!("{}/entrypoints", package.package_dir));
+        // Every launcher of a package sits in one directory, so the first one's parent is it.
+        let dir = package
+            .entrypoints
+            .first()
+            .and_then(|entry| entry.launcher_path.rsplit_once('/'))
+            .map(|(directory, _)| layout.resolve(directory))
+            .ok_or_else(|| VendorError::PathUnrepresentable {
+                path: format!("package {} lists no entry-point launcher", package.digest),
+            })?;
         crate::launcher::generate_direct(entries, &dir, blob, windows, &|name| {
             sidecars
                 .get(name)
@@ -1113,43 +1212,41 @@ async fn write_selection_launchers(
     blob: &[u8],
     windows: bool,
 ) -> Result<(), VendorError> {
-    // `manifest.tools` is the folded `exposed_names` answer, grouped by selection for the shared writer.
-    let mut by_selection: BTreeMap<&str, Vec<&Tool>> = BTreeMap::new();
-    for tool in manifest.tools.iter().filter(|tool| tool.launcher_path.is_some()) {
-        by_selection.entry(&tool.selection).or_default().push(tool);
+    // `manifest.tools` is the folded `exposed_names` answer; v1 has one selection, so one `l/`.
+    let tools: Vec<&Tool> = manifest
+        .tools
+        .iter()
+        .filter(|tool| tool.launcher_path.is_some())
+        .collect();
+    let mut sidecars: HashMap<&str, DirectRecord> = HashMap::new();
+    for tool in &tools {
+        let Some(launcher_path) = &tool.launcher_path else {
+            continue;
+        };
+        let environment = environment_of(manifest, &tool.environment)?;
+        sidecars.insert(
+            &tool.name,
+            sidecar_of(
+                &manifest.vendor_id,
+                launcher_path,
+                windows,
+                format!("{DIR_TOKEN}/{}", tool.target_path),
+                Vec::new(),
+                &environment.items,
+            ),
+        );
     }
-    for (selection, tools) in by_selection {
-        let mut sidecars: HashMap<&str, DirectRecord> = HashMap::new();
-        for tool in &tools {
-            let Some(launcher_path) = &tool.launcher_path else {
-                continue;
-            };
-            let environment = environment_of(manifest, &tool.environment)?;
-            sidecars.insert(
-                &tool.name,
-                sidecar_of(
-                    &manifest.vendor_id,
-                    launcher_path,
-                    windows,
-                    format!("{DIR_TOKEN}/{}", tool.target_path),
-                    Vec::new(),
-                    &environment.items,
-                ),
-            );
-        }
-        let names: Vec<&str> = tools.iter().map(|tool| tool.name.as_str()).collect();
-        let dir = layout.resolve(&VendorLayout::relative_launcher_dir(selection));
-        super::render_toolchain::render_direct_bin(&dir, &names, blob, windows, &|name| {
-            sidecars
-                .get(name)
-                .cloned()
-                .ok_or_else(|| VendorError::ValueUnrepresentable {
-                    reason: format!("the manifest lists no launcher for tool '{name}'"),
-                })
-        })
-        .await?;
-    }
-    Ok(())
+    let names: Vec<&str> = tools.iter().map(|tool| tool.name.as_str()).collect();
+    let dir = layout.resolve(VendorLayout::relative_launcher_dir());
+    super::render_toolchain::render_direct_bin(&dir, &names, blob, windows, &|name| {
+        sidecars
+            .get(name)
+            .cloned()
+            .ok_or_else(|| VendorError::ValueUnrepresentable {
+                reason: format!("the manifest lists no launcher for tool '{name}'"),
+            })
+    })
+    .await
 }
 
 fn environment_of<'a>(manifest: &'a VendorManifest, id: &str) -> Result<&'a Environment, VendorError> {
@@ -1582,7 +1679,7 @@ mod tests {
         std::fs::write(layout.resolve("pkg/content/bin/present"), b"x").expect("file");
 
         let windows = binary_tool("pkg/content/bin/hello.exe", ToolKind::Binary);
-        let error = ensure_binary_targets_exist(&layout, &[windows])
+        let error = ensure_binary_targets_exist(&layout, &[windows], &[])
             .await
             .expect_err("only hello.cmd exists");
         assert!(matches!(error, VendorError::PathUnrepresentable { .. }), "{error:?}");
@@ -1595,12 +1692,12 @@ mod tests {
         );
 
         let unix = binary_tool("pkg/content/bin/hello", ToolKind::Binary);
-        assert!(ensure_binary_targets_exist(&layout, &[unix]).await.is_err());
+        assert!(ensure_binary_targets_exist(&layout, &[unix], &[]).await.is_err());
 
         let mut present = binary_tool("pkg/content/bin/present", ToolKind::Binary);
         present.name = "present".to_owned();
         let entrypoint = binary_tool("pkg/content/bin/hello.exe", ToolKind::Entrypoint);
-        ensure_binary_targets_exist(&layout, &[present, entrypoint])
+        ensure_binary_targets_exist(&layout, &[present, entrypoint], &[])
             .await
             .expect("control: a present file passes and an entry point is skipped");
     }
@@ -1616,11 +1713,11 @@ mod tests {
             .expect("the cmake binary");
         let (_dir, layout, _) = staged_tool(std::slice::from_ref(&binary.target_path)).await;
 
-        ensure_binary_targets_exist(&layout, &manifest.tools)
+        ensure_binary_targets_exist(&layout, &manifest.tools, &manifest.packages)
             .await
             .expect("a file at the manifest-only path passes");
         let (_dir, layout, _) = staged_tool(&[]).await;
-        let error = ensure_binary_targets_exist(&layout, &manifest.tools)
+        let error = ensure_binary_targets_exist(&layout, &manifest.tools, &manifest.packages)
             .await
             .expect_err("no file at that path");
         assert!(matches!(error, VendorError::PathUnrepresentable { .. }), "{error:?}");
@@ -1750,13 +1847,8 @@ mod tests {
         (source, digest)
     }
 
-    /// Registers the tag `tag` as an image index offering `platforms`; the first platform's leaf is real.
-    fn register_index(
-        source: FakeManifestSource,
-        tag: &str,
-        leaf: &Digest,
-        platforms: &[(&str, &str)],
-    ) -> FakeManifestSource {
+    /// The image index document offering `platforms`; the first platform's leaf is real.
+    fn index_document(leaf: &Digest, platforms: &[(&str, &str)]) -> String {
         let entries: Vec<String> = platforms
             .iter()
             .enumerate()
@@ -1767,11 +1859,20 @@ mod tests {
                 )
             })
             .collect();
-        let index = format!(
+        format!(
             r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{}]}}"#,
             entries.join(",")
-        );
-        source.with(tag, index.as_bytes())
+        )
+    }
+
+    /// Registers the tag `tag` as an image index offering `platforms`; the first platform's leaf is real.
+    fn register_index(
+        source: FakeManifestSource,
+        tag: &str,
+        leaf: &Digest,
+        platforms: &[(&str, &str)],
+    ) -> FakeManifestSource {
+        source.with(tag, index_document(leaf, platforms).as_bytes())
     }
 
     fn packages_request(packages: Vec<PackageRef>, platform: Platform) -> VendorRequest {
@@ -2193,6 +2294,11 @@ mod tests {
 
     /// A dependency with a `PATH` entry, and a root declaring a binary, an entry point and a constant, both public.
     fn registered_tool() -> (FakeManifestSource, Digest, Digest) {
+        registered_tool_on(("linux", "amd64"))
+    }
+
+    /// [`registered_tool`] with the index offering `platform`.
+    fn registered_tool_on(platform: (&str, &str)) -> (FakeManifestSource, Digest, Digest) {
         let (source, dependency) = register_leaf(FakeManifestSource::default(), serde_json::json!([]));
         let (source, root) = register_package(
             source,
@@ -2205,11 +2311,7 @@ mod tests {
                 ],
             }),
         );
-        (
-            register_index(source, "1.0", &root, &[("linux", "amd64")]),
-            dependency,
-            root,
-        )
+        (register_index(source, "1.0", &root, &[platform]), dependency, root)
     }
 
     async fn manifest_of(manager: &PackageManager, request: &VendorRequest) -> (Selection, VendorManifest) {
@@ -2218,6 +2320,45 @@ mod tests {
             .await
             .expect("the manifest builds");
         (selection, manifest)
+    }
+
+    fn closure_node(digest: &Digest) -> ClosureNode {
+        ClosureNode {
+            identifier: PinnedPackageRef::try_from(
+                PackageRef::new_registry(REGISTRY, "tool").clone_with_digest(digest.clone()),
+            )
+            .expect("pinned identifier"),
+            config_digest: digest.clone(),
+            effective_visibility: None,
+            binaries: None,
+            entrypoints: Vec::new(),
+            env: Vec::new(),
+            integrations: Vec::new(),
+            dependencies: Vec::new(),
+            is_root: true,
+        }
+    }
+
+    /// Two digests sharing their first 16 hex characters are refused as `vendor_path_unrepresentable`, naming both.
+    #[test]
+    fn two_packages_sharing_a_directory_name_are_unrepresentable_naming_both_digests() {
+        let first = Digest::Sha256(format!("{}{}", "ab".repeat(8), "0".repeat(48)));
+        let second = Digest::Sha256(format!("{}{}", "ab".repeat(8), "1".repeat(48)));
+
+        let error = package_keys_of(&[closure_node(&first), closure_node(&second)]).expect_err("a shared name");
+
+        let VendorError::PathUnrepresentable { path } = &error else {
+            panic!("{error:?}");
+        };
+        assert!(
+            path.contains(&first.to_string()) && path.contains(&second.to_string()),
+            "{path}"
+        );
+        assert_eq!(error.classify(), Some(ExitCode::DataError));
+    }
+
+    fn package_key(digest: &Digest) -> PackageKey {
+        VendorLayout::package_keys([digest]).expect("one key")[digest].clone()
     }
 
     fn items(manifest: &VendorManifest, id: &str) -> Vec<(String, String)> {
@@ -2244,20 +2385,39 @@ mod tests {
             .file_structure()
             .shims
             .shim_dir(&selection.closures.roots[0].pinned);
-        let home = manager.file_structure().root().to_str().expect("utf-8 home").to_owned();
+        // Each store directory the digest lane names becomes the vendored one `VendorLayout` names.
+        let swaps: Vec<(String, String)> = selection
+            .closures
+            .surface
+            .iter()
+            .flat_map(|node| {
+                let store = manager.file_structure().packages.path(&node.identifier);
+                let key = &selection.keys[&node.identifier.digest()];
+                [
+                    (store.join("content"), VendorLayout::relative_content_dir(key)),
+                    (store.join("entrypoints"), VendorLayout::relative_entrypoint_dir(key)),
+                ]
+            })
+            .map(|(store, vendored)| (store.to_string_lossy().into_owned(), format!("{DIR_TOKEN}/{vendored}")))
+            .collect();
         let expected: Vec<(String, String)> = manager
             .resolve_env(&roots, false, EnvScope::package_tier(), &linux_amd64())
             .await
             .expect("digest lane")
             .into_iter()
             .filter(|entry| entry.value != shim.bin().to_string_lossy())
-            // The digest lane spells host paths (`\` on Windows); the manifest stores `/` on every host.
-            .map(|entry| (entry.key, entry.value.replace(&home, DIR_TOKEN).replace('\\', "/")))
+            .map(|entry| {
+                let value = swaps
+                    .iter()
+                    .fold(entry.value, |value, (store, vendored)| value.replace(store, vendored));
+                // The digest lane spells host paths (`\` on Windows); the manifest stores `/` on every host.
+                (entry.key, value.replace('\\', "/"))
+            })
             .collect();
 
         let actual = items(&manifest, "selection:default");
         assert_eq!(actual, expected);
-        let package_dir = |digest: &Digest| VendorLayout::relative_content_dir(REGISTRY, digest);
+        let package_dir = |digest: &Digest| VendorLayout::relative_content_dir(&package_key(digest));
         assert_eq!(
             actual,
             [
@@ -2273,8 +2433,8 @@ mod tests {
                 (
                     "PATH".to_owned(),
                     format!(
-                        "{DIR_TOKEN}/{}/entrypoints",
-                        VendorLayout::relative_package_dir(REGISTRY, &root)
+                        "{DIR_TOKEN}/{}",
+                        VendorLayout::relative_entrypoint_dir(&package_key(&root))
                     )
                 ),
             ],
@@ -2320,9 +2480,16 @@ mod tests {
         );
         assert_eq!(tool.entrypoints.len(), 1);
         assert_eq!(tool.entrypoints[0].name, "hello");
+        let key = package_key(&Digest::try_from(root.as_str()).expect("digest"));
+        assert_eq!(tool.package_dir, VendorLayout::relative_package_dir(&key));
+        assert_eq!(tool.content_dir, VendorLayout::relative_content_dir(&key));
         assert_eq!(
             tool.entrypoints[0].launcher_path,
-            format!("{}/entrypoints/hello", tool.package_dir)
+            VendorLayout::relative_entrypoint_launcher(&key, "hello", false)
+        );
+        assert_eq!(
+            tool.entrypoints[0].launcher_path,
+            format!("{}/e/hello", tool.package_dir)
         );
         assert_eq!(tool.entrypoints[0].environment, format!("entrypoint:{root}:hello"));
 
@@ -2339,7 +2506,7 @@ mod tests {
             (selection.id.as_str(), selection.roots.as_slice()),
             ("default", [root.clone()].as_slice())
         );
-        assert_eq!(selection.launcher_dir, "selections/default/shells/default/bin");
+        assert_eq!(selection.launcher_dir, "l");
         assert!(selection.groups.is_empty() && selection.bindings.is_empty());
 
         let names: Vec<_> = manifest
@@ -2351,10 +2518,7 @@ mod tests {
         let cmake = &manifest.tools[0];
         assert_eq!(cmake.package, root);
         assert_eq!(cmake.target_path, format!("{}/bin/cmake", tool.content_dir));
-        assert_eq!(
-            cmake.launcher_path.as_deref(),
-            Some("selections/default/shells/default/bin/cmake")
-        );
+        assert_eq!(cmake.launcher_path.as_deref(), Some("l/cmake"));
         assert_eq!(manifest.tools[1].target_path, tool.entrypoints[0].launcher_path);
 
         assert_eq!(
@@ -2362,6 +2526,179 @@ mod tests {
             vendor_id("linux/amd64", &[dependency.as_str(), root.as_str()])
         );
         assert_eq!(manifest.available_platforms, ["linux/amd64"]);
+    }
+
+    /// A manifest lists the record beside every launcher, and only the root an index selected names that index.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_manifest_lists_record_paths_and_the_selecting_index() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (source, dependency, root) = registered_tool();
+        let manager = manager_over(dir.path(), source);
+        let request = packages_request(vec![package("tool", "1.0")], linux_amd64());
+        let (_, manifest) = manifest_of(&manager, &request).await;
+        let index = Algorithm::Sha256.hash(index_document(&root, &[("linux", "amd64")]).as_bytes());
+
+        let tool = manifest
+            .packages
+            .iter()
+            .find(|p| p.digest == root.to_string())
+            .expect("root");
+        let dep = manifest
+            .packages
+            .iter()
+            .find(|p| p.digest == dependency.to_string())
+            .expect("dependency");
+        assert_eq!(
+            tool.index_digest,
+            Some(index.to_string()),
+            "the root was resolved through an index"
+        );
+        assert_eq!(dep.index_digest, None, "a dependency never names an index");
+
+        let key = package_key(&root);
+        assert_eq!(
+            tool.entrypoints[0].record_path.as_deref(),
+            Some(VendorLayout::relative_entrypoint_record(&key, "hello").as_str())
+        );
+        assert_eq!(
+            tool.entrypoints[0].record_path.as_deref(),
+            Some(format!("{}/e/hello.launch", tool.package_dir).as_str())
+        );
+        let records: Vec<_> = manifest
+            .tools
+            .iter()
+            .map(|t| (t.name.as_str(), t.record_path.as_deref()))
+            .collect();
+        assert_eq!(
+            records,
+            [("cmake", Some("l/cmake.launch")), ("hello", Some("l/hello.launch"))]
+        );
+    }
+
+    /// A platform-manifest identifier skips the index, so no index digest exists to name.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_root_named_by_its_platform_manifest_has_no_index_digest() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (source, leaf) = register_leaf(FakeManifestSource::default(), serde_json::json!([]));
+        let manager = manager_over(dir.path(), source);
+        let pinned = PackageRef::new_registry("tool", REGISTRY).clone_with_digest(leaf.clone());
+        let request = packages_request(vec![pinned], linux_amd64());
+
+        let (_, manifest) = manifest_of(&manager, &request).await;
+
+        assert_eq!(manifest.packages.len(), 1);
+        assert_eq!(manifest.packages[0].digest, leaf.to_string());
+        assert_eq!(manifest.packages[0].index_digest, None);
+    }
+
+    /// `record_path` is exactly the file the writers place beside each launcher, on a Windows target too.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_record_path_is_the_file_the_writers_place() {
+        for (os, windows) in [("linux", false), ("windows", true)] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let (source, _, root) = registered_tool_on((os, "amd64"));
+            let manager = manager_over(&dir.path().join("home"), source);
+            let platform: Platform = format!("{os}/amd64").parse().expect("platform");
+            let request = packages_request(vec![package("tool", "1.0")], platform);
+            let (_, manifest) = manifest_of(&manager, &request).await;
+            let package = manifest
+                .packages
+                .iter()
+                .find(|p| p.digest == root.to_string())
+                .expect("root");
+            let layout = VendorLayout::new(dunce::canonicalize(dir.path()).expect("canonical"));
+            let program = format!("{}/bin/hello{}", package.content_dir, if windows { ".exe" } else { "" });
+            std::fs::create_dir_all(layout.resolve(&program).parent().expect("parent")).expect("directory");
+            std::fs::write(layout.resolve(&program), b"x").expect("file");
+            let declared = HashMap::from([(
+                package.digest.clone(),
+                serde_json::from_str(r#"{"hello":{}}"#).expect("entrypoints"),
+            )]);
+
+            write_entrypoint_launchers(&layout, &manifest, &declared, &[], b"blob", windows)
+                .await
+                .expect("the entry-point launchers write");
+            write_selection_launchers(&layout, &manifest, b"blob", windows)
+                .await
+                .expect("the selection launchers write");
+
+            let mut listed = vec![(
+                package.entrypoints[0].launcher_path.as_str(),
+                package.entrypoints[0].record_path.as_deref(),
+            )];
+            listed.extend(
+                manifest
+                    .tools
+                    .iter()
+                    .map(|t| (t.launcher_path.as_deref().expect("launcher"), t.record_path.as_deref())),
+            );
+            assert_eq!(listed.len(), 3, "{os}");
+            for (launcher, record) in listed {
+                let record = record.unwrap_or_else(|| panic!("{os}: {launcher} lists no record"));
+                assert!(layout.resolve(launcher).is_file(), "{os}: {launcher}");
+                assert!(layout.resolve(record).is_file(), "{os}: the writer placed no {record}");
+                assert!(!record.ends_with(".exe.launch"), "{record}");
+            }
+        }
+    }
+
+    /// A binary name ending in `.launch` would be a launcher's record file: refused with 65 on every platform.
+    ///
+    /// Entry-point names cannot reach this: the metadata grammar already refuses a `.`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_name_ending_in_the_record_suffix_is_refused() {
+        for name in ["cmake.launch", "cmake.LAUNCH"] {
+            for platform in ["linux/amd64", "windows/amd64"] {
+                let dir = tempfile::tempdir().expect("tempdir");
+                let (source, root) = register_package(
+                    FakeManifestSource::default(),
+                    serde_json::json!({"type": "bundle", "version": 1, "binaries": [name], "entrypoints": {}, "env": []}),
+                );
+                let (os, arch) = platform.split_once('/').expect("platform");
+                let manager = manager_over(dir.path(), register_index(source, "1.0", &root, &[(os, arch)]));
+                let request = packages_request(vec![package("tool", "1.0")], platform.parse().expect("platform"));
+                let selection = select(&manager, &request).await.expect("the selection reads");
+
+                let error = build_manifest(&manager, &request, &selection, &|_| true)
+                    .await
+                    .expect_err(name);
+
+                assert!(
+                    matches!(error, VendorError::PathUnrepresentable { .. }),
+                    "{name} {platform}: {error:?}"
+                );
+                assert_eq!(error.classify(), Some(ExitCode::DataError), "{name} {platform}");
+            }
+        }
+    }
+
+    /// Names equal after ASCII folding share one launcher and one record on a Windows or macOS target.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn names_equal_after_folding_collapse_to_one_record_on_a_folding_target() {
+        for (platform, expected) in [("linux/amd64", 2), ("windows/amd64", 1), ("darwin/arm64", 1)] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            // One package cannot claim both spellings, so the root and its dependency each claim one.
+            let (source, dependency) = register_package(
+                FakeManifestSource::default(),
+                serde_json::json!({"type": "bundle", "version": 1, "binaries": ["tool"], "entrypoints": {}, "env": []}),
+            );
+            let (source, root) = register_package(
+                source,
+                serde_json::json!({
+                    "type": "bundle", "version": 1, "binaries": ["Tool"], "entrypoints": {}, "env": [],
+                    "dependencies": [{"identifier": format!("{REGISTRY}/dep@{dependency}"), "visibility": "public", "name": "dep"}],
+                }),
+            );
+            let (os, arch) = platform.split_once('/').expect("platform");
+            let manager = manager_over(dir.path(), register_index(source, "1.0", &root, &[(os, arch)]));
+            let request = packages_request(vec![package("tool", "1.0")], platform.parse().expect("platform"));
+
+            let (_, manifest) = manifest_of(&manager, &request).await;
+
+            assert_eq!(manifest.tools.len(), expected, "{platform}");
+            let records: BTreeSet<_> = manifest.tools.iter().map(|t| t.record_path.clone()).collect();
+            assert_eq!(records.len(), expected, "{platform}: every record is its own file");
+        }
     }
 
     /// A package declaring an empty `binaries` list claims no name, the same as one declaring nothing.
@@ -2752,9 +3089,7 @@ mod tests {
             assert_eq!(sidecar.vendor_id, manifest.vendor_id);
             assert_eq!(sidecar.env.len(), manifest.environments[0].items.len());
         }
-        let written = std::fs::read_dir(layout.resolve("selections/default/shells/default/bin"))
-            .expect("dir")
-            .count();
+        let written = std::fs::read_dir(layout.resolve("l")).expect("dir").count();
         assert_eq!(written, 2 * manifest.tools.len(), "a launcher and a sidecar per name");
     }
 
@@ -2770,7 +3105,7 @@ mod tests {
             .await
             .expect("nothing to write");
 
-        assert!(!layout.resolve("selections").exists());
+        assert!(!layout.resolve("l").exists());
     }
 
     #[test]
@@ -2779,5 +3114,158 @@ mod tests {
         assert!(folds_case(&platform("windows/amd64")));
         assert!(folds_case(&platform("darwin/arm64")));
         assert!(!folds_case(&platform("linux/amd64")));
+    }
+
+    // ── A vendor run writes nothing into the index directory ─────────────────
+
+    /// Every file under `root` with its bytes; an absent `root` is empty.
+    fn snapshot(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+        let mut files = BTreeMap::new();
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(dir) = pending.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else {
+                    let bytes = std::fs::read(&path).expect("file");
+                    files.insert(path, bytes);
+                }
+            }
+        }
+        files
+    }
+
+    /// Placing a digest-addressed package over a seeded, writable index leaves the index directory as it was
+    /// (C-119): resolving an image index through a writable chain persists a dispatch object, so this fails
+    /// when `place_package` resolves with the manager it was given.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn placing_a_package_writes_nothing_into_the_index_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path().join("home");
+        let (source, leaf) = register_leaf(FakeManifestSource::default(), serde_json::json!([]));
+        let document = index_document(&leaf, &[("linux", "amd64")]);
+        let index_digest = Algorithm::Sha256.hash(document.as_bytes());
+        let source = source
+            .with("1.0", document.as_bytes())
+            .with(&index_digest.to_string(), document.as_bytes());
+        let manager = manager_over(&home, source);
+        let store = ocx_index::IndexStore::machine_local(&FileStructure::with_root(home));
+        std::fs::create_dir_all(store.root()).expect("index directory");
+        std::fs::write(store.root().join("seed.json"), b"{}").expect("seed");
+        let before = snapshot(store.root());
+        let layout = VendorLayout::new(dir.path().join("out"));
+
+        // The fake registry serves no layers, so the pull ends in an error; the resolve it follows has run.
+        let result = place_package(
+            &manager,
+            &linux_amd64(),
+            &layout,
+            SetupGroups::new(),
+            index_digest.to_string(),
+            &closure_node(&index_digest),
+            &package_key(&index_digest),
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "the fake registry serves no layers: {:?}",
+            result.map(|_| ())
+        );
+        let after = snapshot(store.root());
+        assert_eq!(
+            after.keys().collect::<Vec<_>>(),
+            before.keys().collect::<Vec<_>>(),
+            "no file was added to the index directory"
+        );
+        assert_eq!(after, before, "the index directory is byte-identical");
+    }
+
+    /// The refusal names the package with its tag, the claim, the program and who must act (C-121).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_declared_binary_the_content_lacks_names_the_package_and_the_claim() {
+        let (_dir, layout, manifest) = staged_tool(&[]).await;
+        let binary = manifest
+            .tools
+            .iter()
+            .find(|tool| tool.kind == ToolKind::Binary)
+            .expect("the cmake binary");
+        let package = manifest
+            .packages
+            .iter()
+            .find(|package| package.digest == binary.package)
+            .expect("the owner");
+
+        let error = ensure_binary_targets_exist(&layout, &manifest.tools, &manifest.packages)
+            .await
+            .expect_err("no file at that path");
+
+        assert!(matches!(error, VendorError::PathUnrepresentable { .. }), "{error:?}");
+        let message = error.to_string();
+        for fragment in [
+            package.identifier.as_str(),
+            "tool:1.0",
+            "`binaries`",
+            "`cmake`",
+            "does not hold",
+            "publisher",
+        ] {
+            assert!(message.contains(fragment), "{fragment:?} missing from: {message}");
+        }
+    }
+
+    /// `--index` lists the paths resolution read, once and sorted; without it the field is absent.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_manifest_lists_index_lookups_only_with_a_recorder() {
+        let (source, _, _) = registered_tool();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let fs = FileStructure::with_root(dir.path().join("home"));
+        let recorder = ocx_index::LookupRecorder::new();
+        recorder.record("b.example/catalog.json", false);
+        recorder.record("a.example/catalog.json", true);
+        recorder.record("b.example/catalog.json", false);
+        let store = ocx_index::IndexStore::machine_local(&fs).with_lookup_recorder(recorder);
+        let index = Index::from_chained_with_content_store(
+            LocalIndex::new(LocalConfig {
+                index_store: store.clone(),
+            }),
+            vec![Index::from_impl(source)],
+            ChainMode::Default,
+            fs.blobs.clone(),
+        );
+        let manager = PackageManager::new(fs, index, None, REGISTRY).with_index(store);
+        let mut request = packages_request(vec![package("tool", "1.0")], linux_amd64());
+        request.output = dir.path().join("out");
+
+        let outcome = manager.vendor(request).await.expect("the manifest-only run");
+
+        let written: VendorManifest =
+            serde_json::from_slice(&std::fs::read(&outcome.manifest_path).expect("manifest")).expect("decodes");
+        let lookups = written.index_lookups.expect("the field is present with a recorder");
+        assert_eq!(
+            Some(lookups.clone()),
+            manager.index_lookups(),
+            "as the manager reports them"
+        );
+        let paths: Vec<&str> = lookups.iter().map(|lookup| lookup.path.as_str()).collect();
+        assert!(
+            paths.windows(2).all(|pair| pair[0] < pair[1]),
+            "sorted, each once: {paths:?}"
+        );
+        assert!(
+            paths.contains(&"a.example/catalog.json") && paths.contains(&"b.example/catalog.json"),
+            "{paths:?}"
+        );
+
+        let (source, _, _) = registered_tool();
+        let plain_dir = tempfile::tempdir().expect("tempdir");
+        let plain = manager_over(&plain_dir.path().join("home"), source);
+        let mut request = packages_request(vec![package("tool", "1.0")], linux_amd64());
+        request.output = plain_dir.path().join("out");
+        let outcome = plain.vendor(request).await.expect("the manifest-only run");
+        let text = std::fs::read_to_string(&outcome.manifest_path).expect("manifest");
+        assert!(!text.contains("index_lookups"), "absent without --index");
     }
 }
