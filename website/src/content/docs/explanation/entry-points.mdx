@@ -79,6 +79,8 @@ A launcher is a copy of one native program, so it behaves the same on every plat
 
 The launcher derives its entry-point name from the file it was loaded from, minus a final `.exe` on Windows. It then starts `ocx launcher exec <package_root> -- <name> <args…>`. On Unix the launcher replaces its own process. On Windows it spawns the child through the Win32 [`CreateProcessW`][createprocessw] API. It never routes through `cmd.exe`.
 
+OCX writes `<name>.launch`. Do not edit it by hand. OCX does not compare a record with what it would write. An edited record stays until the launcher directory is rebuilt, when a file of it is missing or the launcher generation changes.
+
 Only the absolute package-root path is stored, in the record. The `ocx launcher exec` subcommand (hidden from `ocx --help`) forces the [private surface][visibility-views] internally. Private, public and interface entries are all visible to the launched binary. Internal helpers (compilers, runtimes, shared libraries) are therefore available without any flag in the launcher.
 
 `launcher exec` reads the entry-point name and composes the runtime env, including `PATH`. It uses the standard PATH search to locate the executable. The optional `command` field overrides the dispatch target when the binary name differs from the invocable name. When it is absent, the entry-point name is dispatched directly on the composed `PATH` from the package's [`env`][metadata-env] block.
@@ -97,11 +99,15 @@ A launcher whose record expanded `current` on every invocation would drift the m
 </details>
 
 :::caution[Package roots a record cannot hold]
-A record holds the package root as a JSON string. The root must be an absolute path and must not contain a newline (`\n`) or a carriage return (`\r`). Quotes, backslashes, apostrophes and percent signs are ordinary JSON characters and need no escaping rules of their own.
+A record holds the package root as a JSON string. The root must be an absolute path. It must not contain an apostrophe (`'`), a double quote (`"`), a newline, a carriage return or a NUL character. The same set applies to every other string OCX writes into a launcher. The token `@VENDOR_DIR@` is also refused in a root, because it stands for the directory `ocx vendor` writes to.
 
-Ordinary Windows paths (`C:\Users\…`) and folders containing `%` (e.g. `100%real`) work. The launcher reads the record as data and spawns with no `cmd.exe`, so neither `\` nor `%` carries special meaning.
+A refused value fails the write with exit code `65` (`DataError`) and the slug `launcher_unsafe_character`. The message names the character and the value. For an apostrophe or a quote, move `$OCX_HOME` to a directory whose absolute path has none.
 
-The check fires when the record is written. A package installed into a path with a newline never gets a corrupt launcher, because the write fails loudly first.
+[`ocx vendor`][cmd-vendor] refuses the same token in a package's environment keys, environment values and entry-point arguments with exit code `65` and the slug `vendor_value_unrepresentable`.
+
+Backslashes and percent signs are allowed. Ordinary Windows paths (`C:\Users\…`) and folders containing `%` (e.g. `100%real`) work. The launcher reads the record as data and spawns with no `cmd.exe`, so neither `\` nor `%` carries special meaning.
+
+The check fires when the record is written. A package installed into a refused path never gets a corrupt launcher, because the write fails first.
 :::
 
 ## Synth-PATH Mechanism \{#synth-path\}
@@ -158,7 +164,7 @@ Launchers are the first OCX artifact whose correctness depends on the user's she
 
 The Unix launcher is the same native program as on every other platform, not a script. It needs no interpreter and no `sh` on the host. The launcher file is mode `0755`, so the write is complete with no follow-up `chmod` step.
 
-The launcher passes the package root to `ocx launcher exec` as one argument, so a path with an apostrophe or a space reaches OCX unchanged.
+The launcher passes the package root to `ocx launcher exec` as one argument, so a path with a space reaches OCX unchanged. A path with an apostrophe is refused when the record is written, as described in the caution box under [How Launchers Work at Runtime](#runtime).
 
 ### Windows \{#windows\}
 
@@ -261,6 +267,7 @@ No re-sourcing dotfiles. The `ocx package env --shell` output is stable. It emit
 [sysexits]: https://man.freebsd.org/cgi/man.cgi?sysexits
 
 {/* commands */}
+[cmd-vendor]: ../reference/command-line/commands.md#vendor
 [cmd-exec]: ../reference/command-line/package-consuming.md#package-exec
 [cmd-install]: ../reference/command-line/package-consuming.md#package-install
 [cmd-select]: ../reference/command-line/package-consuming.md#package-select

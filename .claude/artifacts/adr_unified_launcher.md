@@ -120,7 +120,7 @@ Weights: 5 = binding requirement, 3 = strong driver, 1 = nice to have. Score 1-5
 | Change size (1) | 5 | 4 |
 | **Total** | 50 | **69** |
 
-**Chosen: B.** `crates/ocx_schema/contract/baseline/` holds no `vendor-manifest.json` and `contract/ledger.toml:8` names no `vendor-manifest` document, so the bump needs no ledger entry: the gate reads every field as an addition. rules_ocx reads exactly 2 and refuses 1 (MR-1).
+**Chosen: B.** `crates/ocx_schema/contract/baseline/` holds no `vendor-manifest.json` and `contract/ledger.toml:8` names no `vendor-manifest` document, so the gate reads every field as an addition; but a version above 1 on an item the baseline lacks needs a ledger entry, and `ledger.toml` carries one (`vendor-manifest`, `semantic`, `/properties/schema_version/const`). rules_ocx reads exactly 2 and refuses 1 (MR-1).
 
 ### M4 — where a package's launchers live (item 3)
 
@@ -709,7 +709,7 @@ What an older `ocx` does was read in its code, which is today's: the prompt gate
 
 ## 12. Garbage collection (item 8)
 
-Only `ocx clean` retires launcher directories. Every retirement goes through `retire_dir`.
+Only `ocx clean` retires a superseded generation or render directory; first use may replace an incomplete directory of the running generation (§ 6.2 step 2). Every retirement goes through `retire_dir`.
 
 | Directory | `ocx clean` |
 |---|---|
