@@ -856,7 +856,11 @@ pub(crate) fn directory_matches(directory: &Path, expected: &BTreeMap<String, Bi
         if !is_record_name(&entry.file_name().to_string_lossy()) && !is_executable(&metadata) {
             return false;
         }
-        if BinEntryStamp::of_file(&path, &metadata).as_ref() != Some(stamped) {
+        // Size and content hash, never `file_id`: a restored tree has new inodes and the same bytes, and must still match.
+        let Some(found) = BinEntryStamp::of_file(&path, &metadata) else {
+            return false;
+        };
+        if found.size != stamped.size || found.content_hash != stamped.content_hash {
             return false;
         }
         seen += 1;
@@ -3206,6 +3210,32 @@ mod tests {
             "a new directory is published"
         );
         assert_eq!(tree.bin_entries(), expected_bin_entries(&["cmake", "ctest"]));
+    }
+
+    /// A restored render directory (same bytes, new inodes) still matches its stamp; a changed byte does not.
+    ///
+    /// RED: compare whole `BinEntryStamp`s, `file_id` included, in `directory_matches`.
+    #[tokio::test]
+    async fn a_render_directory_with_new_inodes_and_the_same_bytes_still_matches() {
+        let tree = Tree::new();
+        render_names(&tree, &["cmake"]).await;
+        let stamp = tree.stamp().expect("the stamp exists");
+        let directory = tree.home.render_dir(&stamp.shell_dir);
+        let mut moved = stamp.bin_fingerprint.clone();
+        for entry in moved.values_mut() {
+            entry.file_id = entry.file_id.map(|id| id.wrapping_add(1)).or(Some(1));
+        }
+        assert!(
+            directory_matches(&directory, &moved),
+            "inode churn alone keeps the match"
+        );
+
+        let mut changed = stamp.bin_fingerprint.clone();
+        changed.values_mut().next().expect("one entry").content_hash = "0".repeat(64);
+        assert!(
+            !directory_matches(&directory, &changed),
+            "the control: a changed hash is a mismatch"
+        );
     }
 
     /// A stamped case twin of a computed name joins a partial render only on a case-sensitive home.
