@@ -2258,6 +2258,11 @@ mod tests {
         }
 
         /// An offline manager over this tree's store — no client, no sources.
+        /// [`render_unfaulted`] through this tree's manager.
+        async fn render_unfaulted(&self, request: RenderRequest<'_>) -> Result<RenderReport, PackageErrorKind> {
+            render_unfaulted(&self.manager(), request).await
+        }
+
         fn manager(&self) -> PackageManager {
             let index = Index::from_chained(
                 LocalIndex::new(LocalConfig {
@@ -4258,6 +4263,7 @@ mod tests {
         let events: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
         let (rendered, ()) = tokio::join!(
             async {
+                // `environment` is held: `render_unfaulted` would take the same lock again and block.
                 let outcome = manager
                     .render_toolchain(RenderRequest {
                         unrendered: &[],
@@ -4372,6 +4378,7 @@ mod tests {
         let _held = parameters.acquire().await.expect("the test can take the same lock");
 
         let started = std::time::Instant::now();
+        // `environment` is held: `render_unfaulted` would take the same lock again and block.
         let report = tree
             .manager()
             .render_toolchain(RenderRequest {
@@ -4938,8 +4945,7 @@ mod tests {
         let groups = groups_of(&[DEFAULT_GROUP]);
         let platform = platform();
         let result = tree
-            .manager()
-            .render_toolchain(RenderRequest {
+            .render_unfaulted(RenderRequest {
                 unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
@@ -5103,8 +5109,9 @@ mod tests {
         let manager = tree.manager();
 
         for _ in 0..1 {
-            manager
-                .render_toolchain(RenderRequest {
+            render_unfaulted(
+                &manager,
+                RenderRequest {
                     unrendered: &[],
                     home: &tree.home,
                     scope: &scope,
@@ -5114,14 +5121,16 @@ mod tests {
                     pinned: false,
                     platform: &platform,
                     dry_run: false,
-                })
-                .await
-                .expect("the first render succeeds");
+                },
+            )
+            .await
+            .expect("the first render succeeds");
         }
         let before = inode_of(&tree.home.gitignore());
 
-        manager
-            .render_toolchain(RenderRequest {
+        render_unfaulted(
+            &manager,
+            RenderRequest {
                 unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
@@ -5131,9 +5140,10 @@ mod tests {
                 pinned: false,
                 platform: &platform,
                 dry_run: false,
-            })
-            .await
-            .expect("the second render succeeds");
+            },
+        )
+        .await
+        .expect("the second render succeeds");
 
         assert_eq!(
             inode_of(&tree.home.gitignore()),
@@ -5164,8 +5174,7 @@ mod tests {
         let groups = groups_of(&[DEFAULT_GROUP]);
         let platform = platform();
         let result = tree
-            .manager()
-            .render_toolchain(RenderRequest {
+            .render_unfaulted(RenderRequest {
                 unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
@@ -5371,20 +5380,19 @@ mod tests {
         let lock = lock_of(Vec::new());
         let groups = groups_of(&[DEFAULT_GROUP]);
         let platform = platform();
-        tree.manager()
-            .render_toolchain(RenderRequest {
-                unrendered: &[],
-                home: &tree.home,
-                scope: &scope,
-                lock: &lock,
-                surface: &surface,
-                groups: &groups,
-                pinned: false,
-                platform: &platform,
-                dry_run: false,
-            })
-            .await
-            .expect("C-050 — a failed `.gitignore` write is a skip, not an error");
+        tree.render_unfaulted(RenderRequest {
+            unrendered: &[],
+            home: &tree.home,
+            scope: &scope,
+            lock: &lock,
+            surface: &surface,
+            groups: &groups,
+            pinned: false,
+            platform: &platform,
+            dry_run: false,
+        })
+        .await
+        .expect("C-050 — a failed `.gitignore` write is a skip, not an error");
 
         assert_eq!(
             tree.bin_entries(),
@@ -5414,20 +5422,19 @@ mod tests {
         let platform = platform();
 
         assert!(!tree.home.root().exists(), "precondition: this is a first-ever render");
-        tree.manager()
-            .render_toolchain(RenderRequest {
-                unrendered: &[],
-                home: &tree.home,
-                scope: &scope,
-                lock: &lock,
-                surface: &[],
-                groups: &groups,
-                pinned: false,
-                platform: &platform,
-                dry_run: false,
-            })
-            .await
-            .expect("the first render succeeds");
+        tree.render_unfaulted(RenderRequest {
+            unrendered: &[],
+            home: &tree.home,
+            scope: &scope,
+            lock: &lock,
+            surface: &[],
+            groups: &groups,
+            pinned: false,
+            platform: &platform,
+            dry_run: false,
+        })
+        .await
+        .expect("the first render succeeds");
 
         assert_eq!(
             mode_of(tree.home.root()) & 0o077,
@@ -5485,8 +5492,9 @@ mod tests {
         let manager = tree.manager();
 
         let project_scope = tree.scope();
-        manager
-            .render_toolchain(RenderRequest {
+        render_unfaulted(
+            &manager,
+            RenderRequest {
                 unrendered: &[],
                 home: &tree.home,
                 scope: &project_scope,
@@ -5496,9 +5504,10 @@ mod tests {
                 pinned: false,
                 platform: &platform,
                 dry_run: false,
-            })
-            .await
-            .expect("the project render succeeds");
+            },
+        )
+        .await
+        .expect("the project render succeeds");
         let after_project = read_dir_names(&tree.file_structure.root().join("projects"));
         assert_eq!(
             after_project.len(),
@@ -5507,8 +5516,9 @@ mod tests {
         );
 
         let global_home = tree.file_structure.toolchain.home().clone();
-        manager
-            .render_toolchain(RenderRequest {
+        render_unfaulted(
+            &manager,
+            RenderRequest {
                 unrendered: &[],
                 home: &global_home,
                 scope: &RenderStampScope::Global,
@@ -5518,9 +5528,10 @@ mod tests {
                 pinned: false,
                 platform: &platform,
                 dry_run: false,
-            })
-            .await
-            .expect("the global render succeeds");
+            },
+        )
+        .await
+        .expect("the global render succeeds");
 
         assert_eq!(
             read_dir_names(&tree.file_structure.root().join("projects")),
@@ -6083,8 +6094,7 @@ mod tests {
         let before = snapshot_subtree(tree.home.root());
 
         let report = tree
-            .manager()
-            .render_toolchain(RenderRequest {
+            .render_unfaulted(RenderRequest {
                 unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
@@ -6137,8 +6147,7 @@ mod tests {
         let groups = groups_of(&[DEFAULT_GROUP]);
         let platform = platform();
         let report = tree
-            .manager()
-            .render_toolchain(RenderRequest {
+            .render_unfaulted(RenderRequest {
                 unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
@@ -6184,8 +6193,7 @@ mod tests {
         let platform = platform();
 
         let report = tree
-            .manager()
-            .render_toolchain(RenderRequest {
+            .render_unfaulted(RenderRequest {
                 unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
@@ -6230,8 +6238,9 @@ mod tests {
         let platform = platform();
         let manager = tree.manager();
 
-        let predicted = manager
-            .render_toolchain(RenderRequest {
+        let predicted = render_unfaulted(
+            &manager,
+            RenderRequest {
                 unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
@@ -6241,11 +6250,13 @@ mod tests {
                 pinned: false,
                 platform: &platform,
                 dry_run: true,
-            })
-            .await
-            .expect("the dry run succeeds");
-        let applied = manager
-            .render_toolchain(RenderRequest {
+            },
+        )
+        .await
+        .expect("the dry run succeeds");
+        let applied = render_unfaulted(
+            &manager,
+            RenderRequest {
                 unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
@@ -6255,9 +6266,10 @@ mod tests {
                 pinned: false,
                 platform: &platform,
                 dry_run: false,
-            })
-            .await
-            .expect("the real run succeeds");
+            },
+        )
+        .await
+        .expect("the real run succeeds");
 
         let normalise = |report: &RenderReport| {
             let mut rows: Vec<(RenderedArtifact, bool)> = report
@@ -6295,8 +6307,9 @@ mod tests {
         let platform = platform();
         let manager = tree.manager();
 
-        manager
-            .render_toolchain(RenderRequest {
+        render_unfaulted(
+            &manager,
+            RenderRequest {
                 unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
@@ -6306,14 +6319,16 @@ mod tests {
                 pinned: false,
                 platform: &platform,
                 dry_run: false,
-            })
-            .await
-            .expect("the seeding render writes a stamp");
+            },
+        )
+        .await
+        .expect("the seeding render writes a stamp");
         let before = snapshot_subtree(&tree.file_structure.state.project_state_dir(&tree.key()));
         assert!(!before.is_empty(), "precondition: a stamp exists to be left alone");
 
-        let report = manager
-            .render_toolchain(RenderRequest {
+        let report = render_unfaulted(
+            &manager,
+            RenderRequest {
                 unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
@@ -6323,9 +6338,10 @@ mod tests {
                 pinned: false,
                 platform: &platform,
                 dry_run: true,
-            })
-            .await
-            .expect("the dry run succeeds");
+            },
+        )
+        .await
+        .expect("the dry run succeeds");
 
         assert!(
             !report.stamp_written,
@@ -6715,7 +6731,9 @@ mod tests {
         let before = snapshot_subtree(&tree.project_dir);
         let before_mtime = dir_mtime(&tree.project_dir);
 
-        manager.render_toolchain(request()).await.expect("the dry run succeeds");
+        render_unfaulted(&manager, request())
+            .await
+            .expect("the dry run succeeds");
 
         assert_eq!(
             snapshot_subtree(&tree.project_dir),
@@ -6733,7 +6751,9 @@ mod tests {
         tree.create_home_root();
         age_dir_mtime(tree.home.root());
         let seeded_mtime = dir_mtime(tree.home.root());
-        manager.render_toolchain(request()).await.expect("the dry run succeeds");
+        render_unfaulted(&manager, request())
+            .await
+            .expect("the dry run succeeds");
         assert_eq!(
             dir_mtime(tree.home.root()),
             seeded_mtime,
@@ -6815,20 +6835,19 @@ mod tests {
         let platform = platform();
         // The **public** entry, so step 6 creates `shells/` and the staging
         // directory under the code that chooses their modes.
-        tree.manager()
-            .render_toolchain(RenderRequest {
-                unrendered: &[],
-                home: &tree.home,
-                scope: &scope,
-                lock: &lock,
-                surface: &surface,
-                groups: &groups,
-                pinned: false,
-                platform: &platform,
-                dry_run: false,
-            })
-            .await
-            .expect("the render is not a refusal");
+        tree.render_unfaulted(RenderRequest {
+            unrendered: &[],
+            home: &tree.home,
+            scope: &scope,
+            lock: &lock,
+            surface: &surface,
+            groups: &groups,
+            pinned: false,
+            platform: &platform,
+            dry_run: false,
+        })
+        .await
+        .expect("the render is not a refusal");
 
         let published = tree.shell_directory().expect("published");
         for directory in [
@@ -7038,8 +7057,7 @@ mod tests {
         let groups = groups_of(&[DEFAULT_GROUP]);
         let platform = platform();
         let report = tree
-            .manager()
-            .render_toolchain(RenderRequest {
+            .render_unfaulted(RenderRequest {
                 unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
@@ -7067,8 +7085,7 @@ mod tests {
         let honest = Tree::new();
         let scope = honest.scope();
         let report = honest
-            .manager()
-            .render_toolchain(RenderRequest {
+            .render_unfaulted(RenderRequest {
                 unrendered: &[],
                 home: &honest.home,
                 scope: &scope,
@@ -7824,20 +7841,19 @@ mod tests {
         )]);
         let groups = groups_of(&[DEFAULT_GROUP]);
         let platform = platform();
-        tree.manager()
-            .render_toolchain(RenderRequest {
-                unrendered: &[],
-                home: &tree.home,
-                scope: &tree.scope(),
-                lock: &lock,
-                surface: &[node(pinned("ns/cmake", 'a'), Some(&["cmake"]), &[])],
-                groups: &groups,
-                pinned: false,
-                platform: &platform,
-                dry_run: false,
-            })
-            .await
-            .expect("the render succeeds")
+        tree.render_unfaulted(RenderRequest {
+            unrendered: &[],
+            home: &tree.home,
+            scope: &tree.scope(),
+            lock: &lock,
+            surface: &[node(pinned("ns/cmake", 'a'), Some(&["cmake"]), &[])],
+            groups: &groups,
+            pinned: false,
+            platform: &platform,
+            dry_run: false,
+        })
+        .await
+        .expect("the render succeeds")
     }
 
     fn root_entry(name: &str) -> RenderedArtifact {
@@ -7886,12 +7902,72 @@ mod tests {
         .expect("the render succeeds")
     }
 
+    /// A render in a parallel test waits for the env-override lock instead of reading a fault another
+    /// test has set: the seam is process-global, and an unlocked reader aborted with it.
+    ///
+    /// RED: render through `render_toolchain` directly in the worker — it reads the fault and
+    /// returns an error while the lock is held. The bounded receive turns a lost wake-up into a failure.
+    #[test]
+    fn a_render_in_a_parallel_test_never_reads_a_fault_another_test_holds() {
+        let environment = ocx_env::overrides::lock();
+        environment.set(&ocx_env::__OCX_TESTING_RENDER_FAULT, FAULT_AFTER_SHELL_TREE);
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let tree = Tree::new();
+            let lock = lock_of(vec![locked_tool(
+                "cmake",
+                DEFAULT_GROUP,
+                "ns/cmake",
+                &[(PLATFORM_KEY, 'a')],
+            )]);
+            let groups = groups_of(&[DEFAULT_GROUP]);
+            let platform = platform();
+            let outcome = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("a runtime")
+                .block_on(tree.render_unfaulted(RenderRequest {
+                    unrendered: &[],
+                    home: &tree.home,
+                    scope: &tree.scope(),
+                    lock: &lock,
+                    surface: &[node(pinned("ns/cmake", 'a'), Some(&["cmake"]), &[])],
+                    groups: &groups,
+                    pinned: false,
+                    platform: &platform,
+                    dry_run: false,
+                }));
+            let _ = sender.send(outcome.is_ok());
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        environment.remove(&ocx_env::__OCX_TESTING_RENDER_FAULT);
+        drop(environment);
+
+        let rendered = receiver
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("the render returns once the fault is gone");
+        worker.join().expect("the worker does not panic");
+        assert!(rendered, "the render must not see a fault set by another test");
+    }
+
     /// The `NAME.launch` record in the render directory `active` names under `home`.
     fn record_path(home: &ToolchainHome, name: &str) -> PathBuf {
         shell_directory_of(home)
             .expect("`active` names a render directory")
             .join("bin")
             .join(format!("{name}.launch"))
+    }
+
+    /// [`PackageManager::render_toolchain`] under the env-override lock: the fault test sets a process-global
+    /// seam variable, and a render reading it unlocked in a parallel test aborts.
+    async fn render_unfaulted(
+        manager: &PackageManager,
+        request: RenderRequest<'_>,
+    ) -> Result<RenderReport, PackageErrorKind> {
+        let _environment = ocx_env::overrides::lock();
+        manager.render_toolchain(request).await
     }
 
     /// Render `names` through the public entry and return the `bin/` of the directory it published.
@@ -7919,20 +7995,19 @@ mod tests {
         )]);
         let groups = groups_of(&[DEFAULT_GROUP]);
         let platform = platform();
-        tree.manager()
-            .render_toolchain(RenderRequest {
-                unrendered: &[],
-                home: &tree.home,
-                scope: &tree.scope(),
-                lock: &lock,
-                surface: &[node(pinned("ns/cmake", 'a'), Some(names), &[])],
-                groups: &groups,
-                pinned: false,
-                platform: &platform,
-                dry_run: false,
-            })
-            .await
-            .expect("the render succeeds")
+        tree.render_unfaulted(RenderRequest {
+            unrendered: &[],
+            home: &tree.home,
+            scope: &tree.scope(),
+            lock: &lock,
+            surface: &[node(pinned("ns/cmake", 'a'), Some(names), &[])],
+            groups: &groups,
+            pinned: false,
+            platform: &platform,
+            dry_run: false,
+        })
+        .await
+        .expect("the render succeeds")
     }
 
     /// V-L28 — a render with new content publishes exactly one `shells/default-<16 hex>` holding
