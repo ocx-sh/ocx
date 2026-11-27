@@ -7,13 +7,6 @@ license.workspace = true
 publish = false
 
 [features]
-# Internal-only escape hatch, the project's one seam convention
-# (`subsystem-tests.md` "Test-Only Seams"). Gates `shim_bin_store`'s
-# `__OCX_TESTING_SHIM_LOST_PUBLISH_RACE` seam, which forces the lost-publish
-# race the acceptance binary cannot otherwise reach. Forwarded by `ocx_lib`'s
-# and `ocx`'s own `__testing`; forwards `ocx_env`'s, which declares that seam.
-__testing = ["ocx_env/__testing"]
-
 # The seams `ocx_lib`'s own tests drive across the crate boundary, which a bare
 # `#[cfg(test)]` cannot reach. Deliberately NOT forwarded by `ocx`'s
 # `__testing`, so it never reaches the acceptance binary: `BlobStore`'s write
@@ -33,8 +26,11 @@ ocx_oci.workspace = true
 ocx_util.workspace = true
 # The environment registry `OCX_NO_CODESIGN` and the publish-race seam are read through.
 ocx_env.workspace = true
+# The Windows path-segment rules a vendor layout checks, the same copy the direct launcher links.
+ocx_env_apply.workspace = true
 
 dunce.workspace = true
+filetime.workspace = true
 hex.workspace = true
 log.workspace = true
 serde.workspace = true

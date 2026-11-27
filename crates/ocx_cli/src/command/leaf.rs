@@ -83,6 +83,7 @@ leaves! {
     PackageSign,
     PackageTest,
     PackageUninstall,
+    PackageVendor,
     PackageVerify,
     PackageWhich,
     PatchFreeze,
@@ -105,6 +106,7 @@ leaves! {
     Status,
     Update,
     Upgrade,
+    Vendor,
     Version,
 }
 
@@ -165,6 +167,7 @@ impl Leaf {
             Self::PackageSign => &["package", "sign"],
             Self::PackageTest => &["package", "test"],
             Self::PackageUninstall => &["package", "uninstall"],
+            Self::PackageVendor => &["package", "vendor"],
             Self::PackageVerify => &["package", "verify"],
             Self::PackageWhich => &["package", "which"],
             Self::PatchFreeze => &["patch", "freeze"],
@@ -186,6 +189,7 @@ impl Leaf {
             Self::Status => &["status"],
             Self::Update => &["update"],
             Self::Upgrade => &["upgrade"],
+            Self::Vendor => &["vendor"],
             Self::Version => &["version"],
         }
     }
@@ -372,6 +376,7 @@ impl Leaf {
                 },
             ),
             Self::PackageUninstall => (1, const { &[OutputMode::report::<data::removed::Removed>()] }),
+            Self::PackageVendor => (1, const { &[OutputMode::report::<data::vendor::VendorReport>()] }),
             Self::PackageVerify => (
                 2,
                 const { &[OutputMode::report::<data::verification::VerificationReport>()] },
@@ -458,6 +463,7 @@ impl Leaf {
                     ]
                 },
             ),
+            Self::Vendor => (1, const { &[OutputMode::report::<data::vendor::VendorReport>()] }),
             Self::Version => (
                 1,
                 const {
@@ -546,6 +552,7 @@ impl Command {
                 Package::Deselect(_) => Leaf::PackageDeselect,
                 Package::Sign(_) => Leaf::PackageSign,
                 Package::Test(_) => Leaf::PackageTest,
+                Package::Vendor(_) => Leaf::PackageVendor,
                 Package::Verify(_) => Leaf::PackageVerify,
                 Package::Exec(_) => Leaf::PackageExec,
                 Package::Uninstall(_) => Leaf::PackageUninstall,
@@ -578,6 +585,7 @@ impl Command {
                 SelfGroup::Setup(_) => Leaf::SelfSetup,
                 SelfGroup::Update(_) => Leaf::SelfUpdate,
             },
+            Command::Vendor(_) => Leaf::Vendor,
             Command::Version(_) => Leaf::Version,
             Command::External(_) => return None,
         })

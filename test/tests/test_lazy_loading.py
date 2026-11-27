@@ -3,7 +3,7 @@
 """Acceptance tests for lazy package loading (issue #302).
 
 A tool whose `lazy-mode` resolves to `always` is **deferred**: it reaches
-`PATH` as a directory of generated launchers under `$OCX_HOME/shims/` and its
+`PATH` as a directory of generated launchers under `$OCX_HOME/deferred/` and its
 content materializes on the first invocation of one of its declared names.
 
 Two families live here, both from `adr_lazy_package_loading.md`:
@@ -20,8 +20,8 @@ Two techniques recur:
 - **Shell-free.** Where nothing has to actually run, the assertion reads
   `ocx --format json env` and compares a `PATH` entry against the shim `bin/`
   path derived from the store layout. No shell, no PATH resolution of ours.
-- **`OCX_BINARY_PIN` as the observation point.** A generated launcher execs
-  `"${OCX_BINARY_PIN:-ocx}" launcher shim …`. Pointing that variable at a
+- **`OCX_BINARY_PIN` as the observation point.** A deferred launcher starts
+  the pinned `ocx` (`ocx launcher shim …`) before any `PATH` search. Pointing that variable at a
   wrapper script makes every shim (and entry-point launcher) re-entry an
   observable, appended log line — which is how S-004 proves the shim was *not*
   entered a second time without measuring time.
@@ -51,6 +51,13 @@ from src.helpers import (
     make_package,
     make_package_with_entrypoints,
     write_ocx_toml,
+)
+from src.launcher_fixtures import (
+    DEPTH_VAR,
+    launcher_env,
+    run_launcher,
+    stub_calls,
+    write_stub_ocx,
 )
 from src.shell_eval import run_after_sourcing
 from src.terminal import requires_pty, run_on_a_terminal
@@ -291,7 +298,7 @@ def test_s001_lazy_mode_always_puts_a_shim_dir_on_path_with_no_content(
 
     assert _path_values(lazy)[0] == str(shim_bin), (
         f"S-001: the shim `bin/` must be the first PATH entry emitted (last to "
-        f"resolve, so the real bin/ and entrypoints/ shadow it once they exist); "
+        f"resolve, so the real bin/ and launchers shadow it once they exist); "
         f"got {_path_values(lazy)}"
     )
     assert not _is_materialized(ocx, project, pkg), (
@@ -640,6 +647,88 @@ def test_s004_a_second_invocation_of_the_same_name_does_not_re_enter_the_shim(
 
 
 # ---------------------------------------------------------------------------
+# the deferred launcher is a `deferred` record plus a native launcher
+# ---------------------------------------------------------------------------
+
+
+def test_deferred_launcher_is_published_with_a_deferred_record(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """§ 4.3: `deferred/<G>/…/l/NAME` sits beside `NAME.launch` of kind `deferred` naming the pinned identifier."""
+    pkg = make_package(
+        ocx,
+        unique_repo,
+        "1.0.0",
+        tmp_path,
+        bins=["hello"],
+        binaries=["hello"],
+        env=PUBLIC_BIN_PATH,
+    )
+    project = _lazy_project(ocx, tmp_path, _toolchain_lazy(pkg))
+    _env_json(ocx, project)
+    launcher_dir = assert_shim_dir_exists(
+        ocx, pkg.repo, "the compose deferred the tool"
+    )
+
+    record = json.loads((launcher_dir / "hello.launch").read_text(encoding="utf-8"))
+
+    assert record == {
+        "kind": "deferred",
+        "schema_version": 1,
+        "identifier": _pinned(ocx, project, pkg),
+    }
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the stub ocx is a /bin/sh script")
+def test_deferred_launcher_builds_the_frozen_argv_and_keeps_the_tier_selectors(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """`ocx launcher shim <identifier> -- NAME args…`, depth +1, OCX_GLOBAL and OCX_PROJECT untouched."""
+    pkg = make_package(
+        ocx,
+        unique_repo,
+        "1.0.0",
+        tmp_path,
+        bins=["hello"],
+        binaries=["hello"],
+        env=PUBLIC_BIN_PATH,
+    )
+    project = _lazy_project(ocx, tmp_path, _toolchain_lazy(pkg))
+    _env_json(ocx, project)
+    launcher_dir = assert_shim_dir_exists(
+        ocx, pkg.repo, "the compose deferred the tool"
+    )
+    stub, log = write_stub_ocx(tmp_path / "stub")
+
+    result = run_launcher(
+        launcher_dir / "hello",
+        "a",
+        "b c",
+        env=launcher_env(
+            ocx,
+            OCX_BINARY_PIN=str(stub),
+            OCX_GLOBAL="1",
+            OCX_PROJECT=str(project),
+            **{DEPTH_VAR: "2"},
+        ),
+    )
+
+    assert result.returncode == 0, result.stderr
+    (call,) = stub_calls(log)
+    assert call["argv"] == [
+        "launcher",
+        "shim",
+        _pinned(ocx, project, pkg),
+        "--",
+        "hello",
+        "a",
+        "b c",
+    ]
+    assert call["depth"] == "3"
+    assert (call["global"], call["project"]) == ("1", str(project))
+
+
+# ---------------------------------------------------------------------------
 # S-005 — `ocx env` twice, cold store then warm
 # ---------------------------------------------------------------------------
 
@@ -736,7 +825,7 @@ def test_s007_which_answers_all_four_policy_and_state_cells(
     | `--lazy-mode always` | materialized | the package root — content outranks a shim |
 
     `kind` is the discriminator, so each cell asserts it rather than
-    pattern-matching the path string: a `path` under `shims/` and a `kind` of
+    pattern-matching the path string: a `path` under `deferred/` and a `kind` of
     `package` would be a contradiction the string check alone would miss.
     """
     pkg = make_package(
@@ -896,11 +985,8 @@ def test_s013_lazy_mode_always_defers_on_every_host(
 
     What is still host-specific is the *shape* of a slot, and that is what the
     Windows clause below pins: `write_windows_shim_slot` hardlinks `<name>.exe`
-    from the committed blob and writes a `<name>.shimref` sidecar beside the
-    extensionless `#!/bin/sh` body. Never `<name>.shim` — that extension names
-    an installed package's `entrypoints/` sidecar, and `materialize_lazy`'s
-    dispatch probes `shim` before `shimref`, so one stray `.shim` in a shim
-    tree's `bin/` would be read by the wrong reader.
+    from the committed blob and writes a `<name>.launch` record beside it. The
+    retired `.shim` and `.shimref` sidecars are never written.
     """
     pkg = make_package(
         ocx, unique_repo, "1.0.0", tmp_path, bins=["hello"], binaries=["hello"], env=PUBLIC_BIN_PATH
@@ -919,13 +1005,12 @@ def test_s013_lazy_mode_always_defers_on_every_host(
 
     if sys.platform == "win32":
         present = sorted(entry.name for entry in shim_bin.iterdir())
-        assert {"hello.exe", "hello.shimref"} <= set(present), (
-            f"S-013: the Windows slot is the shim `.exe` plus its `.shimref` sidecar; "
+        assert {"hello.exe", "hello.launch"} <= set(present), (
+            f"S-013: the Windows slot is the launcher `.exe` plus its `.launch` record; "
             f"{shim_bin} holds {present}"
         )
-        assert "hello.shim" not in present, (
-            f"S-013: `.shim` names an installed package's entrypoint sidecar, never a shim "
-            f"tree's — the dispatch probes it first and would read the wrong one; got {present}"
+        assert not {"hello.shim", "hello.shimref"} & set(present), (
+            f"S-013: the retired sidecars are never written; got {present}"
         )
 
 
@@ -1589,3 +1674,217 @@ def test_lock_no_pull_names_the_tools_it_could_not_render_and_renders_the_rest(
     assert '"here"' not in result.stderr, f"the present tool must not be named:\n{result.stderr}"
     bin_dir = project / ".ocx" / "toolchain" / "active" / "bin"
     assert bin_dir.is_dir() and any(bin_dir.iterdir()), "the present tool's trampoline must be rendered"
+
+
+# ---------------------------------------------------------------------------
+# A launcher an older release or another launcher generation published
+# ---------------------------------------------------------------------------
+
+# What a release before the launcher directories wrote under `shims/<id>/bin/NAME`.
+OLD_RELEASE_SHIM_BODY = (
+    "#!/bin/sh\n"
+    "# Generated by ocx at install time. Do not edit.\n"
+    "exec \"${OCX_BINARY_PIN:-ocx}\" launcher shim '@IDENTIFIER@' -- \"${0##*/}\" \"$@\"\n"
+)
+
+
+def _publish_deferred_tree(
+    ocx: OcxRunner, project: Path, pkg: PackageInfo
+) -> tuple[Path, Path, str]:
+    """Compose `pkg` lazily; return its `deferred/<G>` directory, the `l/` below it and the pinned identifier its launchers bake."""
+    return _publish_deferred_tree_named(ocx, project, pkg, "hello")
+
+
+def _publish_deferred_tree_named(
+    ocx: OcxRunner, project: Path, pkg: PackageInfo, name: str
+) -> tuple[Path, Path, str]:
+    """[`_publish_deferred_tree`] for a package whose launcher is called `name`."""
+    export = _run(ocx, project, "env", "--shell=sh")
+    assert export.returncode == EXIT_SUCCESS, f"ocx env --shell=sh failed:\n{export.stderr}"
+    launcher_dir = assert_shim_dir_exists(ocx, pkg.repo, "the compose deferred the tool")
+    generation = ocx.ocx_home / "deferred" / launcher_dir.relative_to(ocx.ocx_home / "deferred").parts[0]
+    identifier = json.loads((launcher_dir / f"{name}.launch").read_text())["identifier"]
+    return generation, launcher_dir, identifier
+
+
+def _seed_older_release_tree(
+    ocx: OcxRunner, generation: Path, launcher_dir: Path, identifier: str, names: list[str]
+) -> Path:
+    """Hand-write `shims/<id>/bin/NAME` the way an older release did, and drop the tree this release published."""
+    old_bin = ocx.ocx_home / "shims" / launcher_dir.parent.relative_to(generation) / "bin"
+    old_bin.mkdir(parents=True)
+    for name in names:
+        launcher = old_bin / name
+        launcher.write_text(OLD_RELEASE_SHIM_BODY.replace("@IDENTIFIER@", identifier))
+        launcher.chmod(launcher.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    shutil.rmtree(generation)
+    return old_bin
+
+
+def _lazy_hello(ocx: OcxRunner, unique_repo: str, tmp_path: Path) -> tuple[PackageInfo, Path]:
+    pkg = make_package(
+        ocx, unique_repo, "1.0.0", tmp_path, bins=["hello"], binaries=["hello"], env=PUBLIC_BIN_PATH
+    )
+    return pkg, _lazy_project(ocx, tmp_path, _toolchain_lazy(pkg))
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="the older release's launcher on this path is a POSIX shell script; its Windows form is `.exe` + `.shimref`",
+)
+def test_an_older_releases_deferred_launcher_still_runs_through_the_current_ocx(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """A captured `PATH` naming `shims/<id>/bin` keeps working after an update.
+
+    The current ocx publishes nothing under `shims/`, so the claim set cannot come from that
+    directory: it comes from the package metadata the home holds.
+    """
+    pkg, project = _lazy_hello(ocx, unique_repo, tmp_path)
+    generation, launcher_dir, identifier = _publish_deferred_tree(ocx, project, pkg)
+    old_bin = _seed_older_release_tree(ocx, generation, launcher_dir, identifier, ["hello"])
+    assert not _is_materialized(ocx, project, pkg), "precondition: the store starts cold"
+
+    result = run_launcher(
+        old_bin / "hello",
+        env=_shell_env(ocx, PATH=f"{old_bin}{os.pathsep}{os.environ['PATH']}"),
+        cwd=project,
+    )
+
+    assert result.returncode == EXIT_SUCCESS, (
+        f"rc={result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    assert pkg.marker in result.stdout, f"the tool's output must reach the caller: {result.stdout!r}"
+
+
+def test_a_launcher_of_another_generation_still_runs_through_the_current_ocx(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """A `deferred/<G'>` tree an earlier `ocx` published, still on a captured `PATH`, keeps working."""
+    pkg, project = _lazy_hello(ocx, unique_repo, tmp_path)
+    generation, launcher_dir, _ = _publish_deferred_tree(ocx, project, pkg)
+    other = generation.with_name("0123456789abcdef")
+    assert other != generation, "precondition: the made-up generation must differ from the host's"
+    # `refs/` holds absolute links into the blob store; the launcher reads only its record.
+    shutil.copytree(generation, other, ignore=shutil.ignore_patterns("refs"))
+    shutil.rmtree(generation)
+    launcher_name = "hello.exe" if sys.platform == "win32" else "hello"
+    launcher = other / launcher_dir.relative_to(generation) / launcher_name
+    assert not _is_materialized(ocx, project, pkg), "precondition: the store starts cold"
+
+    result = run_launcher(launcher, env=_shell_env(ocx), cwd=project)
+
+    assert result.returncode == EXIT_SUCCESS, (
+        f"rc={result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    assert pkg.marker in result.stdout, f"the tool's output must reach the caller: {result.stdout!r}"
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32" or not hasattr(os, "killpg"),
+    reason="the older release's launcher is a POSIX shell script here, and the deadline kills the whole "
+    "process group; without killpg an execve loop would outlive the timeout",
+)
+def test_a_name_the_package_does_not_declare_is_refused_through_an_older_tree(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """An undeclared name through an older tree first on `PATH` exits 65 before any download.
+
+    The name check in `validate_argv0` refuses it before the PATH strip and the containment guard run,
+    so this test does not reach the re-exec loop guard; the test below does.
+    """
+    pkg, project = _lazy_hello(ocx, unique_repo, tmp_path)
+    generation, launcher_dir, identifier = _publish_deferred_tree(ocx, project, pkg)
+    old_bin = _seed_older_release_tree(ocx, generation, launcher_dir, identifier, ["hello", "ghost"])
+
+    result = _run_in_its_own_process_group(
+        [str(old_bin / "ghost")],
+        cwd=project,
+        env=_shell_env(ocx, PATH=f"{old_bin}{os.pathsep}{os.environ['PATH']}"),
+        timeout=60,
+    )
+
+    assert result.returncode == EXIT_DATA_ERROR, (
+        f"rc={result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    assert "ghost" in result.stderr and pkg.repo in result.stderr, result.stderr
+    assert not _is_materialized(ocx, project, pkg), "an undeclared name must not download the package"
+
+
+def test_a_deferred_tool_never_started_survives_ocx_clean_and_then_starts(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """`ocx clean` keeps every blob the launcher's claim check reads, so a never-started tool still starts."""
+    pkg, project = _lazy_hello(ocx, unique_repo, tmp_path)
+    _, launcher_dir, _ = _publish_deferred_tree(ocx, project, pkg)
+    assert _run(ocx, project, "--format", "json", "clean").returncode == EXIT_SUCCESS
+
+    # No store probe before the start: `package which` would read the manifest back into the blob store.
+    result = _trigger_the_shim(ocx, project, launcher_dir, "hello")
+
+    assert result.returncode == EXIT_SUCCESS, (
+        f"rc={result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    assert pkg.marker in result.stdout, f"the tool's output must reach the caller: {result.stdout!r}"
+    assert _is_materialized(ocx, project, pkg), "the first start materializes the package"
+
+
+def test_a_deferred_launcher_whose_manifest_blob_was_removed_by_hand_refuses_and_downloads_nothing(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """A home that lost the metadata for another reason still refuses (79, `package_not_found`) before any download."""
+    pkg, project = _lazy_hello(ocx, unique_repo, tmp_path)
+    _, launcher_dir, identifier = _publish_deferred_tree(ocx, project, pkg)
+    hex_digest = identifier.rsplit("sha256:", 1)[1]
+    manifests = [
+        blob
+        for blob in (ocx.ocx_home / "blobs").rglob("data")
+        if "".join(blob.parent.parts[-2:]) == hex_digest[:32]
+    ]
+    assert len(manifests) == 1, f"precondition: one manifest blob for {hex_digest}: {manifests}"
+    manifests[0].unlink()
+
+    result = _trigger_the_shim(ocx, project, launcher_dir, "hello")
+
+    assert result.returncode == EXIT_NOT_FOUND, (
+        f"rc={result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    detailed = subprocess.run(
+        [str(ocx.binary), "--format", "json", "launcher", "shim", identifier, "--", "hello"],
+        cwd=project, capture_output=True, text=True, env=_shell_env(ocx), check=False,
+    )
+    assert detailed.returncode == EXIT_NOT_FOUND, detailed.stderr
+    error = json.loads(detailed.stdout)["error"]
+    assert error["detail"] == "package_not_found", error
+    # The refusal names the pinned digest; it carries no `ocx install` remedy text today.
+    assert hex_digest in error["message"], error
+    assert not _is_materialized(ocx, project, pkg), "a refused start must not download the package"
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32" or not hasattr(os, "killpg"),
+    reason="the older release's launcher is a POSIX shell script here, and the deadline kills the whole "
+    "process group; without killpg an execve loop would outlive the timeout",
+)
+def test_a_declared_name_the_package_lacks_ends_when_started_through_an_older_tree_still_on_path(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """The loop guard strips the older `shims/<id>/bin` from `PATH`, finds nothing and refuses (65); it never re-enters."""
+    pkg = make_package(
+        ocx, unique_repo, "1.0.0", tmp_path, bins=["real"], binaries=["ghost"], no_bin_scan=True, env=PUBLIC_BIN_PATH
+    )
+    project = _lazy_project(ocx, tmp_path, _toolchain_lazy(pkg, binding="ghost"))
+    generation, launcher_dir, identifier = _publish_deferred_tree_named(ocx, project, pkg, "ghost")
+    old_bin = _seed_older_release_tree(ocx, generation, launcher_dir, identifier, ["ghost"])
+
+    result = _run_in_its_own_process_group(
+        [str(old_bin / "ghost")],
+        cwd=project,
+        env=_shell_env(ocx, PATH=f"{old_bin}{os.pathsep}{os.environ['PATH']}"),
+        timeout=90,
+    )
+
+    assert result.returncode == EXIT_DATA_ERROR, (
+        f"rc={result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    assert "ghost" in result.stderr and pkg.repo in result.stderr, result.stderr

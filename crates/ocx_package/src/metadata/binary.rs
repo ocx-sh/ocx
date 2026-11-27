@@ -35,12 +35,6 @@ impl AsRef<str> for BinaryName {
 /// Windows-reserved filename characters; `/` and `\` also close path traversal.
 const FORBIDDEN_CHARS: &[char] = &['/', '\\', '<', '>', ':', '"', '|', '?', '*'];
 
-/// Reserved Windows device names, matched case-insensitively before the first `.`.
-const RESERVED_DEVICE_NAMES: &[&str] = &[
-    "CON", "PRN", "AUX", "NUL", "COM0", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "LPT0",
-    "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
-];
-
 impl TryFrom<String> for BinaryName {
     type Error = BinaryError;
 
@@ -69,12 +63,9 @@ impl TryFrom<String> for BinaryName {
             return Err(BinaryError::LeadingOrTrailingDot { name: value });
         }
         let basename = value.split('.').next().unwrap_or(value.as_str());
-        let basename_upper = basename.to_ascii_uppercase();
-        if RESERVED_DEVICE_NAMES.contains(&basename_upper.as_str()) {
-            return Err(BinaryError::ReservedWindowsDeviceName {
-                name: value,
-                reserved: basename_upper,
-            });
+        if ocx_env_apply::windows_path::is_reserved_device_name(basename) {
+            let reserved = basename.to_ascii_uppercase();
+            return Err(BinaryError::ReservedWindowsDeviceName { name: value, reserved });
         }
         Ok(BinaryName(value))
     }

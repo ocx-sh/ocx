@@ -25,6 +25,8 @@ pub enum CleanKind {
     // next prompt), and a `--dry-run` that did not name it would preview
     // everything except the part a user would want to stop.
     Consent,
+    /// A superseded launcher generation directory.
+    Launchers,
 }
 
 impl fmt::Display for CleanKind {
@@ -33,6 +35,7 @@ impl fmt::Display for CleanKind {
             CleanKind::Object => write!(f, "object"),
             CleanKind::Temp => write!(f, "temp"),
             CleanKind::Consent => write!(f, "consent"),
+            CleanKind::Launchers => write!(f, "launchers"),
         }
     }
 }
@@ -58,18 +61,24 @@ pub struct CleanEntry {
     pub held_by: Vec<PathBuf>,
 }
 
-/// Objects, temp directories and consent stamps a clean removed, or would remove in a dry run.
+/// Objects, temp directories, consent stamps and launcher directories a clean removed, or would remove in a dry run.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct Clean {
-    /// One entry per resource: objects, then temp directories, then consent stamps.
+    /// One entry per resource: objects, then temp directories, then consent stamps, then launcher directories.
     pub items: Vec<CleanEntry>,
 }
 
 impl Clean {
     /// Builds the report from every [`CleanResult`](ocx_package_manager::CleanResult) field; a
     /// dropped `consent` list would make the stamp sweep silent, which its contract forbids.
-    pub fn new(objects: Vec<CleanedObject>, temp: Vec<PathBuf>, consent: Vec<PathBuf>, dry_run: bool) -> Self {
-        let mut entries = Vec::with_capacity(objects.len() + temp.len() + consent.len());
+    pub fn new(
+        objects: Vec<CleanedObject>,
+        temp: Vec<PathBuf>,
+        consent: Vec<PathBuf>,
+        launchers: Vec<PathBuf>,
+        dry_run: bool,
+    ) -> Self {
+        let mut entries = Vec::with_capacity(objects.len() + temp.len() + consent.len() + launchers.len());
         for obj in objects {
             entries.push(CleanEntry {
                 kind: CleanKind::Object,
@@ -89,6 +98,14 @@ impl Clean {
         for path in consent {
             entries.push(CleanEntry {
                 kind: CleanKind::Consent,
+                dry_run,
+                path,
+                held_by: Vec::new(),
+            });
+        }
+        for path in launchers {
+            entries.push(CleanEntry {
+                kind: CleanKind::Launchers,
                 dry_run,
                 path,
                 held_by: Vec::new(),
@@ -136,5 +153,30 @@ impl Printable for Clean {
                 &rows.map(|c| c.into_iter().map(Cell::from).collect::<Vec<_>>()),
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clean_kind_launchers_displays_and_serializes_as_launchers() {
+        assert_eq!(CleanKind::Launchers.to_string(), "launchers");
+        assert_eq!(serde_json::to_string(&CleanKind::Launchers).unwrap(), "\"launchers\"");
+    }
+
+    #[test]
+    fn new_emits_a_launchers_entry_after_the_consent_entries() {
+        let clean = Clean::new(
+            Vec::new(),
+            Vec::new(),
+            vec![PathBuf::from("/state/a")],
+            vec![PathBuf::from("/l/b")],
+            false,
+        );
+        let kinds: Vec<_> = clean.items.iter().map(|e| e.kind.to_string()).collect();
+        assert_eq!(kinds, ["consent", "launchers"]);
+        assert_eq!(clean.items[1].path, PathBuf::from("/l/b"));
     }
 }

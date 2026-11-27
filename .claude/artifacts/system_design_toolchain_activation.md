@@ -370,44 +370,13 @@ sequenceDiagram
 
 ## 5. Data Contracts
 
-### Sidecar contents (shared read rules; one new extension)
+### Launcher records
 
-*(Retitled 2026-09-05 — ADR D-9 adds `.exec`, so "reused unchanged" is no longer true. A sidecar's file extension selects its wire verb, and `ocx exec` is not a verb either shipped extension can express.)*
-
-| File | Payload | Wire verb | Containment |
-|---|---|---|---|
-| `<name>.exec` | one line: an absolute path (the project root), **or** the literal `global` | `WIRE_SUBCOMMAND_EXEC` — emitted as `--project "<root>" exec` / `--global exec` | none — the value is a **project selector**, not a package root; `ocx` re-resolves it through the ordinary project chain |
-| `<name>.shim` | one line, absolute package root | `launcher exec` | canonicalize, then component-wise `starts_with` against `$OCX_HOME\packages` and the two scratch roots |
-| `<name>.shimref` | one line, pinned identifier | `launcher shim` | none by design — no local path exists; digest-addressed content-verified fetch stands in its place |
-
-`.shim` and `.shimref` are **unchanged**, and a trampoline writes neither: only `.exec` appears under `toolchain/bin/`. The other two keep their shipped producers — `entrypoints/` launchers and lazy shim slots.
-
-Read side, shared by all three: 32 KiB cap before any further work, exactly one line, one terminator stripped, no NUL/CR/LF, UTF-8, then the per-grammar clause. The reader re-validates independently of whatever wrote the file.
-
-**One structural difference the `.exec` arm carries.** `build_child_command_line` emits `<program> <verb> "<value>" -- "<stem>" <argv…>` for the two shipped grammars — value after verb. A project selector is a **root** flag, so the `.exec` arm emits `<program> --project "<root>" exec -- "<stem>" <argv…>`, and the `global` value emits `<program> --global exec -- "<stem>" <argv…>` with no value token at all. Every token still goes through the `CommandLineToArgvW` quoter.
-
-**Environment strip, Windows.** `CreateProcessW` runs with `lpEnvironment = NULL` (`crates/ocx_shim/src/main.rs:640`), so the child inherits the shim's own block; the shim calls `SetEnvironmentVariableW(name, NULL)` for `OCX_GLOBAL` and `OCX_PROJECT` before the spawn. That is the counterpart of the POSIX body's `unset`, and it is why `windows-sys` gains `Win32_System_Environment`.
+A launcher written by this release has one record `NAME.launch` beside it, JSON, at most 1 MiB, `kind` first: `package` (`package_root`), `deferred` (`identifier`) or `toolchain` (`tier`, `project_root`, `ocx`) — the schema, validation and examples are `adr_unified_launcher.md` § 3. The one-line `.exec`, `.shim` and `.shimref` sidecars of earlier releases stay on disk with their own `.exe` and keep working; no release writes them any more.
 
 ### Launcher bodies
 
-**POSIX trampoline — one shape, no variants.** Two values are baked, each **inside single quotes**: the home selector and the absolute `ocx` install path. *(Body updated 2026-09-06 to what shipped — D-V3 `${0##*/}`, D-V19 the baked install path, D-V12/D-V23 the marker line. See § Amendment.)*
-
-```
-#!/bin/sh
-# ocx-toolchain-trampoline
-unset OCX_GLOBAL OCX_PROJECT
-__ocx_binary='<abs ocx install path>'
-exec "${OCX_BINARY_PIN:-$__ocx_binary}" --project '<abs project root>' exec -- "${0##*/}" "$@"
-      … the global home renders `--global` in place of `--project '<…>'`
-```
-
-Line 2 is exactly `env::TRAMPOLINE_MARKER` — the POSIX half of `is_ocx_trampoline`, anchored to the whole of that line, and the constant is interpolated from `env.rs` rather than re-spelled so the writer and the predicate cannot drift (D-V12, D-V23). `__ocx_binary` is `$OCX_HOME/symlinks/<ocx cli id>/current/content/bin/ocx` derived at render time, falling back to the bare word `ocx` only when that path does not exist then (D-V19); `OCX_BINARY_PIN` still overrides both. The invoked name comes from the `${0##*/}` shell builtin, never a forked `basename`, which would have resolved out of the ambient `PATH` (D-V3).
-
-There is no deferred variant and no pinned variant: `pinned` and `lazy-mode` are read at re-entry, and a deferred tool is materialized inside the composition through its lazy shim slot. `$0` is read for the basename only, never for self-location, since `toolchain-dir` can put the home where no `$0` walk reaches the project.
-
-**Windows.** `<name>.exe` hardlinked from `ShimBinStore`, then the `.exec` sidecar — `.exe` first, sequenced inside one per-entry task.
-
-**Golden-test obligation.** The trampoline body produces a **third** wire token, `WIRE_SUBCOMMAND_EXEC`, beside `WIRE_SUBCOMMAND` (`launcher exec`, from `unix_launcher_body`) and `WIRE_SUBCOMMAND_SHIM` (`launcher shim`, from `unix_shim_body`). It carries the same two-producer problem as the other two — `ocx_lib` cannot depend on the shim crate — so the canary set gains **one pair**: a byte-exact assertion in `body.rs` and its restatement from the shim side.
+No body is generated: every launcher is a byte copy of the native launcher blob for the host, on POSIX and Windows alike, written into a new render directory `shells/default-<16 random hex>/bin` (`adr_unified_launcher.md` § 6.4). What it runs per kind, and how it finds `ocx`, is § 3.4 there. The frozen wire tokens `launcher exec`, `launcher shim` and `exec` keep their paired goldens, now between `body.rs`'s token constants and the launcher's command builder.
 
 ### Type signatures
 
@@ -522,19 +491,21 @@ impl PackageManager {
     pub async fn render_toolchain(&self, request: RenderRequest<'_>) -> Result<RenderReport, Error>;
 }
 
-// The render stamp — under the shipped StateStore, no new store.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct RenderStamp {
+// The render stamp v2 — under the shipped StateStore, no new store.
+pub struct RenderStampV2 {         // file render_stamp.v2.json, v = 2
+    v: u8,
     pub home: PathBuf,
-    pub names: BTreeSet<metadata::BinaryName>,
-    /// Sorted `bin/` entry names + per-entry body content hash. No mtime.
-    pub bin_fingerprint: String,
-    /// Sorted `<group>/<entry>` -> digest-root pairs. Not what the trampolines
-    /// dispatch through (D-9: they compose from the lock) — what the `env`-mode
-    /// prepends and every dereference value resolve through, and what the heal
-    /// needs a baseline for. `bin/` bytes alone do not pin these.
-    pub link_fingerprint: String,
+    pub scope: RenderStampScope,
+    pub shell_dir: String,           // e.g. "default-8d41c2e07a95b3f6"
+    pub previous_shell_dir: String,  // the name `active` named before; "default" when an older ocx rendered last
+    pub fingerprint: String,         // render_fingerprint, 64 hex
+    pub generation: String,          // LauncherGeneration of the writer
+    pub names: BTreeSet<String>,
+    pub bin_fingerprint: BTreeMap<String, BinEntryStamp>,   // over shells/<shell_dir>/bin, records included
+    pub link_fingerprint: BTreeMap<String, String>,
 }
+// RenderStamp (v1, render_stamp.json) unchanged and read only by the new ocx.
+// The v1 `RenderStamp` stays readable and is never written.
 
 /// Lock-only link heal for the default group: one `readlink` per entry against
 /// the lock-derived digest root, `lock_scoped` repoint on mismatch. No compose,
@@ -761,3 +732,4 @@ The decision-level corrections — R9's platform qualifier, C-060's re-justified
 | 2026-09-05 | Cross-model gate applied (Codex `sol`, one-shot). `RenderStamp` gained `link_fingerprint` and `heal_default_group_links`; Flow C now desires the two global session entries unconditionally and heals the default group's links before emitting in `bin` mode; the macOS LaunchAgent became a `/bin/sh -c` load-time merge and `deregister_session_path` is subtractive on every platform with `launchctl unsetenv PATH` forbidden; `toolchain-dir` must resolve inside the user's home or `$OCX_HOME`; two link-integrity rows added to the failure-mode table. |
 | 2026-09-05 | **D-9 applied — a trampoline runs in the configured toolchain environment.** Flow B rewritten: re-entry is `ocx exec` against a baked home selector, preceded by `unset OCX_GLOBAL OCX_PROJECT` (POSIX) or two `SetEnvironmentVariableW` strips (Windows); deferred materialization moves *inside* the composition via lazy shim slots and is no longer a branch of the flow. § *Sidecar contents* retitled and gains `<name>.exec` (project selector or the literal `global`, `WIRE_SUBCOMMAND_EXEC`, root-flag-first child line, no containment of its own); § *Launcher bodies* collapses to one shape with no linked/pinned/deferred variants; the golden set gains a third-token pair. Type signatures gain `TrampolineTarget`, `RenderRequest.target`, the fallible `resolve_command` and `resolve_command_excluding`; `RenderRequest.pinned` documented as link-only; `RenderStamp.link_fingerprint`'s rationale narrowed to dereference consumers and the heal. Security boundaries, the NFR performance table, the failure-mode table (six rows added or rewritten), the internal/external dependency tables (`windows-sys` gains a third feature) and the glossary updated. |
 | 2026-09-05 | Owner decisions applied. The name set is metadata-declared claims of the roots **and every interface-admitted dependency** (D-1); `toolchain_names` performs **no refusals** — every collision is debug plus `ocx inspect`, and the shipped `ShimNameShadowsOcx` refusal is relaxed (D-4), so the failure table's hard-refusal row and the security section's denylist bound are replaced by residual R4; the Windows `.shimref` producer ships here and lifts the lazy-mode floor (D-2); env floors renamed `OCX_TOOLCHAIN_ACTIVATE` / `OCX_TOOLCHAIN_PINNED` and the setup flag `--toolchain-activate`, with the keys inside `ocx.toml` staying bare (D-6). |
+| 2026-11-26 | Amended by adr_unified_launcher.md |

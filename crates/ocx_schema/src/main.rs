@@ -16,7 +16,7 @@ fn main() {
         Some(json) => println!("{json}"),
         None => {
             eprintln!(
-                "Unknown schema type: {schema_type}. Published: metadata, config, project, project-lock, patch, reports, execution-record, errors. Golden only: cli, cli-schema"
+                "Unknown schema type: {schema_type}. Published: metadata, config, project, project-lock, patch, reports, execution-record, vendor-manifest, errors. Golden only: cli, cli-schema"
             );
             std::process::exit(1);
         }

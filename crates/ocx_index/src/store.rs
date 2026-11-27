@@ -28,6 +28,40 @@ pub struct IndexStore {
     /// Reads refuse a symlink leaf: set for an untrusted export tree, left off for the home, where a user may
     /// link an index file in.
     refuse_links: bool,
+    /// Shared by every clone, so a read through any of them lands in one record.
+    lookup_recorder: Option<LookupRecorder>,
+}
+
+/// The index documents a store read, shared between its clones.
+///
+/// Each entry is a path relative to the store root, `/`-separated, with whether the file existed.
+#[derive(Debug, Clone, Default)]
+pub struct LookupRecorder {
+    lookups: std::sync::Arc<std::sync::Mutex<std::collections::BTreeMap<String, bool>>>,
+}
+
+impl LookupRecorder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Notes one read; the latest `found` wins for a repeated path.
+    pub fn record(&self, relative_path: impl Into<String>, found: bool) {
+        self.lookups
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(relative_path.into(), found);
+    }
+
+    /// Every recorded `(path, found)`, sorted by path, each path once.
+    pub fn lookups(&self) -> Vec<(String, bool)> {
+        self.lookups
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .map(|(path, found)| (path.clone(), *found))
+            .collect()
+    }
 }
 
 impl IndexStore {
@@ -38,7 +72,30 @@ impl IndexStore {
             root,
             locks_root,
             refuse_links: false,
+            lookup_recorder: None,
         }
+    }
+
+    /// Records every document read through this store, and its clones, in `recorder`.
+    #[must_use]
+    pub fn with_lookup_recorder(mut self, recorder: LookupRecorder) -> Self {
+        self.lookup_recorder = Some(recorder);
+        self
+    }
+
+    /// The recorder set by [`Self::with_lookup_recorder`].
+    pub fn lookup_recorder(&self) -> Option<&LookupRecorder> {
+        self.lookup_recorder.as_ref()
+    }
+
+    /// Reads one index document and, with a recorder set, notes the path as found or absent.
+    /// A failed read is not a lookup result, so it records nothing.
+    async fn read_document(&self, target: &Path) -> Result<Option<Vec<u8>>> {
+        let bytes = read_index_document(target, self.refuse_links).await?;
+        if let (Some(recorder), Ok(relative)) = (&self.lookup_recorder, target.strip_prefix(&self.root)) {
+            recorder.record(relative.to_string_lossy().replace('\\', "/"), bytes.is_some());
+        }
+        Ok(bytes)
     }
 
     /// Makes every document read refuse a symlink leaf, for a tree the caller does not trust.
@@ -154,7 +211,7 @@ impl IndexStore {
 
     /// Read `target` and verify it against `digest`; `None` when absent.
     async fn read_verified_object(&self, target: PathBuf, digest: &Digest) -> Result<Option<Vec<u8>>> {
-        let Some(bytes) = read_index_document(&target, self.refuse_links).await? else {
+        let Some(bytes) = self.read_document(&target).await? else {
             return Ok(None);
         };
 
@@ -393,7 +450,7 @@ impl IndexStore {
         Self::ensure_source_contained(source)?;
         Self::ensure_repository_contained(repository)?;
         let target = self.root_document_path(source, repository);
-        let Some(bytes) = read_index_document(&target, self.refuse_links).await? else {
+        let Some(bytes) = self.read_document(&target).await? else {
             return Ok(None);
         };
         let root: crate::IndexRoot = serde_json::from_slice(&bytes).map_err(|cause| {
@@ -412,7 +469,7 @@ impl IndexStore {
     pub async fn read_source_catalog(&self, source: &str) -> Result<Option<CatalogIndex>> {
         Self::ensure_source_contained(source)?;
         let target = self.source_catalog_path(source);
-        let Some(bytes) = read_index_document(&target, self.refuse_links).await? else {
+        let Some(bytes) = self.read_document(&target).await? else {
             return Ok(None);
         };
         let document: CatalogDocument = serde_json::from_slice(&bytes)?;
@@ -429,7 +486,7 @@ impl IndexStore {
     pub async fn read_source_config(&self, source: &str) -> Result<Option<IndexFormatConfig>> {
         Self::ensure_source_contained(source)?;
         let target = self.source_config_path(source);
-        let Some(bytes) = read_index_document(&target, self.refuse_links).await? else {
+        let Some(bytes) = self.read_document(&target).await? else {
             return Ok(None);
         };
         let config = serde_json::from_slice(&bytes).map_err(|cause| crate::error::Error::MalformedIndexDocument {
@@ -477,7 +534,7 @@ impl IndexStore {
         Self::ensure_source_contained(source)?;
         Self::ensure_repository_contained(repository)?;
         let target = self.root_document_path(source, repository);
-        read_index_document(&target, self.refuse_links).await
+        self.read_document(&target).await
     }
 
     /// Tempfile + atomic-rename publish; survives a process crash, not power loss (the parent
@@ -2718,5 +2775,36 @@ mod wire_grammar_tests {
             s.read_source_catalog("ocx.sh").await,
             Err(ref e) if format!("{e:?}").contains("InvalidInput")
         ));
+    }
+
+    /// A store with a recorder lists each document it was asked for, relative to its root, found or absent.
+    #[tokio::test]
+    async fn contract_recorder_records_a_found_and_an_absent_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("index");
+        let recorder = LookupRecorder::new();
+        let s = store(&root).with_lookup_recorder(recorder.clone());
+        let present = s.source_catalog_path("ocx.sh");
+        std::fs::create_dir_all(present.parent().unwrap()).unwrap();
+        std::fs::write(&present, br#"{"format_version":1,"packages":{}}"#).unwrap();
+
+        assert!(s.read_source_catalog("ocx.sh").await.unwrap().is_some());
+        assert!(s.read_source_catalog("absent.example").await.unwrap().is_none());
+
+        let relative = |path: PathBuf| path.strip_prefix(&root).unwrap().to_string_lossy().replace('\\', "/");
+        let mut expected = vec![
+            (relative(present), true),
+            (relative(s.source_catalog_path("absent.example")), false),
+        ];
+        expected.sort();
+        assert_eq!(recorder.lookups(), expected);
+    }
+
+    #[test]
+    fn recorder_survives_clone() {
+        let recorder = LookupRecorder::new();
+        let s = IndexStore::new("/index").with_lookup_recorder(recorder.clone());
+        s.clone().lookup_recorder().unwrap().record("a/c/index.json", true);
+        assert_eq!(recorder.lookups(), vec![("a/c/index.json".to_string(), true)]);
     }
 }

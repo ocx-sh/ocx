@@ -87,7 +87,7 @@ pub struct Diff {
 pub fn diff(base: &Value, current: &Value, kind: Kind) -> Diff {
     match kind {
         Kind::Reports => reports(base, current),
-        Kind::Errors => errors(base, current),
+        Kind::Errors | Kind::VendorManifest => whole_document(base, current),
         Kind::Cli => cli(base, current),
         Kind::Input => Diff::default(),
     }
@@ -606,7 +606,8 @@ impl Schemas<'_> {
     }
 }
 
-fn errors(base: &Value, current: &Value) -> Diff {
+/// A document with no root list (`errors`, `vendor-manifest`): walked from its top, every finding document-wide.
+fn whole_document(base: &Value, current: &Value) -> Diff {
     let mut walk = Schemas::new([base, current]);
     walk.subject = "*".to_owned();
     walk.node(base, current, "", "", true);
@@ -1083,8 +1084,8 @@ pub enum Violation {
     Unacknowledged { kind: Kind, finding: Finding },
     /// A ledger entry that matches no finding (a `semantic` entry excepted).
     Stale(LedgerEntry),
-    /// A surviving item's version is not baseline + 1 when an entry lists it, or not the baseline when none does;
-    /// an added item's is not 1.
+    /// An item's version is not its baseline (1 when the baseline lacks it) plus 1 when a breaking or `semantic`
+    /// entry lists it.
     Version {
         kind: Kind,
         subject: String,
@@ -1151,6 +1152,7 @@ fn document_name(kind: Kind) -> &'static str {
         Kind::Reports => "reports",
         Kind::Errors => "errors",
         Kind::Cli => "cli",
+        Kind::VendorManifest => "vendor-manifest",
         Kind::Input => "input",
     }
 }
@@ -1161,16 +1163,21 @@ fn speaks_to(entry: &LedgerEntry, kind: Kind, finding: &Finding) -> bool {
     entry.document == document_name(kind) && entry.pointer == finding.pointer && entry.rule.speaks_to(finding.code)
 }
 
-/// Runs the gate over all three documents: diff each, match every breaking finding to an entry, flag stale entries,
-/// then check every version.
+/// Runs the gate over all four documents: diff each, match every breaking finding to an entry, flag stale entries,
+/// then check every version. A vendor manifest the baseline does not hold yet is compared with itself, so all of it is
+/// an addition and only an unmodelled construct can red; the release rotation writes its baseline.
 pub fn gate(base: &Documents, current: &Documents, ledger: &[LedgerEntry]) -> Vec<Violation> {
     let mut violations = Vec::new();
     let mut spoken = vec![false; ledger.len()];
-    for (kind, old, new) in [
+    let mut compared = vec![
         (Kind::Reports, &base.reports, &current.reports),
         (Kind::Errors, &base.errors, &current.errors),
         (Kind::Cli, &base.cli, &current.cli),
-    ] {
+    ];
+    if let Some(new) = &current.vendor_manifest {
+        compared.push((Kind::VendorManifest, base.vendor_manifest.as_ref().unwrap_or(new), new));
+    }
+    for (kind, old, new) in compared {
         let run = diff(old, new, kind);
         let floor = raw(old) + raw(new);
         if run.keywords < floor {
@@ -1220,22 +1227,21 @@ fn version_violations(
     new: &versions::Versions,
     ledger: &[LedgerEntry],
 ) -> Vec<Violation> {
-    // A breaking or `semantic` entry that lists the subject bumps it; a `doc` entry bumps nothing. `"*"` names the
-    // error document's own versions: the env registry is document-wide and has no version to bump.
+    // A breaking or `semantic` entry that lists the subject bumps it; a `doc` entry bumps nothing. `"*"` names a
+    // single-version document's own version (errors, vendor manifest): the env registry is document-wide and has none.
     let bumped = |kind: Kind, subject: &str| {
         let bump = ledger.iter().any(|entry| {
             entry.document == document_name(kind)
                 && entry.rule != EntryRule::Doc
-                && entry
-                    .subjects
-                    .iter()
-                    .any(|listed| listed == subject || (kind == Kind::Errors && listed == "*"))
+                && entry.subjects.iter().any(|listed| {
+                    listed == subject || (matches!(kind, Kind::Errors | Kind::VendorManifest) && listed == "*")
+                })
         });
         u32::from(bump)
     };
     let mut out = Vec::new();
     let mut check = |kind: Kind, subject: &str, baseline: Option<u32>, found: u32| {
-        let expected = baseline.map_or(1, |baseline| baseline + bumped(kind, subject));
+        let expected = baseline.unwrap_or(1) + bumped(kind, subject);
         if expected != found {
             out.push(Violation::Version {
                 kind,
@@ -1257,6 +1263,9 @@ fn version_violations(
         errors_schema_version(&current.errors),
     ) {
         check(Kind::Errors, "schema_version", Some(before), after);
+    }
+    if let Some(found) = new.vendor_manifest {
+        check(Kind::VendorManifest, "schema_version", old.vendor_manifest, found);
     }
     out
 }

@@ -488,7 +488,7 @@ def test_inspect_closure_surface_equals_env_and_env_self(ocx: OcxRunner, unique_
 
     # The root's own entry points are interface-only: `--self` bypasses the
     # package's own launchers and calls `bin/` directly, so the composer does
-    # not put the root's `entrypoints/` on PATH there — and must not claim it.
+    # not put the root's `launchers/<G>` on PATH there — and must not claim it.
     # The root's `bin/` DOES reach the self surface (its PATH var is `public`).
     priv_bins = {name for name, _ in _attr_by_digest(surface["private"]["binaries"])}
     priv_eps = {name for name, _ in _attr_by_digest(surface["private"]["entrypoints"])}

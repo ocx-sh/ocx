@@ -24,7 +24,7 @@ The tree lives at `$OCX_HOME/toolchain/` for the global toolchain and at `<proje
       <Description slot="description">a single * line, kept present by the renderer</Description>
     </Node>
     <Node name="active">
-      <Description slot="description">link to shells/default/, so the PATH entry is always active/bin</Description>
+      <Description slot="description">link to the current render directory under shells/, so the PATH entry is always active/bin</Description>
     </Node>
     <Node name="links/" open>
       <Node name={"<group>/"} open>
@@ -35,16 +35,13 @@ The tree lives at `$OCX_HOME/toolchain/` for the global toolchain and at `<proje
       </Node>
     </Node>
     <Node name="shells/" open>
-      <Node name="default/bin/" open>
-        <Description slot="description">one trampoline per exposed binary name, default group only</Description>
+      <Node name={"default-<16 hex>/bin/"} open>
+        <Description slot="description">one trampoline per exposed binary name, default group only; a render writes a new directory</Description>
         <Node name="node">
-          <Description slot="description">POSIX: a five-line /bin/sh trampoline that re-enters OCX</Description>
+          <Description slot="description">the native launcher program (<code>node.exe</code> on Windows), the same on every platform</Description>
         </Node>
-        <Node name="node.exe">
-          <Description slot="description">Windows: a native trampoline, paired with the sidecar below</Description>
-        </Node>
-        <Node name="node.exec">
-          <Description slot="description">Windows: one line with the toolchain selector, the project root or {'"global"'}</Description>
+        <Node name="node.launch">
+          <Description slot="description">its record: kind <code>toolchain</code>, the tier and, for a project, the project root</Description>
         </Node>
       </Node>
     </Node>
@@ -53,9 +50,11 @@ The tree lives at `$OCX_HOME/toolchain/` for the global toolchain and at `<proje
 
 Depth 1 is a closed set that the tree owns: `.gitignore`, `active`, `links/` and `shells/`. Every name *you* declare is a component of `links/<group>/<entry>`, one level below all four. No group or binding name you pick can collide with the tree's own structure.
 
-`active` is why the two halves are separate. It is the name a shell, an editor and a CI step hold. It points at the physical directory the renderer actually wrote, so the `PATH` entry stays `<home>/toolchain/active/bin` while what sits underneath is free to move. Ask [`ocx shell state`][cmd-shell-state] for the resolved value rather than joining it yourself. The JSON report's `toolchain_bin` field is that path.
+`active` is why the two halves are separate. It is the name a shell, an editor and a CI step hold. It points at the render directory the renderer wrote last, so the `PATH` entry stays `<home>/toolchain/active/bin` while what sits underneath is free to move. Ask [`ocx shell state`][cmd-shell-state] for the resolved value rather than joining it yourself. The JSON report's `toolchain_bin` field is that path.
 
-`shells/default/bin/` holds the trampolines that make [`activate = "bin"`][config-activate] work. There is one `PATH` entry, spelled `active/bin`, and each name is resolved by its own launcher at invocation time. The directory covers the default group only, because that is the group `PATH` exposes. On Windows each name is **two** files, an `.exe` and its `.exec` sidecar, and both are tracked independently.
+`shells/default-<16 hex>/bin/` holds the trampolines that make [`activate = "bin"`][config-activate] work. There is one `PATH` entry, spelled `active/bin`, and each name is resolved by its own launcher at invocation time. The directory covers the default group only, because that is the group `PATH` exposes. Each name is **two** files on every platform, the launcher and its `.launch` record, and both are tracked independently.
+
+A render with new content writes a complete new directory beside the old one and then switches `active` to it. A published render directory is never edited, and the render deletes nothing. A `shells/default` directory or an `entrypoints/` directory that an earlier release wrote stays untouched.
 
 ## Links \{#toolchain-links\}
 
@@ -79,18 +78,20 @@ By default a project renders into its own checkout, at `<project>/.ocx/toolchain
 
 ## The render marker \{#toolchain-stamp\}
 
-A rendered tree is only usable if it matches the lock it was rendered from. Walking it on every shell prompt to find out is not an option. So each render writes a marker describing the tree **as it stands on disk**. The marker lists the trampoline set with each file's identity, and the default group's links. The prompt path compares against that instead.
+A rendered tree is only usable if it matches the lock it was rendered from. Walking it on every shell prompt to find out is not an option. So each render writes a marker describing the tree **as it stands on disk**. The marker names the render directory, lists the trampoline set with each file's identity, and records the default group's links. The prompt path compares against that instead.
 
 | Toolchain | Marker |
 |---|---|
-| Global | `$OCX_HOME/state/render_stamp.json` |
-| Project | `$OCX_HOME/state/projects/<key>/render_stamp.json` |
+| Global | `$OCX_HOME/state/render_stamp.v2.json` |
+| Project | `$OCX_HOME/state/projects/<key>/render_stamp.v2.json` |
 
 The global marker sits directly under `state/`, not beside the project ones. The directory `state/projects/<key>/` is swept as a unit, and a global marker filed there would be deleted on every [`ocx clean`][cmd-clean]. An absent, unreadable, or unrecognized marker reads as *absent*, never as an error. The answer to an absent marker is "re-render", which is always safe.
 
 ## Outside garbage collection \{#toolchain-gc\}
 
-The rendered tree is **pure derived state, outside the blobs, layers and packages that GC walks**. [`ocx clean`][cmd-clean] never walks it, it takes no reference-counting back-refs, and nothing in it is a GC root.
+The rendered tree is **pure derived state, outside the blobs, layers and packages that GC walks**. It takes no reference-counting back-refs, and nothing in it is a GC root.
+
+[`ocx clean`][cmd-clean] does retire superseded render directories under `shells/`. It keeps the directory the marker names and the one before it, and reports each retired directory as kind `launchers`.
 
 Deleting it is safe. The next [`ocx pull`][cmd-pull] rebuilds it from `ocx.toml` and `ocx.lock`. Until then a `bin`-mode prompt withholds the `PATH` entry and prints one line telling you to run exactly that. A superseded tree is litter, accepted by design. The [index][storage-index] takes the same posture.
 

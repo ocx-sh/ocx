@@ -1354,6 +1354,9 @@ HAND_DECLARED_READS: dict[str, frozenset[str]] = {
     # (analysis also refuses the `$(rlocationpath)` without it — two reds).
     "test_execution_records.py": frozenset({"//crates/ocx_schema:ocx_schema_bin"}),
     "test_project_env.py": frozenset({"//crates/ocx_schema:ocx_schema_bin"}),
+    "test_vendor_parity.py": frozenset({"//crates/ocx_schema:ocx_schema_bin"}),
+    # Reviewed: `docker` is a host tool, not a Bazel input; the container image is pulled at run time.
+    "test_vendor_launcher.py": frozenset(),
     # Reviewed for `invisible_read_hints`: its `recordings/scripts` literals are
     # needles a sweep searches for, and the `test/recordings/*.py` it reads are
     # `:recording_sources`.

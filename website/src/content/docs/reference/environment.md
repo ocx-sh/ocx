@@ -134,13 +134,9 @@ Read for the `basic` type, which `TYPE` may leave to be inferred; ignored for an
 
 Absolute path to the running `ocx`, set on every spawn so a child OCX runs the same binary, not whatever `$PATH` resolves.
 
-Set by OCX on every subprocess it spawns, so the inner `ocx launcher exec` of a generated
-launcher runs the binary that installed the package. Unset, launchers fall back to
-`$PATH`-resolved `ocx`; set it by hand only to pin a specific binary.
+Set it by hand only to pin a specific `ocx`; the pin must be an absolute path. Unset, or empty (empty counts as unset on every platform), a launcher falls back to the `ocx` its record names (toolchain launchers only), else the first `ocx` on `PATH`.
 
-The Windows `.exe` shim treats a defined but empty value as defined, the Unix launcher's
-`${OCX_BINARY_PIN:-ocx}` as unset. The value is the installed `ocx` path when the running
-binary is that one and the path is safely owned, else the running binary; never empty.
+That walk takes absolute entries only and skips the launcher's own directory and any other launcher. OCX sets the installed `ocx` path when the running binary is that one and the path is safely owned, else the running binary; never empty.
 
 - Audience: public
 - Value: `path`
@@ -902,6 +898,17 @@ every projected spawn, so it never reaches a child. Never set it by hand.
 
 - Audience: plumbing
 - Value: `string`
+
+## `__OCX_LAUNCHER_DEPTH` {#ocx-launcher-depth}
+
+How many launchers have started one another in this process chain; a launcher refuses past the limit.
+
+Written by a launcher into the child it starts and passed on unchanged by every other spawn, so a
+launcher that starts itself (a trampoline resolving to its own directory) ends in an error, not a
+fork loop. Never set it by hand.
+
+- Audience: plumbing
+- Value: `integer`
 
 ## External {#external}
 

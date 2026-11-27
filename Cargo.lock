@@ -4148,6 +4148,7 @@ dependencies = [
  "ocx_config",
  "ocx_console",
  "ocx_env",
+ "ocx_env_apply",
  "ocx_exit",
  "ocx_index",
  "ocx_oci",
@@ -4232,6 +4233,7 @@ dependencies = [
  "libc",
  "log",
  "ocx_env",
+ "ocx_env_apply",
  "ocx_exit",
  "ocx_oci",
  "ocx_test_support",
@@ -4281,6 +4283,14 @@ dependencies = [
  "libc",
  "ocx_exit",
  "tempfile",
+]
+
+[[package]]
+name = "ocx_env_apply"
+version = "0.6.8"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -4382,9 +4392,11 @@ dependencies = [
  "dunce",
  "elf",
  "futures",
+ "hex",
  "log",
  "ocx_config",
  "ocx_env",
+ "ocx_env_apply",
  "ocx_exit",
  "ocx_index",
  "ocx_oci",
@@ -4396,6 +4408,7 @@ dependencies = [
  "serde_json",
  "serde_repr",
  "serde_yaml_ng",
+ "sha2 0.11.1",
  "strsim 0.11.1",
  "tempfile",
  "thiserror 2.0.21",
@@ -4419,6 +4432,7 @@ dependencies = [
  "ocx_config",
  "ocx_console",
  "ocx_env",
+ "ocx_env_apply",
  "ocx_exit",
  "ocx_index",
  "ocx_oci",
@@ -4464,6 +4478,7 @@ dependencies = [
  "log",
  "ocx_config",
  "ocx_env",
+ "ocx_env_apply",
  "ocx_exit",
  "ocx_index",
  "ocx_oci",
@@ -4565,6 +4580,7 @@ dependencies = [
  "log",
  "ocx_config",
  "ocx_env",
+ "ocx_env_apply",
  "ocx_exit",
  "ocx_index",
  "ocx_oci",
@@ -4601,6 +4617,7 @@ dependencies = [
  "ocx_config",
  "ocx_console",
  "ocx_env",
+ "ocx_env_apply",
  "ocx_exit",
  "ocx_oci",
  "ocx_package",
@@ -4621,6 +4638,10 @@ name = "ocx_shim"
 version = "0.6.8"
 dependencies = [
  "dunce",
+ "libc",
+ "ocx_env_apply",
+ "serde",
+ "serde_json",
  "windows-sys 0.61.2",
 ]
 
@@ -4665,10 +4686,12 @@ name = "ocx_store"
 version = "0.6.8"
 dependencies = [
  "dunce",
+ "filetime",
  "hex",
  "log",
  "ocx_config",
  "ocx_env",
+ "ocx_env_apply",
  "ocx_exit",
  "ocx_oci",
  "ocx_util",

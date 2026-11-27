@@ -7,5 +7,6 @@
 pub mod codesign;
 pub mod file_structure;
 pub mod hardlink;
+pub mod launcher_generation;
 pub mod reference_manager;
 pub mod shim;

@@ -1329,6 +1329,11 @@
           "exit_code": 65
         },
         {
+          "value": "launcher_record_refused",
+          "description": "A launch record breaks a rule the launcher enforces when it reads it",
+          "exit_code": 65
+        },
+        {
           "value": "launcher_unsafe_character",
           "description": "A value baked into a generated launcher contains an unsafe character",
           "exit_code": 65
@@ -2892,6 +2897,21 @@
           "value": "users_api_unavailable",
           "description": "The forge offers no users API to resolve owners through",
           "exit_code": 64
+        },
+        {
+          "value": "vendor_output_not_empty",
+          "description": "The vendor output directory exists and is not an empty directory",
+          "exit_code": 64
+        },
+        {
+          "value": "vendor_path_unrepresentable",
+          "description": "A path cannot be written inside the vendor directory",
+          "exit_code": 65
+        },
+        {
+          "value": "vendor_value_unrepresentable",
+          "description": "A value cannot be written relative to the vendor directory",
+          "exit_code": 65
         },
         {
           "value": "version_invalid",

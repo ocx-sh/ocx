@@ -164,6 +164,9 @@
     "VerboseUpgradeReport": {
       "$ref": "#/$defs/VerboseUpgradeReportRoot"
     },
+    "VendorReport": {
+      "$ref": "#/$defs/VendorReportRoot"
+    },
     "VerificationReport": {
       "$ref": "#/$defs/VerificationReportRoot"
     },
@@ -976,13 +979,13 @@
           "items": {
             "$ref": "#/$defs/CleanEntry"
           },
-          "description": "One entry per resource: objects, then temp directories, then consent stamps."
+          "description": "One entry per resource: objects, then temp directories, then consent stamps, then launcher directories."
         }
       },
       "required": [
         "items"
       ],
-      "description": "Objects, temp directories and consent stamps a clean removed, or would remove in a dry run."
+      "description": "Objects, temp directories, consent stamps and launcher directories a clean removed, or would remove in a dry run."
     },
     "CleanEntry": {
       "type": "object",
@@ -1030,6 +1033,10 @@
         {
           "value": "consent",
           "description": "A `state/projects/<key>/` directory whose consent stamp was swept."
+        },
+        {
+          "value": "launchers",
+          "description": "A superseded launcher generation directory."
         }
       ]
     },
@@ -2374,7 +2381,7 @@
         },
         "entrypoints": {
           "$ref": "#/$defs/Entrypoints",
-          "description": "Named entrypoints that `ocx install` generates launchers for.\n\nEach entry produces a Unix `.sh` script and, on Windows, a native\n`.exe` shim plus its `.shim` sidecar under the package's\n`entrypoints/` sibling directory at install time.\nAbsent or empty means no launchers are generated."
+          "description": "Named entrypoints that `ocx install` generates launchers for.\n\nEach entry produces a launcher `NAME` (`NAME.exe` on Windows) and its\n`NAME.launch` record under the package's `launchers/<generation>/`\ndirectory at install time.\nAbsent or empty means no launchers are generated."
         },
         "binaries": {
           "description": "Publisher-declared, unverified claim of interface-surface executable\nnames exposed on `PATH` by this package. Absent means undeclared\n(predates this field); `[]` means the publisher asserts zero interface\nbinaries. Deliberately distinct wire states.",
@@ -4235,7 +4242,7 @@
       "x-ocx-enum": [
         {
           "value": "package",
-          "description": "The package root: the parent of `content/` and `entrypoints/`."
+          "description": "The package root: the parent of `content/` and `launchers/`."
         },
         {
           "value": "shim",
@@ -4295,7 +4302,7 @@
         "package",
         "status"
       ],
-      "description": "A single dry-run preview row.\n\n`path` is the package root directory (parent of `content/` and\n`entrypoints/`) for `cached` rows and absent for `would_fetch` rows, where\nnothing has been materialised yet."
+      "description": "A single dry-run preview row.\n\n`path` is the package root directory (parent of `content/` and\n`launchers/`) for `cached` rows and absent for `would_fetch` rows, where\nnothing has been materialised yet."
     },
     "PullStatus": {
       "description": "Whether a locked tool is already in the object store or would be\nfetched on a real `ocx pull`.",
@@ -7705,6 +7712,91 @@
       ],
       "description": "Report emitted by `ocx upgrade` (and by `ocx upgrade --check` before it exits 65).\n\nRows are ordered by `(group, name)`. `lock` is the `ocx update` report of the re-lock the\nretagged bindings caused."
     },
+    "VendorReport": {
+      "type": "object",
+      "properties": {
+        "ocx_version": {
+          "type": "string",
+          "description": "The `ocx` that wrote the directory."
+        },
+        "output_dir": {
+          "$ref": "#/$defs/AbsolutePath",
+          "description": "The vendor directory, absolute."
+        },
+        "manifest_path": {
+          "$ref": "#/$defs/AbsolutePath",
+          "description": "The written `manifest.json`, absolute."
+        },
+        "content": {
+          "$ref": "#/$defs/VendorContentWord",
+          "description": "`present`, or `absent` under `--manifest-only`."
+        },
+        "platform": {
+          "$ref": "#/$defs/Platform",
+          "description": "The platform the set was resolved for."
+        },
+        "packages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/VendoredPackageRow"
+          },
+          "description": "One entry per package, in manifest order."
+        },
+        "tool_count": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0,
+          "description": "Tools the manifest lists."
+        },
+        "written_size": {
+          "$ref": "#/$defs/ByteSize",
+          "description": "Bytes this run wrote."
+        }
+      },
+      "required": [
+        "ocx_version",
+        "output_dir",
+        "manifest_path",
+        "content",
+        "platform",
+        "packages",
+        "tool_count",
+        "written_size"
+      ],
+      "description": "Result of `ocx vendor` and `ocx package vendor`."
+    },
+    "VendorContentWord": {
+      "description": "Whether the run wrote package content.",
+      "type": "string",
+      "x-ocx-enum": [
+        {
+          "value": "present",
+          "description": "Package content and launchers were written."
+        },
+        {
+          "value": "absent",
+          "description": "Only `manifest.json` was written."
+        }
+      ]
+    },
+    "VendoredPackageRow": {
+      "type": "object",
+      "properties": {
+        "identifier": {
+          "$ref": "#/$defs/PackageRef",
+          "description": "The package as resolved, pinned by digest."
+        },
+        "digest": {
+          "$ref": "#/$defs/Digest",
+          "description": "The platform manifest digest."
+        }
+      },
+      "required": [
+        "identifier",
+        "digest"
+      ],
+      "description": "One package of a vendored set."
+    },
     "VerificationReport": {
       "type": "object",
       "properties": {
@@ -8373,14 +8465,14 @@
           "items": {
             "$ref": "#/$defs/CleanEntry"
           },
-          "description": "One entry per resource: objects, then temp directories, then consent stamps."
+          "description": "One entry per resource: objects, then temp directories, then consent stamps, then launcher directories."
         }
       },
       "required": [
         "schema_version",
         "items"
       ],
-      "description": "Objects, temp directories and consent stamps a clean removed, or would remove in a dry run."
+      "description": "Objects, temp directories, consent stamps and launcher directories a clean removed, or would remove in a dry run."
     },
     "ConfigSetupDataRoot": {
       "type": "object",
@@ -10242,6 +10334,65 @@
         "lock"
       ],
       "description": "Report emitted by `ocx upgrade` (and by `ocx upgrade --check` before it exits 65).\n\nRows are ordered by `(group, name)`. `lock` is the `ocx update` report of the re-lock the\nretagged bindings caused."
+    },
+    "VendorReportRoot": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "description": "The version of this root's shape; a breaking change increments it.",
+          "type": "integer",
+          "const": 1
+        },
+        "ocx_version": {
+          "type": "string",
+          "description": "The `ocx` that wrote the directory."
+        },
+        "output_dir": {
+          "$ref": "#/$defs/AbsolutePath",
+          "description": "The vendor directory, absolute."
+        },
+        "manifest_path": {
+          "$ref": "#/$defs/AbsolutePath",
+          "description": "The written `manifest.json`, absolute."
+        },
+        "content": {
+          "$ref": "#/$defs/VendorContentWord",
+          "description": "`present`, or `absent` under `--manifest-only`."
+        },
+        "platform": {
+          "$ref": "#/$defs/Platform",
+          "description": "The platform the set was resolved for."
+        },
+        "packages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/VendoredPackageRow"
+          },
+          "description": "One entry per package, in manifest order."
+        },
+        "tool_count": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0,
+          "description": "Tools the manifest lists."
+        },
+        "written_size": {
+          "$ref": "#/$defs/ByteSize",
+          "description": "Bytes this run wrote."
+        }
+      },
+      "required": [
+        "schema_version",
+        "ocx_version",
+        "output_dir",
+        "manifest_path",
+        "content",
+        "platform",
+        "packages",
+        "tool_count",
+        "written_size"
+      ],
+      "description": "Result of `ocx vendor` and `ocx package vendor`."
     },
     "VerificationReportRoot": {
       "type": "object",

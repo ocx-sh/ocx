@@ -909,6 +909,7 @@ Cluster rule: a page belongs to the cluster that owns the old page it is split f
 | — | integration/index.md | landing | integration | integration | integrations |
 | in-depth/ci.md | integration/github-actions.mdx | how-to | integration | integration | integrations |
 | in-depth/ci.md | integration/gitlab-ci.md | how-to | integration | integration | integrations |
+| — | guides/vendor.mdx | how-to | integration | integration | integrations |
 | — | integration/unattended-ci.mdx | how-to | integration | integration | integrations |
 | — | integration/registry-auth-recipes.mdx | how-to | integration | integration | integrations |
 | — | integration/proxy-and-ca.mdx | how-to | integration | integration | integrations |
@@ -954,6 +955,7 @@ Cluster rule: a page belongs to the cluster that owns the old page it is split f
 | reference/env-composition.md | reference/env-composition.md | reference | — | misc | reference |
 | reference/execution-records.md | reference/execution-records.md | reference | — | misc | reference |
 | — | reference/telemetry.md | reference | — | misc | reference |
+| — | reference/vendor-manifest.md | reference | — | misc | reference |
 | reference/script-host-api.md | reference/script-host-api.md | reference | — | misc | reference |
 | reference/platforms.md | reference/platforms.md | reference | — | misc | reference |
 | reference/machine-interface.md | reference/machine-interface.md | reference | — | misc | reference |

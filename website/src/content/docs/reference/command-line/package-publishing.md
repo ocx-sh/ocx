@@ -619,3 +619,26 @@ ocx package test [OPTIONS] --identifier <IDENTIFIER> [LAYERS]... [-- <COMMAND>..
 | `--platform`, `-p` | `PLATFORM` | Target platform (e.g. `linux/amd64`). An explicit value is used as given. Omit it to take the platform the build receipt beside the bundle recorded; a usage error (exit 64) when neither names one. Parity with `package push` |
 | `--script` | `PATH\|-` | Path to a Starlark test script. Mutually exclusive with the trailing command. When given, the materialized package env is interpreted by the embedded engine instead of exec'ing a command |
 | `--self` |  | Compose the package's private env surface (default: interface surface). Same semantics as `ocx exec --self` / `ocx env --self` |
+
+## `ocx package vendor` {#package-vendor}
+
+Write packages, launchers and a manifest to a relocatable directory.
+
+Resolves each PACKAGE for `--platform` (the host by default), writes its content, one launcher per exposed name and `manifest.json` to DIR. The directory runs from wherever it is moved; nothing in it names this machine.
+
+A package is `registry/repository:tag` or `registry/repository@sha256:<hex>`.
+
+`--manifest-only` writes `manifest.json` alone. `--omit-links` creates no symlink.
+
+DIR must be absent or empty, else the command exits 64 and writes nothing. A missing `-o` or PACKAGE exits 64.
+
+```text
+ocx package vendor [OPTIONS] --output <DIR> <PACKAGE>...
+```
+
+| Flag | Value | Description |
+| --- | --- | --- |
+| `--manifest-only` |  | Write `manifest.json` only: no package content and no launcher |
+| `--omit-links` |  | Create no symlink under the directory |
+| `--output`, `-o` | `DIR` | Directory to write; absent or empty |
+| `--platform`, `-p` | `PLATFORM` | Target platform to resolve packages against |

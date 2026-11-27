@@ -8,10 +8,16 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
 use ocx_project::{ProjectLock, ProjectRegistry};
-use ocx_store::file_structure::{FileStructure, StaleEntry};
+use ocx_store::file_structure::{
+    DEFAULT_SHELL, FileStructure, RenderStampScope, RenderStampTarget, RenderStampV2, StaleEntry, StateStore,
+    ToolchainHome,
+};
+use ocx_store::launcher_generation::LauncherGeneration;
+use ocx_store::reference_manager::ReferenceManager;
 
 use super::super::PackageManager;
-use super::garbage_collection::{GarbageCollector, ProjectRootDigests};
+use super::garbage_collection::{GarbageCollector, ProjectRootDigests, current_deferred};
+use super::render_toolchain::{ScopedLockParameters, refuse_symlinked_home};
 
 /// Bound on concurrent tool resolutions in [`collect_project_roots`].
 const COLLECT_ROOTS_CONCURRENCY: usize = 50;
@@ -32,6 +38,8 @@ pub struct CleanResult {
     /// Swept `state/projects/<key>/` directories, reported so a clean never
     /// revokes consent silently.
     pub consent: Vec<PathBuf>,
+    /// Launcher and deferred-tree directories of other generations, retired (or, in a dry run, reported).
+    pub launchers: Vec<PathBuf>,
 }
 
 /// The roots a locked tool pins: its per-platform leaves that are present on
@@ -51,12 +59,16 @@ async fn collect_tool_roots(
     roots
 }
 
-/// Whether a lock-pinned leaf is present as a package or a deferred shim.
+/// Whether a lock-pinned leaf is present as a package, a deferred tree or an older ocx's shim.
 // Checks shims too, or a deferred tool (no package dir) loses its pin and its shim is collected.
 // Never an unconditional `true`, or never-pulled leaves appear in `--dry-run`'s held report.
 async fn leaf_present_in_any_tier(file_structure: &FileStructure, leaf: &ocx_oci::PinnedPackageRef) -> bool {
     ocx_util::fs::path_exists_lossy(&file_structure.packages.path(leaf)).await
         || ocx_util::fs::path_exists_lossy(&file_structure.shims.path(leaf)).await
+        || match current_deferred(file_structure) {
+            Some(deferred) => ocx_util::fs::path_exists_lossy(&deferred.path(leaf)).await,
+            None => false,
+        }
 }
 
 /// GC roots from every live registered project's `ocx.lock` and from
@@ -262,6 +274,7 @@ impl PackageManager {
                         objects: Vec::new(),
                         temp,
                         consent: Vec::new(),
+                        launchers: Vec::new(),
                     });
                 }
             }
@@ -310,8 +323,230 @@ impl PackageManager {
         let temp = clean_temp(self.file_structure(), dry_run).await?;
         // Runs under `--force` too: `--force` waives the project registry, which this sweep never reads.
         let consent = sweep_consent_stamps(&self.file_structure().state, dry_run).await?;
-        Ok(CleanResult { objects, temp, consent })
+        let mut launchers = retire_other_generations(self.file_structure(), dry_run).await?;
+        launchers.extend(retire_superseded_shells(self.file_structure(), dry_run).await?);
+        Ok(CleanResult {
+            objects,
+            temp,
+            consent,
+            launchers,
+        })
     }
+}
+
+/// Retires every `launchers/<G'>` of every package and every `deferred/<G'>` whose name is not this ocx's
+/// generation, returning the paths removed (a dry run: the paths that would be). A host with no embedded blob
+/// knows no current generation and retires nothing. `entrypoints/`, `shims/` and `.bin/ocx-shim` are never read.
+// Shared by the launcher and render-directory sweeps: one `retire_dir` call per candidate, `LeftForLater` logged and not reported.
+async fn retire_other_generations(fs: &FileStructure, dry_run: bool) -> crate::Result<Vec<PathBuf>> {
+    let Some(generation) = ocx_store::launcher_generation::LauncherGeneration::host() else {
+        return Ok(Vec::new());
+    };
+    let mut parents = vec![fs.deferred_root()];
+    for package in fs.packages.list_all().await? {
+        parents.push(package.launchers_root());
+    }
+    let mut retired = Vec::new();
+    for parent in parents {
+        let Ok(mut entries) = tokio::fs::read_dir(&parent).await else {
+            continue;
+        };
+        let mut candidates = Vec::new();
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            if entry.file_name() == generation.as_str() {
+                continue;
+            }
+            // Only real directories are generation trees; `retire_dir` itself sweeps `.gc-*`/`.staging-*` debris.
+            if entry.file_type().await.is_ok_and(|kind| kind.is_dir()) {
+                candidates.push(entry.path());
+            }
+        }
+        candidates.sort();
+        for dir in candidates {
+            retire_one(&dir, dry_run, &mut retired).await?;
+        }
+    }
+    Ok(retired)
+}
+
+/// Retires, for every home a v2 stamp names, each `default-<16 hex>`, `.staging-*` and `.gc-*` under
+/// `shells/` that is neither the stamp's `shell_dir` nor its `previous_shell_dir`
+/// nor the name `active` points at. `default` and every other name stay. A home that cannot be locked or fails the symlink guard is skipped with a warning.
+async fn retire_superseded_shells(fs: &FileStructure, dry_run: bool) -> crate::Result<Vec<PathBuf>> {
+    let state = fs.state.clone();
+    let homes = tokio::task::spawn_blocking(move || stamped_homes(&state))
+        .await
+        .map_err(|e| crate::Error::InternalFile(fs.state.project_state_root(), std::io::Error::other(e)))?;
+    let mut retired = Vec::new();
+    for stamp in homes {
+        let home = ToolchainHome::new(&stamp.home);
+        // The lock is keyed on the home root's identity, so a home that was never rendered has none.
+        if tokio::fs::symlink_metadata(home.root()).await.is_err() {
+            continue;
+        }
+        let parameters = clean_lock_parameters(fs, home.root(), &stamp.scope);
+        // Held for the whole home: `retire_dir` sweeps sibling `.staging-*`, which a live render owns.
+        let _lock = match parameters.acquire().await {
+            Ok(lock) => lock,
+            Err(e) => {
+                log::warn!(
+                    "Toolchain home '{}' is locked; its render directories stay: {e}",
+                    stamp.home.display()
+                );
+                continue;
+            }
+        };
+        if let Err(e) = refuse_symlinked_home(&stamp.scope, &home) {
+            log::warn!("Toolchain home '{}' is not cleaned: {e}", stamp.home.display());
+            continue;
+        }
+        let Some(shells) = home.render_dir(DEFAULT_SHELL).parent().map(Path::to_path_buf) else {
+            continue;
+        };
+        // The stamp is written after the `active` switch, so it can lag: retiring what `active` names would dangle it.
+        // An unreadable `active` is not "no active render": that home is skipped, as a locked one is.
+        let active = {
+            let home = ToolchainHome::new(&stamp.home);
+            tokio::task::spawn_blocking(move || read_active(&home)).await
+        };
+        let active = match active {
+            Ok(Ok(active)) => active,
+            Ok(Err(e)) => {
+                log::warn!(
+                    "Toolchain home '{}' has an unreadable `active`; its render directories stay: {e}",
+                    stamp.home.display()
+                );
+                continue;
+            }
+            Err(e) => {
+                log::warn!(
+                    "Reading `active` of toolchain home '{}' failed; its render directories stay: {e}",
+                    stamp.home.display()
+                );
+                continue;
+            }
+        };
+        let Ok(mut entries) = tokio::fs::read_dir(&shells).await else {
+            continue;
+        };
+        let mut candidates = Vec::new();
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let Ok(name) = entry.file_name().into_string() else {
+                continue;
+            };
+            if !is_render_debris(&name)
+                || name == stamp.shell_dir
+                || name == stamp.previous_shell_dir
+                || active.as_deref() == Some(name.as_str())
+            {
+                continue;
+            }
+            if entry.file_type().await.is_ok_and(|kind| kind.is_dir()) {
+                candidates.push(entry.path());
+            }
+        }
+        candidates.sort();
+        for dir in candidates {
+            retire_one(&dir, dry_run, &mut retired).await?;
+        }
+    }
+    Ok(retired)
+}
+
+/// The render directory name `active` links to: `Ok(None)` when `active` is absent or names no `shells/` child,
+/// `Err` when it exists but cannot be read as a link. Blocking.
+fn read_active(home: &ToolchainHome) -> std::io::Result<Option<String>> {
+    match std::fs::read_link(home.active()) {
+        Ok(_) => Ok(home.active_target_name()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// A render directory a clean may retire: a published `default-<16 hex>` or staging debris.
+fn is_render_debris(name: &str) -> bool {
+    name.strip_prefix("default-")
+        .is_some_and(|generation| LauncherGeneration::from_hex(generation).is_some())
+        || name.starts_with(".staging-")
+        || name.starts_with(".gc-")
+}
+
+/// The v2 stamps of the global home and of every `state/projects/<key>/` whose scope agrees with its
+/// key, in key order; blocking.
+fn stamped_homes(state: &StateStore) -> Vec<RenderStampV2> {
+    let mut found = Vec::new();
+    if let Some(stamp) = state.render_stamp_v2(RenderStampTarget::Global) {
+        if stamp.scope == RenderStampScope::Global {
+            found.push(("global".to_string(), stamp));
+        } else {
+            log::debug!("Global render stamp names a project scope; skipped.");
+        }
+    }
+    let mut keys = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(state.project_state_root()) {
+        for entry in entries.flatten() {
+            let Ok(key) = entry.file_name().into_string() else {
+                continue;
+            };
+            if key.starts_with(STAGING_PREFIX) {
+                continue;
+            }
+            // `symlink_metadata`: a symlinked key directory is never followed.
+            if std::fs::symlink_metadata(entry.path()).is_ok_and(|metadata| metadata.is_dir()) {
+                keys.push(key);
+            }
+        }
+    }
+    for key in keys {
+        let Some(stamp) = state.render_stamp_v2(RenderStampTarget::Project(&key)) else {
+            continue;
+        };
+        match &stamp.scope {
+            RenderStampScope::Project(directory) if ReferenceManager::name_for_path(directory) == key => {
+                found.push((key, stamp));
+            }
+            _ => log::debug!("Render stamp under key '{key}' names another scope; skipped."),
+        }
+    }
+    found.sort_by(|a, b| a.0.cmp(&b.0));
+    found.into_iter().map(|(_, stamp)| stamp).collect()
+}
+
+/// The render lock of the home at `root`, spelled as `render_toolchain` spells it.
+fn clean_lock_parameters(fs: &FileStructure, root: &Path, scope: &RenderStampScope) -> ScopedLockParameters {
+    ScopedLockParameters {
+        locks_root: fs.locks.clone(),
+        scope: "toolchain-render",
+        guarded_directory: root.to_path_buf(),
+        discriminator: match scope {
+            RenderStampScope::Global => "global".to_string(),
+            RenderStampScope::Project(directory) => ReferenceManager::name_for_path(directory),
+        },
+        timeout: super::pull::PULL_LOCAL_LOCK_TIMEOUT,
+    }
+}
+
+/// Retires `dir`; a refusal leaves it whole and unreported.
+async fn retire_one(dir: &Path, dry_run: bool, retired: &mut Vec<PathBuf>) -> crate::Result<()> {
+    if dry_run {
+        log::info!("Would retire launcher directory: {}", dir.display());
+        retired.push(dir.to_path_buf());
+        return Ok(());
+    }
+    match ocx_util::fs::retire_dir(dir).await {
+        Ok(ocx_util::fs::Retired::Removed) => {
+            log::info!("Retired launcher directory: {}", dir.display());
+            retired.push(dir.to_path_buf());
+        }
+        Ok(ocx_util::fs::Retired::LeftForLater) => {
+            log::warn!(
+                "Launcher directory '{}' is busy; left for a later clean.",
+                dir.display()
+            );
+        }
+        Err(e) => return Err(crate::Error::InternalFile(dir.to_path_buf(), e)),
+    }
+    Ok(())
 }
 
 /// Removes stale temp directories and orphan lock files, locking each where
@@ -1386,5 +1621,563 @@ repository = "localhost:5000/shfmt"
         let swept = sweep_consent_stamps(&state, false).await.unwrap();
 
         assert!(swept.is_empty(), "an absent sweep root yields nothing; got {swept:?}");
+    }
+
+    // ── launcher generations ─────────────────────────────────────
+
+    use ocx_store::launcher_generation::LauncherGeneration;
+
+    /// A 16-hex generation name that is not `current`.
+    fn other_generation(current: &LauncherGeneration) -> String {
+        ["0123456789abcdef", "fedcba9876543210"]
+            .into_iter()
+            .find(|name| *name != current.as_str())
+            .unwrap()
+            .to_string()
+    }
+
+    async fn touch_dir(dir: &Path) -> PathBuf {
+        tokio::fs::create_dir_all(dir).await.unwrap();
+        tokio::fs::write(dir.join("f"), b"x").await.unwrap();
+        dunce::canonicalize(dir).unwrap()
+    }
+
+    /// A home whose global lock pins `cmake` (materialized: `content/`) and `shfmt` (deferred under `G`), and
+    /// the paths the launcher tests inspect.
+    struct LauncherHome {
+        _tmp: tempfile::TempDir,
+        manager: crate::PackageManager,
+        generation: LauncherGeneration,
+        package_current: PathBuf,
+        package_other: PathBuf,
+        deferred_current: PathBuf,
+        deferred_other: PathBuf,
+    }
+
+    async fn launcher_home() -> Option<LauncherHome> {
+        // No embedded blob on this host: no current generation, nothing to retire.
+        let generation = LauncherGeneration::host()?;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(tmp.path()).unwrap();
+        tokio::fs::write(root.join("ocx.lock"), LOCK_WITH_TWO_TOOLS)
+            .await
+            .unwrap();
+        let fs = FileStructure::with_root(root.clone());
+        let cmake = pinned_leaf("cmake", "localhost:5000", CMAKE_LEAF_HEX);
+        let shfmt = pinned_leaf(
+            "shfmt",
+            "localhost:5000",
+            "bbbb0000000000000000000000000000000000000000000000000000000000cc",
+        );
+        tokio::fs::create_dir_all(fs.packages.path(&cmake).join("content"))
+            .await
+            .unwrap();
+        let other = other_generation(&generation);
+        let package_current = touch_dir(&fs.packages.launchers(&cmake, &generation)).await;
+        let package_other = touch_dir(&fs.packages.launchers_root(&cmake).join(&other)).await;
+        let deferred_current = touch_dir(&fs.deferred(&generation).shim_dir(&shfmt).bin()).await;
+        let deferred_other = touch_dir(&fs.deferred_root().join(&other).join("some/tree/l")).await;
+        let manager = crate::test_support::export_fixture::offline_manager(&root);
+        Some(LauncherHome {
+            _tmp: tmp,
+            manager,
+            generation,
+            package_current,
+            package_other,
+            deferred_current,
+            deferred_other,
+        })
+    }
+
+    /// The current generation comes from `LauncherGeneration::host()`; a constant would retire the wrong dir.
+    #[tokio::test]
+    async fn clean_retires_launcher_generations_other_than_the_hosts() {
+        let Some(home) = launcher_home().await else { return };
+        let result = home.manager.clean(false, false).await.unwrap();
+
+        let mut reported = result.launchers.clone();
+        reported.sort();
+        let mut expected = vec![home.package_other.clone(), home.deferred_other.clone()];
+        expected.sort();
+        assert_eq!(reported.len(), 2, "got {reported:?}");
+        assert!(
+            reported.iter().zip(&expected).all(|(r, e)| e.starts_with(r)),
+            "{reported:?} vs {expected:?}"
+        );
+        assert!(!home.package_other.exists());
+        assert!(!home.deferred_other.exists());
+        assert!(home.package_current.exists(), "launchers/<G> is kept");
+        assert!(
+            home.deferred_current.exists(),
+            "a lock-pinned deferred/<G> tree is kept"
+        );
+        assert!(
+            !result
+                .objects
+                .iter()
+                .any(|o| o.path.starts_with(&home.deferred_current))
+        );
+        let _ = &home.generation;
+    }
+
+    #[tokio::test]
+    async fn clean_dry_run_reports_other_launcher_generations_without_removing() {
+        let Some(home) = launcher_home().await else { return };
+        let result = home.manager.clean(true, false).await.unwrap();
+
+        assert_eq!(result.launchers.len(), 2, "got {:?}", result.launchers);
+        assert!(home.package_other.exists());
+        assert!(home.deferred_other.exists());
+    }
+
+    /// An unrooted `deferred/<G>/…` tree is an object, collected like an unpinned shim.
+    #[tokio::test]
+    async fn clean_collects_an_unrooted_deferred_tree_of_the_current_generation() {
+        let Some(home) = launcher_home().await else { return };
+        tokio::fs::remove_file(home.manager.file_structure().root().join("ocx.lock"))
+            .await
+            .unwrap();
+        let result = home.manager.clean(false, false).await.unwrap();
+
+        assert!(!home.deferred_current.exists());
+        assert!(
+            result
+                .objects
+                .iter()
+                .any(|o| home.deferred_current.starts_with(&o.path))
+        );
+    }
+
+    /// `entrypoints/`, old `shims/…` of a pinned leaf and `.bin/ocx-shim/*` are never touched.
+    #[tokio::test]
+    async fn clean_leaves_entrypoints_old_shims_and_the_shim_binary_alone() {
+        let Some(home) = launcher_home().await else { return };
+        let fs = home.manager.file_structure().clone();
+        let cmake = pinned_leaf("cmake", "localhost:5000", CMAKE_LEAF_HEX);
+        let entrypoints = touch_dir(&fs.packages.entrypoints(&cmake)).await;
+        let shim = touch_dir(&fs.shims.shim_dir(&cmake).bin()).await;
+        let shim_binary = touch_dir(&fs.root().join(".bin").join("ocx-shim")).await;
+
+        home.manager.clean(false, false).await.unwrap();
+
+        for kept in [entrypoints, shim, shim_binary] {
+            assert!(kept.join("f").exists(), "{} was touched", kept.display());
+        }
+    }
+
+    /// A held `temp/deferred-…` scratch survives a clean.
+    #[tokio::test]
+    async fn clean_keeps_a_held_deferred_scratch() {
+        let Some(home) = launcher_home().await else { return };
+        let held = home.manager.file_structure().temp.scratch("deferred").await.unwrap();
+        let path = held.path().to_path_buf();
+
+        home.manager.clean(false, false).await.unwrap();
+
+        assert!(path.exists());
+    }
+
+    // ── superseded toolchain render directories ─────────────────────
+
+    const GEN_A: &str = "aaaaaaaaaaaaaaaa";
+    const GEN_B: &str = "bbbbbbbbbbbbbbbb";
+    const GEN_C: &str = "cccccccccccccccc";
+    const SHELL_NAMES: [&str; 8] = [
+        "default",
+        "default-aaaaaaaaaaaaaaaa",
+        "default-bbbbbbbbbbbbbbbb",
+        "default-cccccccccccccccc",
+        ".staging-dddddddddddddddd",
+        ".gc-eeeeeeeeeeeeeeee",
+        // Not a generation (uppercase). Distinct from every other name beyond case, or a case-insensitive file system merges two rows.
+        "default-FFFFFFFFFFFFFFFF",
+        "other",
+    ];
+    /// The three names a clean retires from [`SHELL_NAMES`] when the stamp keeps `GEN_A` and `GEN_B`.
+    const RETIRED_SHELLS: [&str; 3] = [
+        "default-cccccccccccccccc",
+        ".staging-dddddddddddddddd",
+        ".gc-eeeeeeeeeeeeeeee",
+    ];
+
+    fn stamp_for(
+        home: &Path,
+        scope: ocx_store::file_structure::RenderStampScope,
+        shell_dir: &str,
+        previous: &str,
+    ) -> ocx_store::file_structure::RenderStampV2 {
+        ocx_store::file_structure::RenderStampV2::new(
+            home.to_path_buf(),
+            scope,
+            shell_dir.to_string(),
+            previous.to_string(),
+            "0".repeat(64),
+            "g".to_string(),
+            Default::default(),
+            Default::default(),
+        )
+    }
+
+    /// Creates `<home>/shells/<name>/bin/x` for each name in [`SHELL_NAMES`].
+    async fn seed_shells(home: &Path) {
+        for name in SHELL_NAMES {
+            let dir = home.join("shells").join(name).join("bin");
+            tokio::fs::create_dir_all(&dir).await.unwrap();
+            tokio::fs::write(dir.join("x"), b"x").await.unwrap();
+        }
+    }
+
+    fn manager_at(root: &Path) -> crate::PackageManager {
+        crate::test_support::export_fixture::offline_manager(root)
+    }
+
+    async fn survivors(home: &Path) -> Vec<String> {
+        let mut names = Vec::new();
+        let mut entries = tokio::fs::read_dir(home.join("shells")).await.unwrap();
+        while let Some(entry) = entries.next_entry().await.unwrap() {
+            names.push(entry.file_name().into_string().unwrap());
+        }
+        names.sort();
+        names
+    }
+
+    fn expected_survivors() -> Vec<String> {
+        let mut kept: Vec<String> = SHELL_NAMES
+            .iter()
+            .filter(|name| !RETIRED_SHELLS.contains(name))
+            .map(|name| (*name).to_string())
+            .collect();
+        kept.sort();
+        kept
+    }
+
+    /// A global home with a v2 stamp keeping `GEN_A` and `GEN_B`.
+    async fn global_shells_home() -> (tempfile::TempDir, crate::PackageManager, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(tmp.path()).unwrap();
+        let manager = manager_at(&root);
+        let home = manager.file_structure().toolchain.home().root().to_path_buf();
+        seed_shells(&home).await;
+        let stamp = stamp_for(
+            &home,
+            ocx_store::file_structure::RenderStampScope::Global,
+            &format!("default-{GEN_A}"),
+            &format!("default-{GEN_B}"),
+        );
+        manager
+            .file_structure()
+            .state
+            .set_render_stamp_v2(ocx_store::file_structure::RenderStampTarget::Global, &stamp)
+            .unwrap();
+        (tmp, manager, home)
+    }
+
+    #[tokio::test]
+    async fn clean_retires_render_directories_the_stamp_does_not_keep() {
+        let (_tmp, manager, home) = global_shells_home().await;
+        let result = manager.clean(false, false).await.unwrap();
+
+        assert_eq!(survivors(&home).await, expected_survivors());
+        let mut reported: Vec<String> = result
+            .launchers
+            .iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        reported.sort();
+        let mut expected: Vec<String> = RETIRED_SHELLS.iter().map(|name| (*name).to_string()).collect();
+        expected.sort();
+        assert_eq!(reported, expected);
+    }
+
+    #[tokio::test]
+    async fn clean_dry_run_reports_superseded_render_directories_without_removing() {
+        let (_tmp, manager, home) = global_shells_home().await;
+        let result = manager.clean(true, false).await.unwrap();
+
+        assert_eq!(
+            result.launchers.len(),
+            RETIRED_SHELLS.len(),
+            "got {:?}",
+            result.launchers
+        );
+        assert_eq!(survivors(&home).await.len(), SHELL_NAMES.len());
+    }
+
+    /// A first render has an empty `previous_shell_dir`: only `shell_dir` is kept.
+    #[tokio::test]
+    async fn clean_keeps_only_shell_dir_when_previous_is_empty() {
+        let (_tmp, manager, home) = global_shells_home().await;
+        let stamp = stamp_for(
+            &home,
+            ocx_store::file_structure::RenderStampScope::Global,
+            &format!("default-{GEN_A}"),
+            "",
+        );
+        manager
+            .file_structure()
+            .state
+            .set_render_stamp_v2(ocx_store::file_structure::RenderStampTarget::Global, &stamp)
+            .unwrap();
+        manager.clean(false, false).await.unwrap();
+
+        let kept = survivors(&home).await;
+        assert!(!kept.contains(&format!("default-{GEN_B}")));
+        assert!(!kept.contains(&format!("default-{GEN_C}")));
+        assert!(kept.contains(&format!("default-{GEN_A}")));
+        assert!(kept.contains(&"default".to_string()));
+    }
+
+    /// The stamp is written after the `active` switch: until then (or after a failed stamp write) it
+    /// names the old pair while `active` names a complete newer directory, which a clean must keep.
+    #[tokio::test]
+    async fn clean_keeps_the_directory_active_names_when_the_stamp_lags() {
+        let (_tmp, manager, home) = global_shells_home().await;
+        let target = format!("shells/default-{GEN_C}");
+        ocx_util::fs::symlink::create(std::path::Path::new(&target), home.join("active")).unwrap();
+
+        manager.clean(false, false).await.unwrap();
+
+        let kept = survivors(&home).await;
+        assert!(
+            kept.contains(&format!("default-{GEN_C}")),
+            "active's target survives: {kept:?}"
+        );
+        assert!(
+            home.join("active").join("bin").join("x").exists(),
+            "active is not dangling"
+        );
+        assert!(kept.contains(&format!("default-{GEN_A}")) && kept.contains(&format!("default-{GEN_B}")));
+        assert!(!kept.contains(&".staging-dddddddddddddddd".to_string()));
+    }
+
+    /// An `active` that cannot be read says nothing about which directory is live: the home stays whole.
+    ///
+    /// RED: read the link with `.ok().flatten()`, which calls an unreadable `active` "no active render".
+    #[tokio::test]
+    async fn clean_skips_a_home_whose_active_cannot_be_read() {
+        let (_tmp, manager, home) = global_shells_home().await;
+        // A regular file where the link belongs: `read_link` fails with something other than "not found".
+        tokio::fs::write(home.join("active"), b"not a link").await.unwrap();
+
+        let result = manager.clean(false, false).await.unwrap();
+
+        assert_eq!(survivors(&home).await.len(), SHELL_NAMES.len(), "nothing is retired");
+        assert!(result.launchers.is_empty(), "got {:?}", result.launchers);
+    }
+
+    #[tokio::test]
+    async fn clean_treats_a_project_home_like_the_global_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(tmp.path()).unwrap();
+        let manager = manager_at(&root);
+        let project = root.join("proj");
+        let home = project.join(".ocx").join("toolchain");
+        seed_shells(&home).await;
+        let key = ocx_store::reference_manager::ReferenceManager::name_for_path(&project);
+        let stamp = stamp_for(
+            &home,
+            ocx_store::file_structure::RenderStampScope::Project(project.clone()),
+            &format!("default-{GEN_A}"),
+            &format!("default-{GEN_B}"),
+        );
+        manager
+            .file_structure()
+            .state
+            .set_render_stamp_v2(ocx_store::file_structure::RenderStampTarget::Project(&key), &stamp)
+            .unwrap();
+
+        let result = manager.clean(false, false).await.unwrap();
+
+        assert_eq!(survivors(&home).await, expected_survivors());
+        assert_eq!(result.launchers.len(), RETIRED_SHELLS.len());
+    }
+
+    /// A stamp read under key K whose scope hashes to another key is not a stamp of that home.
+    #[tokio::test]
+    async fn clean_skips_a_project_stamp_whose_scope_disagrees_with_its_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(tmp.path()).unwrap();
+        let manager = manager_at(&root);
+        let home = root.join("proj").join(".ocx").join("toolchain");
+        seed_shells(&home).await;
+        let stamp = stamp_for(
+            &home,
+            ocx_store::file_structure::RenderStampScope::Project(root.join("proj")),
+            &format!("default-{GEN_A}"),
+            "",
+        );
+        manager
+            .file_structure()
+            .state
+            .set_render_stamp_v2(
+                ocx_store::file_structure::RenderStampTarget::Project("0123456789abcdef"),
+                &stamp,
+            )
+            .unwrap();
+
+        let result = manager.clean(false, false).await.unwrap();
+
+        assert!(result.launchers.is_empty(), "got {:?}", result.launchers);
+        assert_eq!(survivors(&home).await.len(), SHELL_NAMES.len());
+    }
+
+    #[tokio::test]
+    async fn clean_leaves_a_home_without_a_v2_stamp_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(tmp.path()).unwrap();
+        let manager = manager_at(&root);
+        let home = manager.file_structure().toolchain.home().root().to_path_buf();
+        seed_shells(&home).await;
+
+        let result = manager.clean(false, false).await.unwrap();
+
+        assert!(result.launchers.is_empty());
+        assert_eq!(survivors(&home).await.len(), SHELL_NAMES.len());
+    }
+
+    /// A refusal leaves the directory whole and unreported: the parent is read-only.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn clean_leaves_a_render_directory_whole_when_retiring_it_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_tmp, manager, home) = global_shells_home().await;
+        let shells = home.join("shells");
+        std::fs::set_permissions(&shells, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let writable = std::fs::File::create(shells.join(".probe")).is_ok();
+        if writable {
+            // Running as root: a read-only parent does not refuse anything.
+            std::fs::set_permissions(&shells, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::remove_file(shells.join(".probe")).unwrap();
+            return;
+        }
+
+        let result = manager.clean(false, false).await;
+        std::fs::set_permissions(&shells, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let result = result.unwrap();
+        assert!(result.launchers.is_empty(), "got {:?}", result.launchers);
+        // `retire_dir` may empty a debris directory it cannot unlink; a published one stays whole.
+        assert!(shells.join(RETIRED_SHELLS[0]).join("bin/x").exists());
+    }
+
+    /// Nothing an older ocx published, nor the active link, is written, renamed or deleted.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn clean_leaves_what_an_older_ocx_published_byte_unchanged() {
+        let (_tmp, manager, home) = global_shells_home().await;
+        let fs = manager.file_structure().clone();
+        let active = home.join("active");
+        std::os::unix::fs::symlink("shells/default", &active).unwrap();
+        let state = fs.state.global_render_stamp_file();
+        tokio::fs::create_dir_all(state.parent().unwrap()).await.unwrap();
+        tokio::fs::write(&state, br#"{"v":1}"#).await.unwrap();
+        let v2 = fs.state.global_render_stamp_v2_file();
+        // Rooted by the global lock, so the object collector keeps the package this test inspects.
+        tokio::fs::write(fs.root().join("ocx.lock"), LOCK_WITH_ONE_TOOL)
+            .await
+            .unwrap();
+        let cmake = seed_pinned_package_dir(&fs, "cmake", "localhost:5000", CMAKE_LEAF_HEX).await;
+        let entrypoints = touch_dir(&fs.packages.entrypoints(&cmake)).await;
+        let shim = touch_dir(&fs.shims.shim_dir(&cmake).bin()).await;
+        let shim_binary = touch_dir(&fs.root().join(".bin").join("ocx-shim")).await;
+
+        let snapshot = |paths: Vec<PathBuf>| -> Vec<(PathBuf, Vec<u8>)> {
+            paths
+                .into_iter()
+                .map(|path| {
+                    let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+                    (path, bytes)
+                })
+                .collect()
+        };
+        let watched = vec![
+            home.join("shells/default/bin/x"),
+            state.clone(),
+            v2.clone(),
+            entrypoints.join("f"),
+            shim.join("f"),
+            shim_binary.join("f"),
+        ];
+        let before = snapshot(watched.clone());
+
+        manager.clean(false, false).await.unwrap();
+
+        assert_eq!(snapshot(watched), before);
+        assert_eq!(std::fs::read_link(&active).unwrap(), PathBuf::from("shells/default"));
+    }
+
+    /// A symlinked `shells/` is refused: nothing under its target is removed.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn clean_skips_a_home_whose_shells_directory_is_a_symlink() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(tmp.path()).unwrap();
+        let manager = manager_at(&root);
+        let home = manager.file_structure().toolchain.home().root().to_path_buf();
+        let elsewhere = root.join("elsewhere");
+        seed_shells(&elsewhere).await;
+        tokio::fs::create_dir_all(&home).await.unwrap();
+        std::os::unix::fs::symlink(elsewhere.join("shells"), home.join("shells")).unwrap();
+        let stamp = stamp_for(
+            &home,
+            ocx_store::file_structure::RenderStampScope::Global,
+            &format!("default-{GEN_A}"),
+            "",
+        );
+        manager
+            .file_structure()
+            .state
+            .set_render_stamp_v2(ocx_store::file_structure::RenderStampTarget::Global, &stamp)
+            .unwrap();
+
+        let result = manager.clean(false, false).await.unwrap();
+
+        assert!(result.launchers.is_empty(), "got {:?}", result.launchers);
+        assert_eq!(survivors(&elsewhere).await.len(), SHELL_NAMES.len());
+    }
+
+    /// Clean's lock spelling is the render's: a drift in scope, guarded directory or discriminator
+    /// would let a clean run beside a live render.
+    #[tokio::test]
+    async fn clean_takes_the_lock_a_render_of_the_same_home_takes() {
+        use super::super::render_toolchain::{RenderRequest, render_lock_parameters};
+        use ocx_store::file_structure::{RenderStampScope, ToolchainHome};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(tmp.path()).unwrap();
+        let fs = FileStructure::with_root(root.clone());
+        tokio::fs::write(root.join("ocx.lock"), LOCK_WITH_ONE_TOOL)
+            .await
+            .unwrap();
+        let lock = ProjectLock::from_path(&root.join("ocx.lock")).await.unwrap().unwrap();
+        let platform = ocx_oci::Platform::any();
+        let project = root.join("proj");
+        let global_home = ToolchainHome::new(fs.toolchain.home().root());
+        let project_home = ToolchainHome::new(project.join(".ocx").join("toolchain"));
+
+        for (home, scope) in [
+            (&global_home, RenderStampScope::Global),
+            (&project_home, RenderStampScope::Project(project.clone())),
+        ] {
+            let rendered = render_lock_parameters(
+                &fs,
+                &RenderRequest {
+                    unrendered: &[],
+                    home,
+                    scope: &scope,
+                    lock: &lock,
+                    surface: &[],
+                    groups: &[],
+                    pinned: false,
+                    platform: &platform,
+                    dry_run: false,
+                },
+            );
+            let cleaned = clean_lock_parameters(&fs, home.root(), &scope);
+            assert_eq!(cleaned.locks_root, rendered.locks_root);
+            assert_eq!(cleaned.scope, rendered.scope);
+            assert_eq!(cleaned.guarded_directory, rendered.guarded_directory);
+            assert_eq!(cleaned.discriminator, rendered.discriminator);
+        }
     }
 }

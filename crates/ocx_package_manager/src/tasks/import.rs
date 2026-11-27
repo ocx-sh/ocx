@@ -265,7 +265,10 @@ impl PackageManager {
 }
 
 /// Unpacks `input` when it is a regular file; `None` for a directory or anything that does not exist.
-async fn stage_archive(file_structure: &FileStructure, input: &Path) -> Result<Option<export_archive::Scratch>> {
+async fn stage_archive(
+    file_structure: &FileStructure,
+    input: &Path,
+) -> Result<Option<ocx_store::file_structure::LockedScratch>> {
     if !tokio::fs::metadata(input)
         .await
         .is_ok_and(|metadata| metadata.is_file())

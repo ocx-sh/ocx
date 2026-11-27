@@ -4,6 +4,6 @@ Project tier: `ocx.toml` and `ocx.lock`, consent stamps, staged mutation, per-pr
 
 **Tier:** internal
 
-**May depend on:** `ocx_shell`, `ocx_package`, `ocx_index`, `ocx_store`, `ocx_config`, `ocx_trust`, `ocx_oci`, `ocx_util`, `ocx_exit`, `ocx_env`
+**May depend on:** `ocx_env_apply`, `ocx_shell`, `ocx_package`, `ocx_index`, `ocx_store`, `ocx_config`, `ocx_trust`, `ocx_oci`, `ocx_util`, `ocx_exit`, `ocx_env`
 
 **Named dependency exceptions:** none

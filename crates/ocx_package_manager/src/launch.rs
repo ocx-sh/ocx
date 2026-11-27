@@ -728,9 +728,9 @@ mod firewall_tests {
     /// The launch seam: the one module that owns spawning, and so needs no expectation.
     const LAUNCH_SEAM: &[&str] = &["ocx_package_manager/src/launch.rs", "ocx_package_manager/src/launch/"];
 
-    /// What a sanctioned spawn site carries: an item-level `#[expect(clippy::disallowed_types, ...)]`, matched
+    /// What a sanctioned spawn site carries: an item-level `#[expect(clippy::disallowed_types, ...)]` or a crate-level `#![expect(...)]`, matched
     /// with whitespace removed so a rustfmt-wrapped attribute still counts.
-    const EXPECTATION: &str = "#[expect(clippy::disallowed_types";
+    const EXPECTATION: &str = "[expect(clippy::disallowed_types";
 
     /// The `exec_env` entry points that build a child's environment. Matched as `exec_env::<name>(` paths, or as
     /// a bare `<name>(` in a file that imports the name from `exec_env`; a method call of the same
@@ -764,6 +764,10 @@ mod firewall_tests {
             "test-only live-shell harness",
         ),
         (
+            "ocx_cli/src/app/seam.rs",
+            "test-only re-run of the test binary as a child with no global subscriber",
+        ),
+        (
             "ocx_cli/tests/linux_self_contained.rs",
             "integration test running `ldd` against the built binary",
         ),
@@ -780,14 +784,26 @@ mod firewall_tests {
             "libc detection runs a discovered loader",
         ),
         ("ocx_package/src/bin_scan.rs", "test-only `cc` building ELF fixtures"),
-        ("ocx_package/src/libc_lint.rs", "test-only `cc` building ELF fixtures"),
         (
-            "ocx_package_manager/src/launcher/body.rs",
-            "test-only `/bin/sh` harness over the emitted launcher body",
+            "ocx_shim/src/direct.rs",
+            "the direct launcher builds the child's environment itself; it has no ocx_env edge (size budget)",
         ),
+        (
+            "ocx_shim/tests/batch_spawn.rs",
+            "test-only run of the launcher binary over a vendor directory",
+        ),
+        (
+            "ocx_shim/tests/direct_launch.rs",
+            "test-only run of the launcher binary over a vendor directory",
+        ),
+        ("ocx_package/src/libc_lint.rs", "test-only `cc` building ELF fixtures"),
         (
             "ocx_package_manager/src/tasks/update_check.rs",
             "the installed-version probe is hermetic (`env_clear` plus the resolved package env, nothing inherited)",
+        ),
+        (
+            "ocx_util/src/fs/publish.rs",
+            "test-only Windows junction proof running a copy of a system exe to hold it open",
         ),
         (
             "ocx_schema/tests/schema_outputs.rs",

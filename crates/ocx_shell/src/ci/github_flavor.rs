@@ -275,7 +275,7 @@ mod tests {
             read(&targets.env_file),
             format!(
                 "LD_LIBRARY_PATH=/home/user/.ocx/objects/foo/lib{0}/existing/lib\n",
-                ocx_util::path::PATH_SEPARATOR
+                ocx_env_apply::PATH_SEPARATOR
             )
         );
     }
@@ -375,10 +375,7 @@ mod tests {
         let content = read(&targets.env_file);
         assert_eq!(
             content,
-            format!(
-                "LD_LIBRARY_PATH=/pkg2/lib{0}/pkg1/lib\n",
-                ocx_util::path::PATH_SEPARATOR
-            )
+            format!("LD_LIBRARY_PATH=/pkg2/lib{0}/pkg1/lib\n", ocx_env_apply::PATH_SEPARATOR)
         );
     }
 
@@ -406,7 +403,7 @@ mod tests {
             content,
             format!(
                 "LD_LIBRARY_PATH=/pkg2/lib{0}/pkg1/lib{0}/existing/lib\n",
-                ocx_util::path::PATH_SEPARATOR
+                ocx_env_apply::PATH_SEPARATOR
             )
         );
     }

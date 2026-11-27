@@ -1163,7 +1163,9 @@ mod tests {
         .await
     }
 
-    #[tokio::test(start_paused = true)]
+    // Real time, not `start_paused`: a paused clock jumps to the client's 5 s timeout whenever the runtime waits on
+    // the loopback socket, so a slow runner times the request out (macOS CI) instead of answering it.
+    #[tokio::test]
     async fn a_404_on_a_listed_root_whose_tag_is_still_served_is_delete_denied() {
         let graph = graph(&["old"], None);
         let served = Digest::try_from(digest("served").as_str()).expect("a digest");
@@ -1191,7 +1193,7 @@ mod tests {
         assert!(report.deleted.is_empty(), "{:?}", report.deleted);
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn a_404_on_a_root_whose_tag_is_gone_is_reported_deleted() {
         let graph = graph(&["old"], None);
         confirm_all_gone(&graph.data, 1);

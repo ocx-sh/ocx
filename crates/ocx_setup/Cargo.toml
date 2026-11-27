@@ -28,6 +28,7 @@ ocx_shell.workspace = true
 # resolved through it rather than composed here.
 ocx_store.workspace = true
 # The bottom tier: `fs`, process helpers.
+ocx_env_apply.workspace = true
 ocx_util.workspace = true
 # The environment registry every variable this crate reads is declared in.
 ocx_env.workspace = true

@@ -16,8 +16,8 @@ use super::types::{
     PatchFreezeReport, PatchPublishReport, PatchSyncReport, PatchTestReport, PatchWhyReport, Paths, PruneOutcome,
     PullDryRun, PushReport, RegenerateReport, Removed, SbomListingReport, ScriptRunReport, SelfSetupData,
     SelfUpdateData, ShellStateReport, SignatureReport, SignatureReportSweep, StatusReport, Tags, UpdateCheckData,
-    UpdateReport, UpgradeReport, VerboseShellState, VerboseUpdateReport, VerboseUpgradeReport, VerboseVersionData,
-    VerificationReport, VersionData, WarmedPaths,
+    UpdateReport, UpgradeReport, VendorReport, VerboseShellState, VerboseUpdateReport, VerboseUpgradeReport,
+    VerboseVersionData, VerificationReport, VersionData, WarmedPaths,
 };
 use super::wire::Unknowns;
 
@@ -80,6 +80,7 @@ pub const COMMANDS: &[(&str, u32)] = &[
     ("package sign", 1),
     ("package test", 1),
     ("package uninstall", 1),
+    ("package vendor", 1),
     ("package verify", 2),
     ("package which", 1),
     ("patch freeze", 1),
@@ -100,6 +101,7 @@ pub const COMMANDS: &[(&str, u32)] = &[
     ("status", 1),
     ("update", 1),
     ("upgrade", 1),
+    ("vendor", 1),
     ("version", 1),
 ];
 
@@ -156,6 +158,7 @@ pub const REPORTS: &[(&str, u32)] = &[
     ("UpdateCheckData", 1),
     ("UpdateReport", 1),
     ("UpgradeReport", 1),
+    ("VendorReport", 1),
     ("VerboseShellState", 2),
     ("VerboseUpdateReport", 1),
     ("VerboseUpgradeReport", 1),
@@ -261,6 +264,7 @@ pub fn decode_root(root: &str, document: &Value) -> Option<Result<Box<dyn Decode
         "UpdateCheckData" => decode::<UpdateCheckData>(root, document),
         "UpdateReport" => decode::<UpdateReport>(root, document),
         "UpgradeReport" => decode::<UpgradeReport>(root, document),
+        "VendorReport" => decode::<VendorReport>(root, document),
         "VerboseShellState" => decode::<VerboseShellState>(root, document),
         "VerboseUpdateReport" => decode::<VerboseUpdateReport>(root, document),
         "VerboseUpgradeReport" => decode::<VerboseUpgradeReport>(root, document),

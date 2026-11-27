@@ -311,7 +311,7 @@ and it has the same tell — the missing work makes the number *smaller*. Hence
 :func:`_bin_arena_gates`, two assertions that no wall-clock number here can
 make:
 
-* the arena's `bin/` holds trampolines, counted by the marker the binary itself
+* the arena's `bin/` holds trampolines, counted by the record kind the binary itself
   reads (:func:`count_trampolines`), against a floor constant and never against
   the arena's own tool count;
 * the **first fire** actually emits that directory, matched by the project
@@ -841,16 +841,19 @@ _EGRESS_CONTROL_PACKAGE = "ocx.sh/latency-egress-control"
 #: which is the right way round for a control.
 REENTRY_WORK_FLOOR_MS = 4.0
 
-#: The second line of every rendered POSIX trampoline
-#: (`crates/ocx_config/src/env.rs` — `TRAMPOLINE_MARKER`), mirrored so
+#: The `kind` of a toolchain trampoline's `NAME.launch` record
+#: (`crates/ocx_env_apply/src/launch.rs` — `LaunchKind::Toolchain`), mirrored so
 #: :func:`count_trampolines` can tell a trampoline from any other file that
-#: happens to sit in a `bin/`.
+#: happens to sit in a `bin/`: the record beside the launcher binary says whose it is.
 #:
 #: A mirrored constant that drifts **fails closed**: a rename in the Rust
 #: constant makes the count zero, and the non-vacuity gate below reds. The
 #: opposite arrangement — counting directory entries — would keep passing while
 #: the renderer wrote something else entirely.
-TRAMPOLINE_MARKER = "# ocx-toolchain-trampoline"
+TRAMPOLINE_KIND = "toolchain"
+
+#: The bound `peek_kind` reads under (`launch.rs` — `MAX_PEEK_BYTES`): a longer record is no record.
+TRAMPOLINE_RECORD_MAX_BYTES = 64 * 1024
 
 #: The two `--expect-fail-gate` substrings `test/taskfile.yml` passes. Held here
 #: so :func:`self_check` can prove each one matches its own gate and *only* its
@@ -1268,7 +1271,7 @@ def _bin_arena_gates(bin_arena: Mapping[str, float]) -> list[Gate]:
 
     1. **`bin/` holds trampolines.** Against :data:`WALL_MIN_TRAMPOLINES`, a
        property — never :data:`WALL_PROJECT_TOOLS`, the arena's own sizing knob,
-       which a gate cannot both set and check. Counted by the marker on line two
+       which a gate cannot both set and check. Counted by the `.launch` record kind
        (:func:`count_trampolines`), not by directory entries, so a renderer that
        wrote something else into `bin/` reds instead of counting its output.
     2. **The first fire actually puts that directory on `PATH`.** Gate 1 says the
@@ -3025,25 +3028,29 @@ def _write_bin_project(project: Path, *, env: Mapping[str, str], ocx: Path) -> d
 
 
 def count_trampolines(bin_dir: Path) -> int:
-    """How many files in ``bin_dir`` are ocx trampolines, by their own marker.
+    """How many launchers in ``bin_dir`` are ocx toolchain trampolines, by their own record.
 
-    :data:`TRAMPOLINE_MARKER` as **line two**, which is where
-    `crates/ocx_config/src/env.rs` emits it and where `is_ocx_trampoline` reads it —
-    the same rule, so this counts what the binary would recognise rather than
-    what the directory happens to hold. Counting entries instead would report a
-    full `bin/` for a renderer that wrote anything at all into it.
+    A launcher is a binary ``NAME`` (``NAME.exe`` on Windows) with ``NAME.launch`` beside it, and the
+    trampoline is the one whose record has :data:`TRAMPOLINE_KIND` — the rule `is_ocx_trampoline` in
+    `crates/ocx_config/src/env.rs` applies, so this counts what the binary would recognise rather
+    than what the directory happens to hold. Counting entries instead would report a full `bin/`
+    for a renderer that wrote anything at all into it.
     """
     if not bin_dir.is_dir():
         return 0
     count = 0
-    for entry in sorted(bin_dir.iterdir()):
-        if not entry.is_file():
+    for record in sorted(bin_dir.glob("*.launch")):
+        launcher = record.with_suffix("")
+        if not record.is_file() or not (launcher.is_file() or launcher.with_name(launcher.name + ".exe").is_file()):
             continue
-        # A prefix, like the predicate it mirrors: the marker sits at bytes
-        # 10..36 of every body, and the line after it carries an absolute
-        # project root of unbounded length.
-        head = entry.read_bytes()[:256].split(b"\n")
-        if len(head) > 1 and head[1] == TRAMPOLINE_MARKER.encode("utf-8"):
+        body = record.read_bytes()
+        if len(body) > TRAMPOLINE_RECORD_MAX_BYTES:
+            continue
+        try:
+            document = json.loads(body)
+        except ValueError:
+            continue
+        if isinstance(document, dict) and document.get("kind") == TRAMPOLINE_KIND:
             count += 1
     return count
 
@@ -3162,7 +3169,7 @@ def measure_reentry(
     Every command is run once before sampling and **must exit 0** — a comparand
     that fails fast is the cheapest possible measurement and would report the
     trampoline as free. The trampoline is also checked to be one, by its own
-    marker: timing an arbitrary file in ``bin/`` would answer a question about
+    record: timing an arbitrary file in ``bin/`` would answer a question about
     the fixture.
     """
     trampoline = bin_dir / name

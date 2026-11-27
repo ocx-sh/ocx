@@ -26,8 +26,9 @@ from pathlib import Path
 import pytest
 
 import shell_matrix as matrix
-from src import exec_state
+from src import exec_state, previous_release
 from src.helpers import make_package_with_entrypoints
+from src.launcher_fixtures import only_generation
 from src.runner import OcxRunner
 
 pytestmark = pytest.mark.command(
@@ -592,7 +593,7 @@ def test_a_launcher_under_another_majors_state_keeps_offline_finds_the_home_and_
     """A major-3 state with ``n=offline`` and ``h=`` reaching a launcher, current or previous-release body."""
     pkg_root = _probe_package(ocx, unique_repo, tmp_path)
     if body == "installed":
-        launcher = pkg_root / "entrypoints" / "probe"
+        launcher = only_generation(pkg_root / "launchers") / "probe"
     else:
         launcher = _render(
             "launcher.sh.in", tmp_path / "v0.6.5" / "probe", PKG_ROOT=str(pkg_root)
@@ -727,6 +728,86 @@ def test_a_previous_release_trampoline_in_the_middle_of_a_chain_layers_its_proje
     assert _project_roots(_decoded(lines[2], "the innermost state")) == [q, p], (
         f"Q stays inherited under P{ctx}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Launchers an older ocx wrote start through this ocx
+# ---------------------------------------------------------------------------
+
+
+def test_an_old_package_launcher_an_older_ocx_wrote_starts_its_tool_through_this_ocx(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """`entrypoints/NAME[.exe]` from `ocx-previous` starts through this ocx's `launcher exec` grammar.
+
+    Holds today on Linux (the old script's frozen line is still served): a guard on a
+    property that already holds, red the day the `launcher exec` grammar changes. On
+    Windows the file is the old `.exe` + `.shim` (the first run's blob).
+    """
+    pkg = make_package_with_entrypoints(
+        ocx, unique_repo, tmp_path, entrypoints=["hello"], bins=["hello"]
+    )
+    old = previous_release.resolve()
+    installed = subprocess.run(
+        [str(old), "package", "install", "-p", pkg.platform, pkg.fq],
+        capture_output=True, text=True, env=dict(ocx.env), stdin=subprocess.DEVNULL,
+        timeout=_TIMEOUT, check=False,
+    )
+    assert installed.returncode == 0, f"previous release install failed: {installed.stderr}"
+    entrypoints = _package_root(ocx, pkg.short) / "entrypoints"
+    launcher = entrypoints / ("hello.exe" if sys.platform == "win32" else "hello")
+    assert launcher.is_file(), f"precondition: the previous release writes {launcher}"
+    if sys.platform == "win32":
+        assert (entrypoints / "hello.shim").is_file(), "precondition: the old `.exe` has its `.shim`"
+    env = dict(ocx.env)
+    env["OCX_BINARY_PIN"] = str(ocx.binary)
+
+    result = _run([str(launcher), "arg"], cwd=tmp_path, env=env)
+
+    ctx = f"\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    assert result.returncode == 0, ctx
+    assert f"entry-point-hello {pkg.marker} arg" in result.stdout, (
+        f"the old launcher's frozen `launcher exec` line must reach the tool through this ocx{ctx}"
+    )
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="`.exec` trampolines are Windows launchers; Windows claim")
+def test_an_old_toolchain_trampoline_with_an_exec_sidecar_starts_its_tool_through_this_ocx(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """an old `.exe` + `.exec` (project root, baked ocx) runs `ocx --project <root> exec -- NAME` on this ocx.
+
+    The old `.exe` is the one `ocx-previous` writes for an entry point; the `.exec`
+    is the old two-line sidecar. `whoami` is a System32 program, so the project needs
+    no tool of its own.
+    """
+    pkg = make_package_with_entrypoints(
+        ocx, unique_repo, tmp_path, entrypoints=["hello"], bins=["hello"]
+    )
+    old = previous_release.resolve()
+    installed = subprocess.run(
+        [str(old), "package", "install", "-p", pkg.platform, pkg.fq],
+        capture_output=True, text=True, env=dict(ocx.env), stdin=subprocess.DEVNULL,
+        timeout=_TIMEOUT, check=False,
+    )
+    assert installed.returncode == 0, f"previous release install failed: {installed.stderr}"
+    old_exe = _package_root(ocx, pkg.short) / "entrypoints" / "hello.exe"
+    project = tmp_path.resolve() / "projects" / "p"
+    matrix.write_project(project, 'P_VAR = "p-fixture-value"')
+    locked = matrix.run_lock(ocx.binary, project, dict(ocx.env))
+    assert locked.returncode == 0, f"ocx lock must succeed:\n{locked.stderr}"
+    slot = tmp_path / "old-home" / "bin"
+    slot.mkdir(parents=True)
+    trampoline = slot / "whoami.exe"
+    trampoline.write_bytes(old_exe.read_bytes())
+    (slot / "whoami.exec").write_bytes(f"{project}\n{ocx.binary}\n".encode())
+    env = {key: value for key, value in ocx.env.items() if key != "OCX_BINARY_PIN"}
+
+    result = _run([str(trampoline)], cwd=tmp_path, env=env)
+
+    ctx = f"\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    assert result.returncode == 0, ctx
+    assert result.stdout.strip(), f"whoami must have run through `ocx --project exec`{ctx}"
 
 
 # ---------------------------------------------------------------------------

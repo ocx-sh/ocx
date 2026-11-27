@@ -65,6 +65,7 @@ pub mod package_sbom;
 pub mod package_sign;
 pub mod package_sign_common;
 pub mod package_test;
+pub mod package_vendor;
 pub mod package_verify;
 pub mod patch;
 pub mod patch_common;
@@ -89,6 +90,7 @@ pub mod toolchain_exec;
 pub mod uninstall;
 pub mod update;
 pub mod upgrade;
+pub mod vendor;
 pub mod version;
 pub mod which;
 
@@ -159,9 +161,10 @@ pub enum Command {
         With `--format json`, each item carries `kind`, `dry_run`, `path` and `held_by`. \
         A dry run adds a `Held By` column naming the projects that pin an object it keeps.\n\n\
         The rendered project toolchain under `<home>/toolchain/` is derived state that `ocx pull` \
-        rewrites from `ocx.lock`; `clean` never walks or collects from it. Every run also removes \
-        the consent stamp of any project whose directory no longer exists, and `--dry-run` lists \
-        those stamps without removing them.\n\n\
+        rewrites from `ocx.lock`; `clean` never collects packages through its links. Every run also removes the consent stamp of any project whose directory no longer exists, and `--dry-run` lists \
+        those stamps without removing them. It also removes the launcher directories other OCX \
+        builds wrote, a package's `launchers/<generation>/` and a superseded `shells/default-<hash>/`; \
+        this build's generation and the render directories in use stay, and `--dry-run` lists what it would remove.\n\n\
         Do not run `clean` while other OCX commands are running: a concurrent install may \
         reference an object that `clean` is about to remove.")]
     Clean(clean::Clean),
@@ -234,8 +237,8 @@ pub enum Command {
         `.gitattributes` does not declare `ocx.lock merge=union`.\n\n\
         Re-renders the project toolchain into `<project>/.ocx/toolchain/`, or under the \
         `toolchain_dir` root when one is configured. The `links/<group>/<entry>` tree and \
-        the `shells/default/bin` launchers reached through the `active` link match the lock just \
-        written. That directory carries its own `.gitignore`, so `git status` stays clean.")]
+        the launchers in the `shells/default-<hash>/bin` directory the `active` link names match the \
+        lock just written. That directory carries its own `.gitignore`, so `git status` stays clean.")]
     Lock(lock::Lock),
     /// Authenticate to a registry and persist credentials.
     #[command(long_about = "\
@@ -290,8 +293,8 @@ pub enum Command {
         consults the registry every time.\n\n\
         Re-renders the project toolchain into `<project>/.ocx/toolchain/`, or under the \
         `toolchain_dir` root when one is configured. The `links/<group>/<entry>` tree and \
-        the `shells/default/bin` launchers reached through the `active` link follow the advanced \
-        lock. That directory carries its own `.gitignore`, so `git status` stays clean.")]
+        the launchers in the `shells/default-<hash>/bin` directory the `active` link names follow \
+        the advanced lock. That directory carries its own `.gitignore`, so `git status` stays clean.")]
     Update(update::Update),
     /// Move declared tags in ocx.toml to the newest published release.
     #[command(long_about = "\
@@ -321,6 +324,16 @@ pub enum Command {
         After writing, the new pins are materialized for the host platform, as `ocx update` \
         does.")]
     Upgrade(upgrade::Upgrade),
+    /// Write the project's tools, entry points and a manifest to a relocatable directory.
+    #[command(long_about = "\
+        Write the project's tools, entry points and a manifest to a relocatable directory.\n\n\
+        Reads the digest-pinned `ocx.lock` of the nearest `ocx.toml` and writes the selected tools' packages, \
+        one launcher per exposed name and `manifest.json` to DIR. The directory runs from wherever it is moved; \
+        nothing in it names this machine. `-g` and NAME select as for `ocx exec`; `--platform` names the target \
+        and defaults to the host.\n\n\
+        `--manifest-only` writes `manifest.json` alone. `--omit-links` creates no symlink. DIR must be absent or \
+        empty, else the command exits 64 and writes nothing. A missing `-o` exits 64.")]
+    Vendor(vendor::Vendor),
     /// Internal subcommands used by generated entry-point launchers (hidden).
     #[command(subcommand)]
     Launcher(launcher::Launcher),
@@ -342,8 +355,8 @@ pub enum Command {
         object store: the default group without `-g`, every group with `-g all`. Naming bindings \
         narrows the pull to those entries. Then it renders the project toolchain into `<project>/.ocx/toolchain/`, or \
         under the `toolchain_dir` root when one is configured. That is one link per \
-        `links/<group>/<entry>`, plus the `shells/default/bin` launchers for the default \
-        group, reached through the `active` link. That directory carries its own `.gitignore`, \
+        `links/<group>/<entry>`, plus the launchers for the default \
+        group in the `shells/default-<hash>/bin` directory the `active` link names. That directory carries its own `.gitignore`, \
         so `git status` stays clean.\n\n\
         This is the primary way a project toolchain is rendered; `--dry-run` reports the delta \
         and writes nothing.\n\n\
@@ -368,8 +381,8 @@ pub enum Command {
         When one name appears in more than one group (for example in `[tools]` and `[group.ci]`), \
         the command cannot tell which to drop and exits 64. Pass `--group` to name the target.\n\n\
         Drops each binding from `ocx.lock` as well. Then it re-renders the project toolchain into \
-        `<project>/.ocx/toolchain/`, or under the `toolchain_dir` root when one is configured. The removed tools leave the `links/<group>/<entry>` tree and the `shells/default/bin` \
-        launchers reached through the `active` link. That directory carries its own `.gitignore`, \
+        `<project>/.ocx/toolchain/`, or under the `toolchain_dir` root when one is configured. The removed tools leave the `links/<group>/<entry>` tree and the launchers in the \
+        `shells/default-<hash>/bin` directory the `active` link names. That directory carries its own `.gitignore`, \
         so `git status` stays clean.\n\n\
         Only the reference is removed; `ocx clean`, or `--purge` right away, deletes a package \
         nothing else references.")]
@@ -516,6 +529,7 @@ impl Command {
             Command::Logout(logout) => boxed(move || logout.execute(context)).await,
             Command::Update(update) => boxed(move || update.execute(context)).await,
             Command::Upgrade(upgrade) => boxed(move || upgrade.execute(context)).await,
+            Command::Vendor(vendor) => boxed(move || vendor.execute(context)).await,
             Command::Launcher(launcher) => boxed(move || launcher.execute(context)).await,
             Command::Package(package) => boxed(move || package.execute(context)).await,
             Command::Patch(patch_group) => boxed(move || patch_group.execute(context)).await,

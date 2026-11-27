@@ -97,6 +97,14 @@ jobs:
           suite: unit
           auth: ${{ secrets.OTEL_OTLP_AUTH }}
 
+  # Every committed launcher blob started on its own OS and architecture, so a runner image or OS
+  # update that stops a blob from running reds the nightly run even when no pull request touched it.
+  launcher-blobs:
+    name: Launcher Blobs
+    permissions:
+      contents: read
+    uses: ./.github/workflows/launcher-blobs.yml
+
   # The activation matrix on the platforms the per-PR Linux shell zoo cannot reach.
   shell-activation-deep:
     name: Shell Activation (Deep)

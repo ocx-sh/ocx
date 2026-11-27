@@ -89,6 +89,8 @@ pub struct Documents {
     pub errors: Value,
     /// `cli.json`, the command grammar with its output modes, env manifest and retired names.
     pub cli: Value,
+    /// `vendor-manifest.json`; `None` while the baseline predates it, which the gate reads as all additions.
+    pub vendor_manifest: Option<Value>,
 }
 
 impl Documents {
@@ -102,10 +104,11 @@ impl Documents {
             reports: serde_json::from_str(reports)?,
             errors: serde_json::from_str(errors)?,
             cli: serde_json::from_str(cli)?,
+            vendor_manifest: None,
         })
     }
 
-    /// Reads `reports.json`, `errors.json` and `cli.json` from `directory`.
+    /// Reads `reports.json`, `errors.json` and `cli.json` from `directory`, and `vendor-manifest.json` when it is there.
     ///
     /// # Errors
     ///
@@ -123,6 +126,11 @@ impl Documents {
             reports: read("reports.json")?,
             errors: read("errors.json")?,
             cli: read("cli.json")?,
+            vendor_manifest: directory
+                .join("vendor-manifest.json")
+                .exists()
+                .then(|| read("vendor-manifest.json"))
+                .transpose()?,
         })
     }
 }

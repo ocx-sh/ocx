@@ -51,6 +51,7 @@ fn kind_of(name: &str) -> Kind {
         "reports" => Kind::Reports,
         "errors" => Kind::Errors,
         "cli" => Kind::Cli,
+        "vendor-manifest" => Kind::VendorManifest,
         other => panic!("unknown corpus kind {other}"),
     }
 }
@@ -163,6 +164,7 @@ fn base_documents() -> Documents {
         reports: baseline_of("b02_property_removed"),
         errors: baseline_of("r01_exit_code_removed"),
         cli: baseline_of("g13_public_env_removed"),
+        vendor_manifest: Some(baseline_of("vendor_manifest_property_removed")),
     }
 }
 
@@ -171,6 +173,7 @@ fn slot(documents: &mut Documents, kind: Kind) -> &mut Value {
         Kind::Reports => &mut documents.reports,
         Kind::Errors => &mut documents.errors,
         Kind::Cli => &mut documents.cli,
+        Kind::VendorManifest => documents.vendor_manifest.as_mut().expect("a vendor manifest"),
         Kind::Input => panic!("no input document"),
     }
 }
@@ -517,22 +520,114 @@ fn a_walk_that_does_not_descend_reds_the_reader_floor() {
 
 #[test]
 fn the_goldens_compare_equal_to_themselves_and_are_read_whole() {
-    let golden = |name: &str| json_at(&workspace_root().join(format!("crates/ocx_schema/tests/golden/{name}.json")));
-    let documents = Documents {
-        reports: golden("reports"),
-        errors: golden("errors"),
-        cli: golden("cli"),
-    };
+    let documents = Documents::read_dir(&workspace_root().join("crates/ocx_schema/tests/golden")).expect("the goldens");
+    let vendor_manifest = documents
+        .vendor_manifest
+        .iter()
+        .map(|document| (Kind::VendorManifest, document));
     for (kind, document) in [
         (Kind::Reports, &documents.reports),
         (Kind::Errors, &documents.errors),
         (Kind::Cli, &documents.cli),
-    ] {
+    ]
+    .into_iter()
+    .chain(vendor_manifest)
+    {
         let run = compat::diff(document, document, kind);
         assert_eq!(run.findings, [], "{kind:?}");
         assert_eq!(run.keywords, 2 * raw_keys(document), "{kind:?}");
     }
     assert_eq!(compat::gate(&documents, &documents, &[]), []);
+}
+
+const MANIFEST_VERSION: &str = "/properties/schema_version/const";
+const NOTE: &str = "/properties/note";
+
+#[test]
+fn a_manifest_the_baseline_lacks_is_all_additions_and_starts_at_one() {
+    let (_, mut current) = pair(&case("vendor_manifest_property_removed"));
+    let mut base = base_documents();
+    base.vendor_manifest = None;
+    assert_eq!(compat::gate(&base, &current, &[]), []);
+    set(&mut current, Kind::VendorManifest, MANIFEST_VERSION, json!(2));
+    assert_eq!(
+        compat::gate(&base, &current, &[]),
+        [Violation::Version {
+            kind: Kind::VendorManifest,
+            subject: "schema_version".to_owned(),
+            expected: 1,
+            found: 2
+        }]
+    );
+}
+
+/// A manifest the baseline lacks, at `version`, against `ledger`.
+fn added_manifest_violations(version: u32, ledger: &[LedgerEntry]) -> Vec<Violation> {
+    let (_, mut current) = pair(&case("vendor_manifest_property_removed"));
+    let mut base = base_documents();
+    base.vendor_manifest = None;
+    set(&mut current, Kind::VendorManifest, MANIFEST_VERSION, json!(version));
+    compat::gate(&base, &current, ledger)
+}
+
+fn manifest_version(expected: u32, found: u32) -> Violation {
+    Violation::Version {
+        kind: Kind::VendorManifest,
+        subject: "schema_version".to_owned(),
+        expected,
+        found,
+    }
+}
+
+#[test]
+fn an_entry_listing_an_added_manifest_justifies_version_two_and_nothing_else() {
+    let ledger = [entry("vendor-manifest", &["*"], EntryRule::Semantic, "")];
+    // Also proves a `semantic` entry matching no finding is not reported stale.
+    assert_eq!(added_manifest_violations(2, &ledger), []);
+    assert_eq!(added_manifest_violations(2, &[]), [manifest_version(1, 2)]);
+    assert_eq!(added_manifest_violations(3, &ledger), [manifest_version(2, 3)]);
+    assert_eq!(added_manifest_violations(1, &ledger), [manifest_version(2, 1)]);
+}
+
+#[test]
+fn an_entry_listing_an_added_report_justifies_version_two() {
+    let (base, mut current) = pair(&case("root_added"));
+    set(
+        &mut current,
+        Kind::Reports,
+        "/$defs/TagReportRoot/properties/schema_version/const",
+        json!(2),
+    );
+    let ledger = [entry("reports", &["TagReport"], EntryRule::Semantic, "")];
+    assert_eq!(compat::gate(&base, &current, &ledger), []);
+}
+
+#[test]
+fn a_manifest_break_needs_an_entry_and_a_bumped_schema_version() {
+    let (base, mut current) = pair(&case("vendor_manifest_property_removed"));
+    let violations = compat::gate(&base, &current, &[]);
+    let [
+        Violation::Unacknowledged {
+            kind: Kind::VendorManifest,
+            finding,
+        },
+    ] = violations.as_slice()
+    else {
+        panic!("{violations:?}");
+    };
+    assert_eq!((finding.code, finding.pointer.as_str()), (Code::B02, NOTE));
+    let ledger = [entry("vendor-manifest", &["*"], EntryRule::Code(Code::B02), NOTE)];
+    assert_eq!(
+        compat::gate(&base, &current, &ledger),
+        [Violation::Version {
+            kind: Kind::VendorManifest,
+            subject: "schema_version".to_owned(),
+            expected: 2,
+            found: 1
+        }]
+    );
+    set(&mut current, Kind::VendorManifest, MANIFEST_VERSION, json!(2));
+    assert_eq!(compat::gate(&base, &current, &ledger), []);
 }
 
 #[test]
@@ -603,13 +698,8 @@ fn the_live_goldens_hold_against_the_baseline_and_the_ledger() {
     if !baseline.exists() {
         return;
     }
-    let read = |dir: &Path, name: &str| json_at(&dir.join(format!("{name}.json")));
     let goldens = workspace_root().join("crates/ocx_schema/tests/golden");
-    let load = |dir: &Path| Documents {
-        reports: read(dir, "reports"),
-        errors: read(dir, "errors"),
-        cli: read(dir, "cli"),
-    };
+    let load = |dir: &Path| Documents::read_dir(dir).expect("the documents");
     let violations = compat::gate(&load(&baseline), &load(&goldens), &ledger);
     let report: Vec<String> = violations.iter().map(ToString::to_string).collect();
     assert!(

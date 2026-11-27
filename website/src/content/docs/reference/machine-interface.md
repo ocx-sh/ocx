@@ -120,6 +120,7 @@ Each document is described by a JSON Schema published on this site, so a program
 | `metadata.json`, package | [metadata][schema-metadata] |
 | Patch descriptor (`ocx patch publish --descriptor`) | [patch][schema-patch] |
 | Execution record (`[records]` sink) | [execution-record][schema-execution-record] |
+| Vendor manifest (`manifest.json` of `ocx vendor`) | [vendor-manifest][schema-vendor-manifest] |
 
 - Editor integration: set `$schema` to the metadata schema URL at the top of `metadata.json`. Editors that read JSON Schema ([taplo][taplo], [yaml-language-server][yaml-ls], VS Code, Zed) use these for completion and validation.
 - `ocx init` writes the project schema as a `#:schema` directive on the first line of every `ocx.toml` it generates.
@@ -144,6 +145,7 @@ See the [command reference][cmd-reference] for flags, arguments and output modes
 [schema-metadata]: https://ocx.sh/schemas/metadata/v1.json
 [schema-patch]: https://ocx.sh/schemas/patch/v1.json
 [schema-execution-record]: https://ocx.sh/schemas/execution-record/v1.json
+[schema-vendor-manifest]: https://ocx.sh/schemas/vendor-manifest/v2.json
 
 <!-- commands -->
 [cmd-reference]: ./command-line/index.md

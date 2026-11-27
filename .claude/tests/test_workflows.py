@@ -41,7 +41,7 @@ Two shapes the crate split can break without any workflow going red:
   at all — so the predicate keys on `executionInfo.strategy`, and its red and green
   run over real BEP bytes in `test/fixtures/bep/cache_states.json`.
 
-The workflows are read with PyYAML (D11). One YAML 1.1 trap: the bare key
+The workflows are read with PyYAML. One YAML 1.1 trap: the bare key
 `on` loads as the boolean `True`, so `_on` looks it up under both spellings.
 Glob liveness is `git ls-files -- ':(glob)<pattern>'`: git's `:(glob)`
 pathspec is GitHub's filter grammar (`*` stops at `/`, `**` crosses it, a
@@ -420,7 +420,7 @@ _JOB_CLAIM = re.compile(r"`([a-z0-9-]+\.yml)`(?:'s)?\s+`([A-Za-z0-9_-]+)`\s+(?:j
 # line to add.
 #
 # The one member is not a defect awaiting repair. `plan_crate_split_workspace.md`
-# records that ruling D5 DELETED `smoke-windows`, and quotes the ADR sentence
+# records the ruling that deleted `smoke-windows`, and quotes the ADR sentence
 # that outlived it as the finding under repair — naming a job the workflow
 # lacks is that document's correct content, and this needle cannot tell a
 # deletion record from an assertion of coverage.
@@ -549,7 +549,8 @@ def _off_linux(workflow: Path, inputs: dict | None = None) -> tuple[int, dict[st
 #: The basic tier's only jobs off a literal `ubuntu-*` runner: the native smoke legs. `unit-native` is the
 #: unit bundle on macOS and Windows; `acceptance.yml:shard` is read through `acceptance-native`, whose
 #: `os` is a matrix expression, so it reads as non-Linux. Anything else is a cost every push pays.
-BASIC_NATIVE_JOBS = frozenset({"basic-repo.yml:unit-native", "acceptance.yml:shard"})
+#: `junction-proof` is the Windows-only proof of DP-41: it executes two cases of the cross-built bundle.
+BASIC_NATIVE_JOBS = frozenset({"basic-repo.yml:unit-native", "basic-repo.yml:junction-proof", "acceptance.yml:shard"})
 
 
 def test_basic_runs_on_linux_except_its_native_smoke_legs() -> None:
@@ -600,7 +601,15 @@ def _runner_labels(job: dict) -> list[str]:
 # spellings a Rust toolchain arrives through.
 _BUILD_TOOLING = re.compile(r"\b(cargo|bazel|bazelisk|rustup|rustc)\b|rust-toolchain|setup-rust|build-rust|bazel-cache-rc")
 # `acceptance-native` is a call of `acceptance.yml`, so it has no runner of its own to read here.
-NATIVE_DEEP_JOBS = frozenset({"unit-native"})
+NATIVE_DEEP_JOBS = {
+    "deep-repo.yml": frozenset({"unit-native"}),
+    "basic-repo.yml": frozenset({"unit-native", "junction-proof"}),
+}
+#: Native jobs that are Windows-only by design, with the reason: the job proves an NTFS junction behaviour that
+#: has no macOS counterpart. Every other native job runs on both macOS and Windows.
+WINDOWS_ONLY_NATIVE_JOBS = {
+    "basic-repo.yml:junction-proof": "DP-41: the in-place junction retarget (V-L31, V-L32) exists on NTFS only",
+}
 
 
 def test_the_cross_workflow_is_the_one_linux_compile() -> None:
@@ -648,13 +657,14 @@ def test_non_linux_jobs_only_download_and_execute(workflow_file: str) -> None:
     }
     # The floor, before the negative below: a reader that found no native job
     # sweeps clean and says nothing.
-    assert set(native) == NATIVE_DEEP_JOBS, (
+    assert set(native) == NATIVE_DEEP_JOBS[workflow_file], (
         f"{workflow.name} non-Linux jobs are {sorted(native)}, expected exactly "
-        f"{sorted(NATIVE_DEEP_JOBS)}"
+        f"{sorted(NATIVE_DEEP_JOBS[workflow_file])}"
     )
     for name, job in native.items():
         labels = _runner_labels(job)
-        missing = [family for family in ("macos", "windows") if not any(label.startswith(f"{family}-") for label in labels)]
+        families = ("windows",) if f"{workflow_file}:{name}" in WINDOWS_ONLY_NATIVE_JOBS else ("macos", "windows")
+        missing = [family for family in families if not any(label.startswith(f"{family}-") for label in labels)]
         assert not missing, f"{workflow.name} `{name}` runs on {labels}, no {missing} entry"
         assert "exclude" not in job["strategy"]["matrix"], f"{workflow.name} `{name}` matrix has an `exclude`"
         offending = [
@@ -2844,6 +2854,9 @@ DEEP_REPO = WORKFLOW_DIR / "deep-repo.yml"
 ACCEPTANCE = WORKFLOW_DIR / "acceptance.yml"
 CROSS = WORKFLOW_DIR / "cross.yml"
 SHELL_ACTIVATION_DEEP = WORKFLOW_DIR / "shell-activation-deep.yml"
+LAUNCHER_BLOBS = WORKFLOW_DIR / "launcher-blobs.yml"
+SHIM_BUILD = WORKFLOW_DIR / "build-windows-shims.yml"
+SHIM_BLOB_DIR = ROOT / "crates" / "ocx_store" / "src" / "shims"
 REUSABLE_REPO_WORKFLOWS = (BASIC_REPO, DEEP_REPO, ACCEPTANCE, CROSS)
 
 #: Where the cross-build jobs run. "B" keeps all eight in the deep tier only, "A" adds all eight to every
@@ -2876,6 +2889,7 @@ DEEP_REPO_JOBS = frozenset(
         "satellite-contract",
         "index-conformance-drift",
         "shell-activation-deep",
+        "launcher-blobs",
     }
 )
 ACCEPTANCE_INPUTS = {
@@ -2974,7 +2988,7 @@ def test_a_tier_workflow_grants_nothing_at_the_top(workflow: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    "workflow", (*REUSABLE_REPO_WORKFLOWS, SHELL_ACTIVATION_DEEP), ids=lambda path: path.name
+    "workflow", (*REUSABLE_REPO_WORKFLOWS, SHELL_ACTIVATION_DEEP, LAUNCHER_BLOBS), ids=lambda path: path.name
 )
 def test_no_job_called_through_the_template_asks_for_more_than_contents_read(workflow: Path) -> None:
     findings = _permission_overreach(_repo_workflow(workflow))
@@ -3098,6 +3112,60 @@ def test_deep_repo_runs_shell_activation_through_its_reusable_workflow() -> None
     assert job.get("uses") == "./.github/workflows/shell-activation-deep.yml", (
         f"{DEEP_REPO.name}: job `shell-activation-deep` uses {job.get('uses')!r}"
     )
+
+
+def _expected_runner_family(target: str) -> str:
+    return {"linux": "ubuntu-", "darwin": "macos-", "windows": "windows-"}[
+        "linux" if "-linux-" in target else "darwin" if "-apple-" in target else "windows"
+    ]
+
+
+def test_every_committed_launcher_blob_runs_on_its_own_os_and_architecture() -> None:
+    """One `launcher-blobs.yml` leg per blob in the shims directory, on a runner of that blob's platform.
+
+    Derived from the directory, so a seventh blob without a leg reds here; floored on the six it holds today.
+    """
+    blobs = sorted(path.name for path in SHIM_BLOB_DIR.glob("ocx-shim-*"))
+    assert len(blobs) >= 6, f"read {blobs} from {SHIM_BLOB_DIR.relative_to(ROOT)}, expected at least six blobs"
+    job = _repo_job(LAUNCHER_BLOBS, "run")
+    legs = job["strategy"]["matrix"]["include"]
+    assert sorted(leg["blob"] for leg in legs) == blobs, (
+        f"{LAUNCHER_BLOBS.name} runs {sorted(leg['blob'] for leg in legs)}, the committed blobs are {blobs}"
+    )
+    assert job["runs-on"] == "${{ matrix.os }}", f"{LAUNCHER_BLOBS.name}: `run` runs on {job['runs-on']!r}"
+    for leg in legs:
+        target, os = leg["target"], leg["os"]
+        assert leg["blob"].removesuffix(".exe") == f"ocx-shim-{target}", f"leg {leg} runs another target's blob"
+        assert os.startswith(_expected_runner_family(target)), f"leg {leg}: {os} is not a runner of {target}'s OS"
+        arm_runner = "arm" in os or os == "macos-latest"
+        assert arm_runner == target.startswith("aarch64-"), f"leg {leg}: {os} is not a runner of {target}'s architecture"
+    runs = [str(step.get("run", "")) for step in job["steps"]]
+    assert 'bash scripts/launcher_blob_check.sh "$BLOB" "$TARGET"' in runs, f"{LAUNCHER_BLOBS.name} never runs the check: {runs}"
+
+
+def test_the_recorded_input_digest_counts_as_a_blob_source() -> None:
+    """A rewritten `shim_inputs.sha256` without a re-cut must red the recency step, as a source edit does."""
+    steps = _repo_job(SHIM_BUILD, "build")["steps"]
+    recency = [str(step["run"]) for step in steps if "re-cut when shim sources change" in str(step.get("name", ""))]
+    assert len(recency) == 1, f"{SHIM_BUILD.name} `build` has {len(recency)} recency steps, expected one"
+    source_line = next((line for line in recency[0].splitlines() if line.strip().startswith("last_src=")), "")
+    assert "crates/ocx_shim/" in source_line, f"the recency step's source line was not found: {source_line!r}"
+    assert "crates/ocx_store/src/shim_inputs.sha256" in source_line, (
+        f"the recency step does not count the recorded input digest as a source: {source_line!r}"
+    )
+
+
+def test_the_launcher_blob_run_fires_with_the_shim_inputs_and_in_the_nightly_tier() -> None:
+    """A pull request or push that changes a blob or a build input runs it, and so does every deep run."""
+    uses = "./.github/workflows/launcher-blobs.yml"
+    assert _repo_job(DEEP_REPO, "launcher-blobs").get("uses") == uses, f"{DEEP_REPO.name} does not call {uses}"
+    callers = [job for job in _repo_jobs(SHIM_BUILD).values() if job.get("uses") == uses]
+    assert len(callers) == 1, f"{SHIM_BUILD.name} calls {uses} {len(callers)} times, expected once"
+    triggers = _load(SHIM_BUILD).get("on", _load(SHIM_BUILD).get(True))
+    for event in ("push", "pull_request"):
+        paths = triggers[event]["paths"]
+        for watched in ("crates/ocx_store/src/shims/**", ".github/workflows/launcher-blobs.yml", "scripts/launcher_blob_check.sh"):
+            assert watched in paths, f"{SHIM_BUILD.name} `{event}` does not watch {watched}"
 
 
 def _cross_targets_passed(job: dict) -> frozenset[str]:

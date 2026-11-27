@@ -1,0 +1,82 @@
+{
+  "schema_version": 2,
+  "content": "present",
+  "platform": "windows/amd64",
+  "available_platforms": [
+    "windows/amd64"
+  ],
+  "vendor_id": "sha256:@DIGEST64@",
+  "dir_token": "@VENDOR_DIR@",
+  "packages": [
+    {
+      "identifier": "@REGISTRY@/@REPO@:1.0.0@sha256:@DIGEST64@",
+      "digest": "sha256:@DIGEST64@",
+      "package_dir": "p/@HEX16@",
+      "content_dir": "p/@HEX16@/c",
+      "dependencies": [],
+      "names_declared": true,
+      "entrypoints": [],
+      "tree": {
+        "files": [
+          {
+            "path": "p/@HEX16@/c/bin/tool.exe",
+            "executable": true
+          }
+        ],
+        "links": [],
+        "link_free_dirs": [
+          "p/@HEX16@/c/bin"
+        ]
+      }
+    }
+  ],
+  "environments": [
+    {
+      "id": "selection:default",
+      "scope": {
+        "type": "selection",
+        "selection": "default"
+      },
+      "items": [
+        {
+          "key": "PATH",
+          "value": "@VENDOR_DIR@/p/@HEX16@/c/bin",
+          "kind": "path"
+        },
+        {
+          "key": "@REPO_UPPER@_HOME",
+          "value": "@VENDOR_DIR@/p/@HEX16@/c",
+          "kind": "constant"
+        }
+      ]
+    }
+  ],
+  "selections": [
+    {
+      "id": "default",
+      "groups": [
+        "default"
+      ],
+      "bindings": [
+        "tool"
+      ],
+      "roots": [
+        "sha256:@DIGEST64@"
+      ],
+      "environment": "selection:default",
+      "launcher_dir": "l"
+    }
+  ],
+  "tools": [
+    {
+      "name": "tool",
+      "selection": "default",
+      "kind": "binary",
+      "package": "sha256:@DIGEST64@",
+      "environment": "selection:default",
+      "target_path": "p/@HEX16@/c/bin/tool.exe",
+      "launcher_path": "l/tool.exe",
+      "record_path": "l/tool.launch"
+    }
+  ]
+}

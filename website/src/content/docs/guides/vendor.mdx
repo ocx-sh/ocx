@@ -1,0 +1,159 @@
+---
+title: "Vendor packages"
+description: "Write a toolchain into a plain directory that runs after a move, with no OCX and no network."
+---
+{/* doc_type: how-to */}
+{/* doc_tier: integration */}
+
+import ShellSession from '@ocx-sh/theme/components/ShellSession.astro'
+
+{/* doc-example: no-run, the commands need registry access and a project, which a docs test has none of */}
+
+Write the packages of a toolchain, and the launchers that run them, into one directory. The directory runs from any location once copied, and needs neither OCX nor a network on the machine that uses it.
+
+## Vendor a selection \{#vendor-selection\}
+
+A tool store under `~/.ocx` holds absolute paths, so a copy of it breaks. Build systems such as [Bazel][bazel] need the opposite: files they can hash, move into a sandbox and ship to a remote executor.
+
+[`ocx vendor`][cmd-vendor] resolves a selection the way [`ocx exec`][cmd-exec] does and writes it to `-o`. Names and `-g` groups come from the project's `ocx.toml` and `ocx.lock`.
+
+<ShellSession>
+
+```sh
+ocx vendor -o /work/tools -p linux/amd64 jq ripgrep
+ocx vendor -o /work/tools-ci -p linux/amd64 -g ci
+```
+
+</ShellSession>
+
+For packages with no project, [`ocx package vendor`][cmd-package-vendor] takes identifiers.
+
+<ShellSession>
+
+```sh
+ocx package vendor -o /work/tools -p linux/amd64 ocx.sh/jqlang/jq:1.8
+```
+
+</ShellSession>
+
+`-o` names a path, relative to the working directory or absolute, that does not exist or is an empty directory. Anything else exits 64 before any request, and the directory stays unchanged. The tree is built beside the target and renamed into place, so a failed run leaves no partial directory.
+
+`-p` takes one platform and defaults to the host. A binding with no build for that platform at the locked version exits 78.
+
+## What the directory holds \{#vendor-layout\}
+
+The directory carries three top-level entries, described in the [manifest reference][ref-manifest].
+
+| Entry | Content |
+|---|---|
+| `manifest.json` | Every package, environment, tool and file, with relative paths |
+| `l/` | One launcher `NAME` (`NAME.exe` on Windows) per tool, each with a record `NAME.launch` beside it |
+| `p/` | One directory `<HEX16>` per package, from the first 16 hex characters of its digest |
+
+Inside `p/<HEX16>/`, `c/` holds the package content. `e/` holds the package's entry-point launchers, each with its `NAME.launch` record.
+
+A launcher is a copy of one fixed binary for the platform. Its record `NAME.launch` is JSON of kind `direct`. It names the program to start and the environment to apply, as paths relative to the directory.
+
+Two packages whose digests share the first 16 hex characters cannot share a directory. `ocx vendor` refuses the run with exit 65 and names both digests.
+
+Add `--omit-links` to write no symlinks. The manifest still lists them, for consumers that recreate them. Use it where the target cannot hold symlinks, for example a Windows host without the privilege. Launchers that resolve through a link stay broken until the consumer recreates the links from `tree.links`, by design.
+
+## Run it \{#vendor-run\}
+
+Start a tool by its launcher. The launcher finds the directory from its own path, applies the recorded environment and replaces itself with the tool on Linux and macOS.
+
+<ShellSession>
+
+```sh
+/work/tools/l/jq --version
+```
+
+</ShellSession>
+
+The launcher runs with the caller's environment, minus the variables OCX treats as credentials or state. `ocx exec` strips the same ones. It writes nothing, so a read-only directory works.
+
+A launcher that cannot run exits 78 and prints what it tried. Each refusal has one cause and one remedy:
+
+| Cause | What to do |
+|---|---|
+| The `NAME.launch` record beside the launcher is missing | Keep the launcher and its record in the same directory when you copy or move it |
+| The record cannot be read, is not valid, or is of a kind the launcher does not run | Replace the directory with a fresh `ocx vendor` run; do not edit a record |
+| On Linux and macOS, the launcher was started through a path that is not the running file | Start the launcher by its real path in the vendored directory |
+| The launcher finds no vendored directory beside it, in a runfiles tree or in a runfiles manifest | Keep the launcher inside its vendored directory. Under Bazel, make sure the set is in the target's runfiles |
+| The directory path contains the platform's list separator (`:` on Unix, `;` on Windows) | Move the directory to a path without it |
+| A runfiles manifest is larger than 64 MiB or holds a line longer than 64 KiB, or cannot be read | Fix or regenerate the manifest |
+| The launcher file was deleted or replaced after it started, or its own path cannot be resolved | Run it again from an intact directory |
+
+`manifest.json` is the only interface a consumer may rely on. File names inside the tree, such as `l/`, `p/` and the record files, are implementation details that can change.
+
+## Move it \{#vendor-move\}
+
+Copy the whole directory with `cp -r`, `rsync` or `tar`. Nothing inside refers to the old location, so any new location works, as long as launchers keep their place relative to `p/`.
+
+Under Bazel the launcher also looks beside its own runfiles tree. Each record carries the `vendor_id` of its directory, so a launcher never picks a tree of another set. Where Bazel builds no runfiles tree, the launcher reads the runfiles manifest instead. Windows therefore needs no `--enable_runfiles` flag. A launcher that finds neither a tree nor a manifest exits 78 and names the candidates it rejected.
+
+## Plan without downloading \{#vendor-manifest-only\}
+
+`--manifest-only` writes only `manifest.json`, with `content` set to `absent`. It downloads manifests and configs and no layer. It applies the same trust, yank and `allow_unverified` checks as a full run and fails with the same exit code.
+
+<ShellSession>
+
+```sh
+ocx vendor --manifest-only -o /work/plan -p windows/amd64 jq
+```
+
+</ShellSession>
+
+Use it to learn which tools a selection exposes on a platform before paying for the download.
+
+## macOS \{#vendor-macos\}
+
+The `aarch64-apple-darwin` launcher ships with an ad-hoc signature that `codesign --verify` accepts. OCX copies it unchanged, so a copy, a rename and a `tar` round trip keep it valid.
+
+A file that arrived through a browser or a mail client carries the quarantine attribute, and Gatekeeper blocks it. Clear it once on the copied directory.
+
+<ShellSession>
+
+```sh
+xattr -dr com.apple.quarantine /work/tools
+```
+
+</ShellSession>
+
+Do not patch or strip a launcher. A changed byte invalidates its signature, which `codesign --verify` reports.
+
+Darwin content vendored on Linux or Windows stays as published. OCX re-signs a Mach-O file only on a macOS host.
+
+## Windows \{#vendor-windows\}
+
+Launchers are `.exe` files with a `NAME.launch` record beside them. A declared binary is `<name>.exe` in the package's first `PATH` directory, with or without `--manifest-only`. A program that is a batch file must be declared as an entry point, or a full run exits 65. An entry point whose command ends in `.bat` or `.cmd` starts through the standard library's batch-argument escaping. An argument it refuses makes the launcher exit 64 and name that argument.
+
+Every other program starts through `CreateProcessW` with the exit code passed through. Path rules for a `windows/*` platform are stricter than on Unix, listed in the [manifest reference][ref-manifest-paths].
+
+A launcher starts a program whose path is 260 characters or longer. A working directory of that length still fails in Windows itself, and a batch entry point runs through `cmd.exe`, which has the same limit. Keep the directory the tree sits in short, and under [Bazel][bazel] use a short output root.
+
+## Errors \{#vendor-errors\}
+
+| Exit | Slug | Meaning |
+|---|---|---|
+| 64 | `vendor_output_not_empty` | `-o` exists and is not an empty directory |
+| 65 | `vendor_value_unrepresentable` | A value holds `@VENDOR_DIR@`, a NUL byte, or an absolute path of the home or the output |
+| 65 | `vendor_path_unrepresentable` | A program, launcher or link target breaks the [path rules][ref-manifest-paths], two digests share a `<HEX16>`, a tool name ends in `.launch`, or a package declares a binary its content does not hold |
+| 78 | existing resolution slug | A binding has no build for `-p` at the locked version |
+
+All other exit codes follow the [exit code reference][ref-exit-codes].
+
+{/* doc-example: end no-run */}
+
+{/* external */}
+[bazel]: https://bazel.build/
+
+{/* commands */}
+[cmd-vendor]: ../reference/command-line/commands.md#vendor
+[cmd-package-vendor]: ../reference/command-line/package-publishing.md#package-vendor
+[cmd-exec]: ../reference/command-line/commands.md#exec
+
+{/* internal */}
+[ref-manifest]: ../reference/vendor-manifest.md
+[ref-manifest-paths]: ../reference/vendor-manifest.md#vendor-manifest-paths
+[ref-exit-codes]: ../reference/exit-codes.md

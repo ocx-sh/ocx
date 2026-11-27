@@ -37,11 +37,10 @@ destination symlink-safety check bypasses `io::Error::other` so an
 ancestor-symlink refusal classifies as `UsageError` (64) and not the flat
 `IoError` (74). Collapsing it back to a bare `FileError` silently re-forces 74.
 
-## The two `__` features are not interchangeable
+## `__test_scaffolding`
 
-`__testing` is the ordinary seam feature, forwarded by `ocx`'s own `__testing`
-and therefore **present in the acceptance binary**. It gates
-`shim_bin_store`'s `__OCX_TESTING_SHIM_LOST_PUBLISH_RACE`.
+This crate has no `__testing` feature: it gates no seam of its own, and the
+`__OCX_TESTING_*` seams live in `ocx_env`.
 
 `__test_scaffolding` is **not** forwarded by anything that ships. It exists so
 `ocx_lib`'s own unit tests can reach a seam a bare `#[cfg(test)]` cannot cross a
@@ -52,9 +51,10 @@ binary.
 
 ## `shim.rs` embeds committed blobs by relative path
 
-`include_bytes!("shims/ocx-shim-<arch>.exe")` resolves against `shim.rs`'s own
-directory, and two tests scan `env!("CARGO_MANIFEST_DIR")/src/shims`. Moving
-either the module or the blob directory breaks both at once, and
+`include_bytes!("shims/ocx-shim-<target-triple>[.exe]")` (six blobs: linux-musl, apple-darwin
+and windows-gnullvm, each x86_64 and aarch64; `blob_for(&Platform)` is the lookup table) resolves
+against `shim.rs`'s own directory, and two tests scan `env!("CARGO_MANIFEST_DIR")/src/shims`.
+Moving either the module or the blob directory breaks both at once, and
 `.github/workflows/build-windows-shims.yml` names the same two paths in its
-`paths:` filter and in five shell steps. `SHIM_SHA256` is a corruption canary,
+`paths:` filter and in its shell steps. The recorded sha256 (`RECORDED_SHA256` in `shim.rs`'s test module) is a corruption canary,
 not a provenance control — refresh it only in the dedicated blob-refresh PR.

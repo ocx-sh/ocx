@@ -9,6 +9,61 @@ use ocx_util::error::FileError;
 
 type Result<T> = std::result::Result<T, FileError>;
 
+/// How assembly places a regular file: share the layer's inode, or write a private copy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkMode {
+    /// Hardlink to the layer file; `$OCX_HOME` must sit on one volume.
+    Hardlink,
+    /// Private copy of data and masked mode, for trees that leave the store.
+    Copy,
+}
+
+impl LinkMode {
+    /// [`create_in_existing_parent`] for `Hardlink`; a data-and-mode copy for `Copy`.
+    pub(crate) fn place_in_existing_parent(
+        self,
+        source: impl AsRef<std::path::Path>,
+        dest: impl AsRef<std::path::Path>,
+    ) -> Result<()> {
+        match self {
+            Self::Hardlink => create_in_existing_parent(source, dest),
+            Self::Copy => copy_private(source.as_ref(), dest.as_ref()),
+        }
+    }
+}
+
+/// Writes `dest` as new bytes with the source mtime and a masked mode.
+///
+/// Setuid, setgid, sticky and group/other-write are cleared; xattr, ACL and clone metadata
+/// never travel, so this reads and writes bytes instead of calling `std::fs::copy` (macOS
+/// `fcopyfile` would carry them). `create_new` refuses an existing node, a planted symlink included.
+fn copy_private(source: &std::path::Path, dest: &std::path::Path) -> Result<()> {
+    let mut input = std::fs::File::open(source).map_err(|error| FileError::new(source, error))?;
+    let metadata = input.metadata().map_err(|error| FileError::new(source, error))?;
+    if !metadata.is_file() {
+        return Err(FileError::new(
+            source,
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "not a regular file"),
+        ));
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut output = options.open(dest).map_err(|error| FileError::new(dest, error))?;
+    let result = (|| -> std::io::Result<()> {
+        std::io::copy(&mut input, &mut output)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let masked = metadata.permissions().mode() & !0o7022;
+            output.set_permissions(std::fs::Permissions::from_mode(masked))?;
+        }
+        output.set_modified(metadata.modified()?)
+    })();
+    result.map_err(|error| FileError::new(dest, error))
+}
+
 /// Hardlinks `link` to `source`, creating missing parents.
 ///
 /// # Errors
@@ -30,17 +85,6 @@ pub(crate) fn create_in_existing_parent(
     let link = link.as_ref();
     std::fs::hard_link(source, link).map_err(|error| FileError::new(link, error))?;
     Ok(())
-}
-
-/// Like [`create`], replacing whatever is at `link`.
-pub fn update(source: impl AsRef<std::path::Path>, link: impl AsRef<std::path::Path>) -> Result<()> {
-    let source = source.as_ref();
-    let link = link.as_ref();
-
-    if link.exists() || ocx_util::fs::symlink::is_link(link) {
-        std::fs::remove_file(link).map_err(|error| FileError::new(link, error))?;
-    }
-    create(source, link)
 }
 
 fn hard_link_or_err(source: &std::path::Path, link: &std::path::Path) -> std::io::Result<()> {
@@ -69,6 +113,72 @@ mod tests {
         }
         std::fs::write(&p, content).unwrap();
         p
+    }
+
+    // ── LinkMode::Copy ───────────────────────────────────────────────────────
+
+    #[cfg(unix)]
+    fn copy_fixture(mode: u32) -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let (dir, root) = setup();
+        let source = make_file(&root, "source", b"payload");
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(mode)).unwrap();
+        let dest = root.join("dest");
+        LinkMode::Copy.place_in_existing_parent(&source, &dest).unwrap();
+        (dir, source, dest)
+    }
+
+    /// Setuid, setgid, sticky and group/other-write are cleared, other bits kept.
+    #[cfg(unix)]
+    #[test]
+    fn copy_clears_special_and_group_other_write_bits() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_dir, _source, dest) = copy_fixture(0o7777);
+        assert_eq!(std::fs::metadata(&dest).unwrap().permissions().mode() & 0o7777, 0o755);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_keeps_executable_and_read_bits() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_dir, _source, dest) = copy_fixture(0o4750);
+        assert_eq!(std::fs::metadata(&dest).unwrap().permissions().mode() & 0o7777, 0o750);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_keeps_bytes_and_mtime_on_a_new_inode() {
+        use std::os::unix::fs::MetadataExt;
+        let (_dir, source, dest) = copy_fixture(0o644);
+        let past = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+        std::fs::File::options()
+            .write(true)
+            .open(&source)
+            .unwrap()
+            .set_modified(past)
+            .unwrap();
+        std::fs::remove_file(&dest).unwrap();
+        LinkMode::Copy.place_in_existing_parent(&source, &dest).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"payload");
+        assert_eq!(std::fs::metadata(&dest).unwrap().modified().unwrap(), past);
+        assert_ne!(
+            std::fs::metadata(&dest).unwrap().ino(),
+            std::fs::metadata(&source).unwrap().ino()
+        );
+    }
+
+    /// A symlink planted at the destination is refused, never followed.
+    #[cfg(unix)]
+    #[test]
+    fn copy_refuses_a_symlink_at_the_destination() {
+        let (_dir, root) = setup();
+        let source = make_file(&root, "source", b"payload");
+        let victim = make_file(&root, "victim", b"untouched");
+        let dest = root.join("dest");
+        std::os::unix::fs::symlink(&victim, &dest).unwrap();
+        let err = LinkMode::Copy.place_in_existing_parent(&source, &dest).unwrap_err();
+        assert_eq!(err.cause.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&victim).unwrap(), b"untouched");
     }
 
     // ── create: happy path ───────────────────────────────────────────────────
@@ -159,7 +269,7 @@ mod tests {
 
     // ── create: cross-device error ───────────────────────────────────────────
 
-    /// H5 (replaces create_or_copy): `create()` across filesystems must return
+    /// `create()` across filesystems must return
     /// a clear `CrossesDevices` error rather than silently degrading.
     ///
     /// Strategy: source lives under a tempdir in `/tmp` while the link
@@ -203,51 +313,6 @@ mod tests {
             std::io::ErrorKind::CrossesDevices,
             "cross-device must surface CrossesDevices, got {:?}",
             io_err.kind()
-        );
-    }
-
-    // ── update ───────────────────────────────────────────────────────────────
-
-    /// H6: update() when link already exists — old file is removed and new
-    /// hardlink is placed pointing to the new source.
-    #[test]
-    fn update_replaces_existing_file() {
-        let (_dir, root) = setup();
-        let file_a = make_file(&root, "file_a.txt", b"version A");
-        let file_b = make_file(&root, "file_b.txt", b"version B");
-        let link = root.join("link.txt");
-
-        // First create a hardlink to file_a
-        create(&file_a, &link).unwrap();
-        assert_eq!(std::fs::read(&link).unwrap(), b"version A");
-
-        // Now update to point to file_b
-        update(&file_b, &link).unwrap();
-
-        assert!(link.exists(), "link must still exist after update()");
-        assert_eq!(
-            std::fs::read(&link).unwrap(),
-            b"version B",
-            "link must now contain file_b's content"
-        );
-    }
-
-    /// update() when no link exists — should create the hardlink as if create()
-    /// was called.
-    #[test]
-    fn update_creates_new_link_when_none_exists() {
-        let (_dir, root) = setup();
-        let source = make_file(&root, "source.txt", b"fresh content");
-        let link = root.join("link.txt");
-
-        // link does not exist yet — update() must handle this gracefully
-        update(&source, &link).unwrap();
-
-        assert!(link.exists(), "link must be created by update() when absent");
-        assert_eq!(
-            std::fs::read(&link).unwrap(),
-            b"fresh content",
-            "link must carry the source content"
         );
     }
 

@@ -361,6 +361,12 @@ impl Context {
             .clone()
             .map(|home| ocx_index::IndexStore::new(home).with_locks_root(file_structure.locks.clone()))
             .unwrap_or_else(|| ocx_index::IndexStore::machine_local(&file_structure));
+        // Only the `--index` flag records reads: `OCX_INDEX` and the default home never report lookups.
+        let index_store = if options.index.is_some() {
+            index_store.with_lookup_recorder(ocx_index::LookupRecorder::new())
+        } else {
+            index_store
+        };
         // Also gates the offline path: a committed root's yanked tag is refused on a local resolve.
         let allow_yanked = allow_yanked_setting(&inherited)?;
         let local_index = ocx_index::LocalIndex::new(ocx_index::LocalConfig {

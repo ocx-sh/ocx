@@ -79,9 +79,11 @@ fn every_declaration_reaches_a_child_the_way_its_class_says_under_every_mode() {
             let name = var.name;
             match var.propagation {
                 // Inherited as the caller had them under layer and isolate; absent under clean,
-                // except `SystemRoot` on Windows, which clean carries so a child can start.
+                // except `SystemRoot` on Windows, which clean carries so a child can start, and the
+                // launcher depth, which clean carries so a scrub cannot reset the launcher loop guard.
                 Propagation::UserInput | Propagation::SecretInput | Propagation::SetupWritten => {
-                    let carried = cfg!(windows) && name.eq_ignore_ascii_case(SYSTEM_ROOT);
+                    let carried = (cfg!(windows) && name.eq_ignore_ascii_case(SYSTEM_ROOT))
+                        || name == ocx_env::__OCX_LAUNCHER_DEPTH.name;
                     let expected = (mode != ExecMode::Clean || carried).then_some(SENTINEL);
                     assert_eq!(
                         seen.as_deref(),

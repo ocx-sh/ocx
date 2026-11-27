@@ -40,6 +40,12 @@ impl ReachabilityGraph {
             file_structure.shims.list_all(),
         )?;
 
+        // No embedded blob, no current generation: walk no deferred tree (over-retention is safe).
+        let deferred_dirs = match current_deferred(file_structure) {
+            Some(deferred) => deferred.list_all().await?,
+            None => Vec::new(),
+        };
+
         let canon_packages_root = canonicalize_or_keep(file_structure.packages.root());
         let canon_layers_root = canonicalize_or_keep(file_structure.layers.root());
         let canon_blobs_root = canonicalize_or_keep(file_structure.blobs.root());
@@ -101,6 +107,8 @@ impl ReachabilityGraph {
         }
 
         // Shims carry edges, unlike layers and blobs, or GC collects a deferred tool's config blobs.
+        // `deferred/<G>/…` is a shim tier of this ocx's generation; other generations are retired by `clean`.
+        let shim_dirs: Vec<ShimDir> = shim_dirs.into_iter().chain(deferred_dirs).collect();
         for (shim_dir, blob_refs) in shim_entries(&shim_dirs, blobs_root.as_path()).await {
             edges.insert(shim_dir.clone(), blob_refs);
             all_entries.insert(shim_dir, CasTier::Shim);
@@ -282,6 +290,11 @@ async fn read_manifest_candidate_blob(path: &Path) -> Option<Vec<u8>> {
     Some(buf)
 }
 
+/// The deferred tree of this ocx's launcher generation, `None` on a host with no embedded launcher blob.
+pub(crate) fn current_deferred(file_structure: &FileStructure) -> Option<ocx_store::file_structure::ShimStore> {
+    ocx_store::launcher_generation::LauncherGeneration::host().map(|generation| file_structure.deferred(&generation))
+}
+
 /// One canonical entry per published shim directory, paired with its `refs/blobs/` forward-refs.
 async fn shim_entries(shim_dirs: &[ShimDir], blobs_root: &Path) -> Vec<(PathBuf, Vec<PathBuf>)> {
     let mut entries = Vec::with_capacity(shim_dirs.len());
@@ -304,7 +317,9 @@ fn extend_lock_pinned_roots(
 ) {
     for project_root in project_roots {
         for pinned in &project_root.digests {
-            let tiers = [file_structure.packages.path(pinned), file_structure.shims.path(pinned)];
+            let tiers = [file_structure.packages.path(pinned), file_structure.shims.path(pinned)]
+                .into_iter()
+                .chain(current_deferred(file_structure).map(|deferred| deferred.path(pinned)));
             for tier_path in tiers {
                 // An absent tier must stay unrooted, or `clean` renders a phantom `Held By` row.
                 let canonical = canonicalize_or_keep(&tier_path);
@@ -528,9 +543,9 @@ pub mod tests {
         assert_eq!(g.reachable(), set(&["pkg"]));
     }
 
-    // ── index-manifest probe (F5: large index must not be truncated) ────────
+    // ── index-manifest probe (a large index must not be truncated) ────────
 
-    /// F5 regression: an image-index manifest **larger than the old 16 KiB
+    /// Regression: an image-index manifest **larger than the old 16 KiB
     /// probe bound** must still produce its `child_leaf_blob → index_blob`
     /// retention edge. The previous code read only a 16 KiB prefix, so a large
     /// valid index parsed as truncated JSON → was skipped → its parent index
@@ -675,7 +690,17 @@ pub mod tests {
         pinned: &ocx_oci::PinnedPackageRef,
         config_blobs: &[ocx_oci::Digest],
     ) -> PathBuf {
-        let shim = file_structure.shims.shim_dir(pinned);
+        seed_shim_in(file_structure, &file_structure.shims, pinned, config_blobs).await
+    }
+
+    /// [`seed_shim`] into any launcher tree: `shims/` (marker `bin`) or a generation's `deferred/<G>/` (marker `l`).
+    async fn seed_shim_in(
+        file_structure: &FileStructure,
+        store: &ocx_store::file_structure::ShimStore,
+        pinned: &ocx_oci::PinnedPackageRef,
+        config_blobs: &[ocx_oci::Digest],
+    ) -> PathBuf {
+        let shim = store.shim_dir(pinned);
         tokio::fs::create_dir_all(shim.bin()).await.unwrap();
         tokio::fs::write(shim.digest_file(), pinned.digest().to_string())
             .await
@@ -955,7 +980,7 @@ pub mod tests {
 
     /// The shim root is keyed on the **logical** pinned identity — the one
     /// `ocx.lock` stores and `prepare_lazy` publishes under (`resolved.pinned`,
-    /// Decision C2) — never on the physical transport identity an index-routed
+    /// the logical-identity decision) — never on the physical transport identity an index-routed
     /// package resolves through.
     ///
     /// `ocx.sh/ocx/cli` is exactly that case: a logical name the published
@@ -997,6 +1022,41 @@ pub mod tests {
             HashSet::from([logical_shim]),
             "the lock's logical pin roots the logical shim and only it — rooting the physical \
              one instead would collect every index-routed package's shim on the first clean"
+        );
+    }
+
+    // ── the deferred tier of this ocx's generation ────────────────────────
+
+    /// `deferred/<G>/…` is walked like `shims/`: a `CasTier::Shim` entry, rooted from the lock pin, with its
+    /// `refs/blobs/` edge. A walk of `shims/` alone leaves the tree unrooted and collectable.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reachability_graph_walks_and_roots_a_deferred_generation_tree() {
+        let Some(generation) = ocx_store::launcher_generation::LauncherGeneration::host() else {
+            return;
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let file_structure = home(&tmp);
+        let pinned = pin("example.com", "org/tool", 'a');
+        let config = digest_of('b');
+        let deferred = file_structure.deferred(&generation);
+        let tree = seed_shim_in(&file_structure, &deferred, &pinned, std::slice::from_ref(&config)).await;
+        let blob_dir = super::canonicalize_or_keep(&file_structure.blobs.path(pinned.registry(), &config));
+        let lock_path = file_structure.root().join("ocx.lock");
+
+        let rooted = ReachabilityGraph::build(&file_structure, &lock_pinning(&lock_path, &[pinned]))
+            .await
+            .unwrap();
+        assert_eq!(rooted.all_entries.get(&tree), Some(&CasTier::Shim));
+        assert!(rooted.roots.contains(&tree), "the lock pin roots the deferred tree");
+        assert!(
+            rooted.reachable().contains(&blob_dir),
+            "its config blob stays reachable"
+        );
+
+        let unrooted = ReachabilityGraph::build(&file_structure, &[]).await.unwrap();
+        assert!(
+            !unrooted.reachable().contains(&tree),
+            "an unpinned deferred tree is an object"
         );
     }
 
@@ -1135,7 +1195,13 @@ pub mod tests {
     async fn dot_bin_ocx_shim_is_never_collected() {
         let tmp = tempfile::tempdir().unwrap();
         let file_structure = home(&tmp);
-        let published_shim_blob = file_structure.shim_bin.ensure().await.unwrap();
+        let published_shim_blob = file_structure
+            .root()
+            .join(".bin")
+            .join("ocx-shim")
+            .join("ocx-shim-blob");
+        std::fs::create_dir_all(published_shim_blob.parent().unwrap()).unwrap();
+        std::fs::write(&published_shim_blob, b"blob").unwrap();
         let orphan_blob = seed_blob(&file_structure, "example.com", &digest_of('f')).await;
 
         let collector = super::super::GarbageCollector::build(

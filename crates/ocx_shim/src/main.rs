@@ -3,8 +3,8 @@
 
 //! `ocx-shim`: native Windows launcher shim.
 //!
-//! One copy per entrypoint reads the sidecar beside it and spawns `ocx` with the wire verb that sidecar selects, via
-//! `CreateProcessW`, bypassing `cmd.exe` and its BatBadBut `%*` re-parse. Each failure is one `ocx-shim:` stderr line
+//! One copy per entrypoint reads the `NAME.launch` record beside it and spawns `ocx` with the wire verb that record's
+//! kind selects, via `CreateProcessW`, bypassing `cmd.exe` and its BatBadBut `%*` re-parse. Each failure is one `ocx-shim:` stderr line
 //! and a sysexits-aligned exit code.
 //! See `.claude/artifacts/adr_windows_exe_shim.md`, `system_design_windows_exe_shim.md`.
 
@@ -22,24 +22,35 @@ mod chkstk;
 /// Job-object setup failure is deliberately no variant: the shim warns and spawns without the job.
 #[derive(Debug)]
 enum ShimError {
-    /// No sidecar exists. Exit 78 (`EX_CONFIG`).
-    ///
-    /// `stem_path` is the shim's own path without `.exe`, so the message can name all three candidates.
-    SidecarNotFound { stem_path: String },
-    /// A sidecar failed its grammar. Exit 78.
-    MalformedSidecar { reason: String },
     /// `pkg_root` resolves outside the containment roots (defense in depth; `ocx launcher exec` holds the primary
     /// check). Exit 77 (`EX_NOPERM`).
     ContainmentViolation { path: String },
     /// `GetModuleFileNameW` failed or yielded no usable stem. Exit 74 (`EX_IOERR`).
     SelfPathFailure,
-    /// `ocx` was not found. Exit 69 (`EX_UNAVAILABLE`).
+    /// The resolved absolute `ocx` is not there. Exit 69 (`EX_UNAVAILABLE`).
     ///
-    /// `pinned` names an explicitly resolved program (pin or `.exec` baked `ocx`); `None` means the literal-`ocx`
-    /// PATH search missed.
-    OcxNotFound { pinned: Option<String> },
+    /// A `PATH` walk that finds none is a 78 (`DirectRefused`), never this.
+    OcxNotFound {
+        program: String,
+        source: core::ProgramSource,
+    },
     /// `CreateProcessW` failed otherwise: exit 74, or 77 when `win32` is `ERROR_ACCESS_DENIED`.
     SpawnFailure { win32: u32, program: String },
+    /// The launcher refused: its `.launch` record missing, unreadable or malformed, or no vendored root accepted. Exit 78.
+    ///
+    /// `reason` is the whole stderr line after the `ocx-shim:` prefix, so it names what the lookup tried.
+    DirectRefused { reason: String },
+    /// An argument cannot reach a batch target without the risk of command injection. Exit 64 (`EX_USAGE`).
+    ///
+    /// `reason` is the whole stderr line after the `ocx-shim:` prefix.
+    DirectArgumentRefused { reason: String },
+    /// The vendored tool could not be started. Exit 77 when permission was denied, else 74.
+    #[cfg(unix)]
+    DirectExecFailed {
+        program: String,
+        permission_denied: bool,
+        reason: String,
+    },
 }
 
 /// `ERROR_ACCESS_DENIED`; the non-Windows build mirrors the Win32 value so the exit-code mapping stays host-testable.
@@ -59,7 +70,16 @@ impl ShimError {
     /// Maps each failure to its exit code (ADR § Error Taxonomy).
     fn exit_code(&self) -> i32 {
         match self {
-            ShimError::SidecarNotFound { .. } | ShimError::MalformedSidecar { .. } => 78,
+            ShimError::DirectRefused { .. } => 78,
+            ShimError::DirectArgumentRefused { .. } => 64,
+            #[cfg(unix)]
+            ShimError::DirectExecFailed { permission_denied, .. } => {
+                if *permission_denied {
+                    77
+                } else {
+                    74
+                }
+            }
             ShimError::ContainmentViolation { .. } => 77,
             ShimError::SelfPathFailure => 74,
             ShimError::OcxNotFound { .. } => 69,
@@ -76,33 +96,110 @@ impl ShimError {
     /// One lowercase `ocx-shim:` stderr line, no trailing period; config errors append a recovery hint.
     fn stderr_message(&self) -> String {
         match self {
-            ShimError::SidecarNotFound { stem_path } => {
-                format!(
-                    "ocx-shim: sidecar not found: none of {stem_path}.shim, {stem_path}.shimref or {stem_path}.exec \
-                     (re-run `ocx install`, `ocx pull`, or the command that composed this tool, to regenerate the entrypoint)"
-                )
-            }
-            ShimError::MalformedSidecar { reason } => {
-                format!("ocx-shim: malformed sidecar: {reason} (re-run `ocx install` to regenerate the entrypoint)")
-            }
             ShimError::ContainmentViolation { path } => {
-                format!("ocx-shim: package root outside OCX home: {path}")
+                format!("ocx-shim: package root outside OCX home: {}", escape_controls(path))
             }
             ShimError::SelfPathFailure => "ocx-shim: cannot determine own path".to_string(),
-            ShimError::OcxNotFound { pinned: None } => {
-                "ocx-shim: ocx not found (set OCX_BINARY_PIN or add ocx to PATH)".to_string()
-            }
-            ShimError::OcxNotFound { pinned: Some(p) } => {
-                format!("ocx-shim: pinned ocx not found: {p} (OCX_BINARY_PIN points at a missing path)")
+            ShimError::OcxNotFound { program, source } => {
+                format!(
+                    "ocx-shim: ocx not found: {} (from {}); {}",
+                    escape_controls(program),
+                    source.describe(),
+                    source.remedy()
+                )
             }
             ShimError::SpawnFailure { win32, program } => {
-                format!("ocx-shim: failed to start {program}: win32 error {win32}")
+                format!(
+                    "ocx-shim: failed to start {}: win32 error {win32}",
+                    escape_controls(program)
+                )
             }
+            ShimError::DirectRefused { reason } | ShimError::DirectArgumentRefused { reason } => {
+                format!("ocx-shim: {}", escape_controls(reason))
+            }
+            #[cfg(unix)]
+            ShimError::DirectExecFailed { program, reason, .. } => {
+                format!(
+                    "ocx-shim: failed to start {}: {}",
+                    escape_controls(program),
+                    escape_controls(reason)
+                )
+            }
+        }
+    }
+
+    /// The clause a failed Windows spawn gains when a path-length limit is its plausible cause.
+    ///
+    /// An `ocx` that was not found carries no Win32 code; it is judged as `ERROR_PATH_NOT_FOUND`, the code a
+    /// too-long path gives.
+    fn length_limit_hint(&self, working_directory_units: usize) -> Option<String> {
+        match self {
+            ShimError::SpawnFailure { win32, program } => length_limit_hint(*win32, working_directory_units, program),
+            ShimError::OcxNotFound { program, .. } => length_limit_hint(3, working_directory_units, program),
+            _ => None,
         }
     }
 }
 
+/// `text` with each control character escaped as `{:?}` writes it, so a program path cannot drive the terminal.
+///
+/// Bidirectional controls and zero-width characters (`Cf`, which `is_control` misses) are escaped too, by explicit
+/// code point: the classes the `ocx` CLI strips from its terminal output.
+fn escape_controls(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for c in text.chars() {
+        if c.is_control() {
+            escaped.extend(c.escape_debug());
+        } else if matches!(
+            c,
+            '\u{061c}'
+                | '\u{200b}'..='\u{200f}'
+                | '\u{202a}'..='\u{202e}'
+                | '\u{2066}'..='\u{2069}'
+                | '\u{feff}'
+        ) {
+            escaped.push_str(&format!("\\u{{{:x}}}", u32::from(c)));
+        } else {
+            escaped.push(c);
+        }
+    }
+    escaped
+}
+
+/// The clause naming a path-length limit as the plausible cause of Win32 error `win32` starting `program`.
+///
+/// `working_directory_units` is the inherited working directory's length in UTF-16 units.
+fn length_limit_hint(win32: u32, working_directory_units: usize, program: &str) -> Option<String> {
+    use ocx_env_apply::windows_path::MAX_PATH;
+
+    // No prefix lifts this one: `CreateProcessW` refuses a working directory of MAX_PATH or more.
+    if working_directory_units >= MAX_PATH && matches!(win32, 3 | 87 | 206 | 267) {
+        return Some(format!(
+            "the working directory is {working_directory_units} characters long and Windows starts no program \
+             from one of {MAX_PATH} or more; start it from a shorter directory"
+        ));
+    }
+    let program_units = program.encode_utf16().count();
+    // Every program is absolute, so an over-long `.exe` takes the `\\?\` prefix at the spawn; only a batch file, which
+    // `cmd.exe` runs under the plain limit, still fails on length.
+    if program_units < MAX_PATH || !matches!(win32, 2 | 3 | 206) || !ocx_env_apply::launch::is_batch_target(program) {
+        return None;
+    }
+    Some(format!(
+        "the program path is {program_units} characters long, past the {MAX_PATH} Windows allows, and a batch file \
+         runs through cmd.exe, which has the same limit; move the directory the tree sits in to a shorter path"
+    ))
+}
+
+/// The inherited working directory's length in UTF-16 units; 0 when it cannot be read.
+#[cfg(windows)]
+fn working_directory_units() -> usize {
+    use std::os::windows::ffi::OsStrExt;
+    std::env::current_dir().map_or(0, |dir| dir.as_os_str().encode_wide().count())
+}
+
 mod core;
+mod direct;
 
 /// Entry point; always diverges via [`std::process::exit`].
 fn main() -> ! {
@@ -113,7 +210,17 @@ fn main() -> ! {
     match run() {
         Ok(code) => exit(code),
         Err(err) => {
-            eprintln!("{}", err.stderr_message());
+            #[cfg_attr(
+                not(windows),
+                expect(unused_mut, reason = "only a Windows spawn gains a length hint")
+            )]
+            let mut message = err.stderr_message();
+            #[cfg(windows)]
+            if let Some(hint) = err.length_limit_hint(working_directory_units()) {
+                message.push_str("; ");
+                message.push_str(&hint);
+            }
+            eprintln!("{message}");
             exit(err.exit_code())
         }
     }
@@ -134,23 +241,9 @@ fn harden_dll_search_path() {
 /// Shim runtime (`adr_windows_exe_shim.md` § Contract 1).
 #[cfg(windows)]
 fn run() -> Result<i32, ShimError> {
-    use std::os::windows::ffi::{OsStrExt, OsStringExt};
-    use windows_sys::Win32::Foundation::{
-        CloseHandle, ERROR_FILE_NOT_FOUND, ERROR_INSUFFICIENT_BUFFER, ERROR_PATH_NOT_FOUND, GetLastError, HANDLE,
-        INVALID_HANDLE_VALUE, WAIT_FAILED,
-    };
-    use windows_sys::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE};
-    use windows_sys::Win32::System::JobObjects::{
-        CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-        JobObjectExtendedLimitInformation, SetInformationJobObject,
-    };
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, GetLastError};
     use windows_sys::Win32::System::LibraryLoader::GetModuleFileNameW;
-    use windows_sys::Win32::System::Threading::{
-        CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess, INFINITE,
-        InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-        PROC_THREAD_ATTRIBUTE_JOB_LIST, PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW,
-        UpdateProcThreadAttribute, WaitForSingleObject,
-    };
 
     // Grow the buffer until the length is below it: a fixed buffer silently truncates the path and picks the wrong
     // sidecar. `written == cap` means truncated even without `ERROR_INSUFFICIENT_BUFFER` (pre-Vista), so it grows too.
@@ -179,130 +272,128 @@ fn run() -> Result<i32, ShimError> {
                 .ok_or(ShimError::SelfPathFailure)?;
         }
     };
-    let stem = core::derive_stem(&module_path)?;
+    let started = module_path.to_str().ok_or(ShimError::SelfPathFailure)?;
+    direct::run_windows(started)
+}
 
-    // Each candidate carries its own parser, so the verb follows which file was found, never its content: `.exec` and
-    // `.shim` values are both absolute paths.
-    let module_dir = std::path::Path::new(&module_path)
-        .parent()
-        .ok_or(ShimError::SelfPathFailure)?
-        .to_path_buf();
-    let stem_path = module_dir.join(&stem);
+/// Starts `ocx` for a home-kind record: `home` picks the wire verb, `stem` is the tool name passed after `--`, `image`
+/// is the launcher's image path.
+#[cfg(windows)]
+fn run_home(home: &core::HomeLaunch, image: &str, stem: &str) -> Result<i32, ShimError> {
+    use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND};
 
-    let mut sidecar: Option<core::Sidecar> = None;
-    for (extension, parse) in core::SIDECAR_PROBE_ORDER {
-        let candidate = module_dir.join(format!("{stem}.{extension}"));
-        // A read error other than `NotFound` fails here: falling through would let a broken `.shim` silently become a
-        // package materialization.
-        match std::fs::read(&candidate) {
-            Ok(raw) => {
-                sidecar = Some(parse(&raw)?);
-                break;
-            }
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(err) => {
-                return Err(ShimError::MalformedSidecar {
-                    reason: format!("cannot read sidecar {}: {err}", candidate.display()),
-                });
-            }
-        }
+    let start = direct::prepare_home(home, image, true)?;
+    let mut caller_args: Vec<String> = Vec::new();
+    for argument in std::env::args_os().skip(1) {
+        caller_args.push(argument.into_string().map_err(|_| ShimError::DirectArgumentRefused {
+            reason: format!("an argument for {} is not valid Unicode", start.program),
+        })?);
     }
-    let sidecar = sidecar.ok_or_else(|| ShimError::SidecarNotFound {
-        stem_path: stem_path.display().to_string(),
-    })?;
+    let command_line = core::build_child_command_line(&start.program, home, stem, &caller_args);
+    let block = direct::environment_block(&start.environment);
 
-    // Containment runs only when `OCX_HOME` resolves; `launcher exec`'s `validate_launcher_pkg_root` stays
-    // authoritative. A `pkg_root` that fails to resolve under a good `OCX_HOME` is suspicious: delegate, but say so.
-    #[expect(clippy::disallowed_methods, reason = "no ocx_env edge: the shim's size budget")]
-    let ocx_home = std::env::var_os("OCX_HOME");
-    if let (Some(pkg_root), Some(ocx_home)) = (sidecar.containment_path(), ocx_home) {
-        let home = std::path::Path::new(&ocx_home);
-        if let Ok(canon_home) = dunce::canonicalize(home) {
-            match dunce::canonicalize(pkg_root) {
-                Ok(canon_root) => {
-                    if !core::pkg_root_allowed(&canon_home, &canon_root) {
-                        return Err(ShimError::ContainmentViolation {
-                            path: canon_root.display().to_string(),
-                        });
-                    }
-                }
-                Err(err) => {
-                    eprintln!(
-                        "ocx-shim: cannot canonicalize package root {pkg_root} ({err}); delegating containment to `launcher exec`"
-                    );
-                }
-            }
-        }
+    // The program is absolute and passed as `lpApplicationName`, so `CreateProcessW` neither parses it out of the
+    // command line (CWE-428: `C:\Program Files\…` → `C:\Program.exe`) nor searches any directory for it (CWE-427).
+    spawn_child(&start.program, &command_line, Some(&block)).map_err(|last| match last {
+        ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND => ShimError::OcxNotFound {
+            program: start.program.clone(),
+            source: start.source,
+        },
+        other => ShimError::SpawnFailure {
+            win32: other,
+            program: start.program.clone(),
+        },
+    })
+}
+
+/// An anonymous job object that kills its processes when the last handle closes; null when setup failed.
+///
+/// Best-effort: on failure the shim warns and spawns without a job.
+#[cfg(windows)]
+fn create_kill_on_close_job() -> windows_sys::Win32::Foundation::HANDLE {
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE};
+    use windows_sys::Win32::System::JobObjects::{
+        CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JobObjectExtendedLimitInformation, SetInformationJobObject,
+    };
+
+    // SAFETY: NULL security attrs + NULL name = an anonymous job object.
+    let job: HANDLE = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+    if job.is_null() {
+        // SAFETY: no pointers; reads thread-local last-error.
+        let last = unsafe { GetLastError() };
+        eprintln!("ocx-shim: job object setup failed: {last}");
+        return std::ptr::null_mut();
     }
-
-    if core::strips_tier_selectors(&sidecar) {
-        use windows_sys::Win32::System::Environment::SetEnvironmentVariableW;
-
-        // The child inherits this process's environment (`lpEnvironment = NULL`), so deleting here strips the child's.
-        for name in ["OCX_GLOBAL", "OCX_PROJECT"] {
-            let name_w: Vec<u16> = std::ffi::OsStr::new(name).encode_wide().chain(Some(0)).collect();
-            // SAFETY: `name_w` is NUL-terminated and outlives the call; a NULL `lpValue` deletes. Failure means the
-            // name was already absent, the wanted state, so the result is ignored.
-            unsafe { SetEnvironmentVariableW(name_w.as_ptr(), std::ptr::null()) };
-        }
+    // SAFETY: all-zero is a valid `JOBOBJECT_EXTENDED_LIMIT_INFORMATION`.
+    let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+    info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    // SAFETY: `info` is initialised and the size argument matches its type.
+    let set = unsafe {
+        SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            std::ptr::addr_of!(info).cast(),
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        )
+    };
+    if set == 0 {
+        // SAFETY: no pointers; reads thread-local last-error.
+        let last = unsafe { GetLastError() };
+        eprintln!("ocx-shim: job object setup failed: {last}");
+        // SAFETY: `job` is a valid handle, not used again on this path.
+        unsafe { CloseHandle(job) };
+        return std::ptr::null_mut();
     }
+    job
+}
 
-    // Defined-but-empty must stay `Some`: `core::resolve_program` treats it as a pin.
-    #[expect(clippy::disallowed_methods, reason = "no ocx_env edge: the shim's size budget")]
-    let pin = std::env::var_os("OCX_BINARY_PIN").map(|v| v.to_string_lossy().into_owned());
-    let program = core::resolve_program(pin.as_deref(), sidecar.baked_ocx());
+/// Starts the child with `CreateProcessW` inside a kill-on-close job and returns its exit code, or the Win32 error of
+/// the failed spawn.
+///
+/// `application_name` is required: a NULL one makes `CreateProcessW` search the application directory and the working
+/// directory for the program named on the command line (CWE-427). `environment` is a complete
+/// `CREATE_UNICODE_ENVIRONMENT` block; `None` inherits this process's.
+#[cfg(windows)]
+fn spawn_child(application_name: &str, command_line: &str, environment: Option<&[u16]>) -> Result<i32, u32> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, INVALID_HANDLE_VALUE, WAIT_FAILED};
+    use windows_sys::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE};
+    use windows_sys::Win32::System::Threading::{
+        CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT,
+        GetExitCodeProcess, INFINITE, InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
+        PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_JOB_LIST, PROCESS_INFORMATION, STARTF_USESTDHANDLES,
+        STARTUPINFOEXW, STARTUPINFOW, UpdateProcThreadAttribute, WaitForSingleObject,
+    };
 
-    let argv: Vec<String> = std::env::args().skip(1).collect();
-    let command_line = core::build_child_command_line(&program.token, &sidecar, &stem, &argv);
-    let mut command_line_w: Vec<u16> = std::ffi::OsStr::new(&command_line)
+    let mut command_line_w: Vec<u16> = std::ffi::OsStr::new(command_line)
         .encode_wide()
         .chain(Some(0))
         .collect();
-
-    // A pinned or baked program gets its own `lpApplicationName` buffer, so `CreateProcessW` neither parses it from
-    // the command line (CWE-428: `C:\Program Files\…` → `C:\Program.exe`) nor searches directories for it.
-    let app_name_w: Option<Vec<u16>> = program
-        .application_name()
-        .map(|p| std::ffi::OsStr::new(p).encode_wide().chain(Some(0)).collect());
-    let app_name_ptr = app_name_w.as_ref().map_or(std::ptr::null(), |b| b.as_ptr());
+    // A plain path past MAX_PATH fails with ERROR_PATH_NOT_FOUND (3); its `\\?\` form starts. The command line keeps
+    // the path as given, so the child's `argv[0]` is unchanged.
+    let app_name_w: Vec<u16> = {
+        let name = ocx_env_apply::windows_path::extended_length_path(application_name);
+        std::ffi::OsStr::new(name.as_deref().unwrap_or(application_name))
+            .encode_wide()
+            .chain(Some(0))
+            .collect()
+    };
+    let app_name_ptr = app_name_w.as_ptr();
+    let environment_ptr = environment.map_or(std::ptr::null(), |block| block.as_ptr().cast());
+    let environment_flag = if environment.is_some() {
+        CREATE_UNICODE_ENVIRONMENT
+    } else {
+        0
+    };
 
     // Before `CreateProcessW`: the child is born running, and a Ctrl+C before install kills the shim before it can
     // wait, losing the exit code and job cleanup.
     install_console_ctrl_handler();
 
     // Created before `CreateProcessW` so the child is born inside it via `JOB_LIST`, with no suspend-assign-resume
-    // race. Best-effort: on failure, spawn without a job, logged.
-    // SAFETY: NULL security attrs + NULL name = an anonymous job object.
-    let job: HANDLE = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
-    let job = if job.is_null() {
-        // SAFETY: no pointers; reads thread-local last-error.
-        let last = unsafe { GetLastError() };
-        eprintln!("ocx-shim: job object setup failed: {last}");
-        std::ptr::null_mut()
-    } else {
-        // SAFETY: all-zero is a valid `JOBOBJECT_EXTENDED_LIMIT_INFORMATION`.
-        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
-        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        // SAFETY: `info` is initialised and the size argument matches its type.
-        let set = unsafe {
-            SetInformationJobObject(
-                job,
-                JobObjectExtendedLimitInformation,
-                std::ptr::addr_of!(info).cast(),
-                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
-            )
-        };
-        if set == 0 {
-            // SAFETY: no pointers; reads thread-local last-error.
-            let last = unsafe { GetLastError() };
-            eprintln!("ocx-shim: job object setup failed: {last}");
-            // SAFETY: `job` is a valid handle, not used again on this path.
-            unsafe { CloseHandle(job) };
-            std::ptr::null_mut()
-        } else {
-            job
-        }
-    };
+    // race.
+    let job = create_kill_on_close_job();
 
     // `bInheritHandles=TRUE` alone leaks every inheritable handle (CWE-403): `HANDLE_LIST` whitelists the std handles,
     // and `JOB_LIST` assigns the job at creation.
@@ -429,7 +520,7 @@ fn run() -> Result<i32, ShimError> {
         }
     }
 
-    // SAFETY: `app_name_ptr` is NULL or a NUL-terminated buffer, `command_line_w` is mutable and NUL-terminated, and
+    // SAFETY: `app_name_ptr` is a NUL-terminated buffer, `command_line_w` is mutable and NUL-terminated, and
     // `startup_ex`'s attribute list is backed by `attr_list_buf`, `unique_handles` and `job_handle`; all outlive it.
     let mut created = unsafe {
         CreateProcessW(
@@ -438,8 +529,8 @@ fn run() -> Result<i32, ShimError> {
             std::ptr::null(),
             std::ptr::null(),
             1, // bInheritHandles = TRUE (required for the whitelisted set)
-            extended_present,
-            std::ptr::null(),
+            extended_present | environment_flag,
+            environment_ptr,
             std::ptr::null(),
             std::ptr::addr_of!(startup_ex.StartupInfo),
             &mut process_info,
@@ -480,8 +571,8 @@ fn run() -> Result<i32, ShimError> {
                 std::ptr::null(),
                 std::ptr::null(),
                 1,
-                0,
-                std::ptr::null(),
+                environment_flag,
+                environment_ptr,
                 std::ptr::null(),
                 std::ptr::addr_of!(startup_ex.StartupInfo),
                 &mut process_info,
@@ -498,15 +589,7 @@ fn run() -> Result<i32, ShimError> {
             // SAFETY: valid job handle, not used again.
             unsafe { CloseHandle(job) };
         }
-        return match last {
-            ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND => Err(ShimError::OcxNotFound {
-                pinned: program.application_name().map(str::to_string),
-            }),
-            other => Err(ShimError::SpawnFailure {
-                win32: other,
-                program: program.token.clone(),
-            }),
-        };
+        return Err(last);
     }
     let child_process: HANDLE = process_info.hProcess;
     let child_thread: HANDLE = process_info.hThread;
@@ -558,10 +641,10 @@ fn install_console_ctrl_handler() {
     }
 }
 
-/// Keeps `cargo check --workspace` green on the Linux CI host, which never runs the shim.
-#[cfg(not(windows))]
+/// The Unix launcher runs the vendored (`.launch`) kind alone.
+#[cfg(unix)]
 fn run() -> Result<i32, ShimError> {
-    unimplemented!("ocx-shim has no non-Windows runtime")
+    direct::run()
 }
 
 // ── Specification tests ─────────────────────────────────────────────────────
@@ -571,37 +654,34 @@ fn run() -> Result<i32, ShimError> {
 #[cfg(test)]
 mod tests {
     use super::ShimError;
-    use super::core::{
-        Sidecar, ToolchainHome, build_child_command_line, derive_stem, parse_exec_sidecar, parse_shim_sidecar,
-        parse_shimref_sidecar, resolve_program,
-    };
+    use super::core::{HomeLaunch, ToolchainHome, build_child_command_line, derive_stem};
     use std::ffi::OsStr;
 
-    /// A `.shim`-derived sidecar carrying `value` as its package root — the
+    /// A `package` record carrying `value` as its package root — the
     /// input every `build_child_command_line` row below assembles from.
-    fn root(value: &str) -> Sidecar {
-        Sidecar::PackageRoot(value.to_string())
+    fn root(value: &str) -> HomeLaunch {
+        HomeLaunch::PackageRoot(value.to_string())
     }
 
-    /// A `.shimref`-derived sidecar carrying `value` as its pinned identifier.
-    fn shim_ref(value: &str) -> Sidecar {
-        Sidecar::PinnedIdentifier(value.to_string())
+    /// A `deferred` record carrying `value` as its pinned identifier.
+    fn shim_ref(value: &str) -> HomeLaunch {
+        HomeLaunch::PinnedIdentifier(value.to_string())
     }
 
-    /// A `.exec`-derived sidecar naming a project home at `value`, with no
-    /// baked `ocx` — the one-line form.
-    fn exec_project(value: &str) -> Sidecar {
-        Sidecar::ToolchainHome(ToolchainHome::Project(value.to_string()), None)
+    /// A `toolchain` record naming a project home at `value`, with no
+    /// baked `ocx`.
+    fn exec_project(value: &str) -> HomeLaunch {
+        HomeLaunch::ToolchainHome(ToolchainHome::Project(value.to_string()), None)
     }
 
-    /// The same, carrying the baked absolute `ocx` of the two-line form (V-9).
-    fn exec_project_baked(value: &str, ocx: &str) -> Sidecar {
-        Sidecar::ToolchainHome(ToolchainHome::Project(value.to_string()), Some(ocx.to_string()))
+    /// The same, carrying the baked absolute `ocx`.
+    fn exec_project_baked(value: &str, ocx: &str) -> HomeLaunch {
+        HomeLaunch::ToolchainHome(ToolchainHome::Project(value.to_string()), Some(ocx.to_string()))
     }
 
-    /// A `.exec`-derived sidecar naming the global home.
-    fn exec_global() -> Sidecar {
-        Sidecar::ToolchainHome(ToolchainHome::Global, None)
+    /// A `toolchain` record naming the global home.
+    fn exec_global() -> HomeLaunch {
+        HomeLaunch::ToolchainHome(ToolchainHome::Global, None)
     }
 
     // ── ShimError → exit code mapping (ADR §Error Taxonomy table) ───────────
@@ -611,50 +691,151 @@ mod tests {
     // pure and is the unit-testable contract surface. These tests encode the
     // E1/E2→78, E3→77, E4→74, E5→69, E6→74, E6+ACCESS_DENIED→77 taxonomy.
 
-    #[test]
-    fn e1_sidecar_not_found_exits_78() {
-        let err = ShimError::SidecarNotFound {
-            stem_path: "C:\\x\\cmake".to_string(),
-        };
-        assert_eq!(err.exit_code(), 78, "E1 missing sidecar → EX_CONFIG (78)");
+    fn spawn_failure(win32: u32, program: &str) -> ShimError {
+        ShimError::SpawnFailure {
+            win32,
+            program: program.to_string(),
+        }
     }
 
-    /// E1's stderr line must name **every** extension the probe tried, and one
-    /// recovery per class of caller.
-    ///
-    /// The failure this pins is a message that answers for a subset: a `.exec`
-    /// trampoline whose sidecar was collected reads "neither `.shim` nor
-    /// `.shimref`", sending the operator to look for two files that were never
-    /// supposed to exist for it, past the one that was.
+    /// `C:\` plus `units - 3` characters: a drive path exactly `units` UTF-16 units long.
+    fn drive_path(units: usize, suffix: &str) -> String {
+        format!("C:\\{}{suffix}", "a".repeat(units - 3 - suffix.len()))
+    }
+
+    /// A long-path cause gets one clause naming the length, the limit and what to shorten; anything else gets none.
     #[test]
-    fn e1_sidecar_not_found_stderr_names_all_three_extensions() {
-        let err = ShimError::SidecarNotFound {
-            stem_path: "C:\\x\\cmake".to_string(),
-        };
-        let msg = err.stderr_message();
-        for (extension, _parse) in super::core::SIDECAR_PROBE_ORDER {
+    fn length_limit_hint_names_the_working_directory_or_the_program_only_when_a_limit_is_the_cause() {
+        let short_exe = "C:\\v\\bin\\tool.exe";
+        for code in [3, 87, 206, 267] {
+            let hint = spawn_failure(code, short_exe).length_limit_hint(260);
+            let hint = hint.unwrap_or_else(|| panic!("error {code} with a 260-unit working directory has no hint"));
             assert!(
-                msg.contains(&format!("C:\\x\\cmake.{extension}")),
-                "the probe tries `.{extension}`, so the message must name it: {msg:?}"
+                hint.contains("working directory is 260") && hint.contains("260 or more"),
+                "{hint}"
             );
         }
-        assert!(
-            msg.contains("ocx install") && msg.contains("ocx pull"),
-            "one recovery per class: `ocx install` regenerates an installed package's sidecar, \
-             `ocx pull` re-renders a toolchain trampoline's: {msg:?}"
+        assert_eq!(
+            spawn_failure(267, short_exe).length_limit_hint(259),
+            None,
+            "under the limit: no hint"
         );
+        assert_eq!(
+            spawn_failure(5, short_exe).length_limit_hint(300),
+            None,
+            "access denied is not a length error"
+        );
+
+        let batch = drive_path(260, "\\run.cmd");
+        let hint = spawn_failure(3, &batch)
+            .length_limit_hint(10)
+            .expect("a long batch path");
         assert!(
-            msg.starts_with("ocx-shim: ") && !msg.ends_with('.'),
-            "still a clean C-GOOD-ERR `ocx-shim:` line: {msg:?}"
+            hint.contains("program path is 260") && hint.contains("cmd.exe"),
+            "{hint}"
+        );
+        let pinned = ShimError::OcxNotFound {
+            program: batch.clone(),
+            source: crate::core::ProgramSource::Pin,
+        };
+        assert!(
+            pinned.length_limit_hint(10).is_some(),
+            "a pinned ocx is judged as error 3"
+        );
+
+        // An absolute .exe past the limit takes the prefix, so its failure is not a length error.
+        assert_eq!(
+            spawn_failure(3, &drive_path(300, "\\tool.exe")).length_limit_hint(10),
+            None
+        );
+        assert_eq!(
+            spawn_failure(3, &drive_path(259, "\\run.cmd")).length_limit_hint(10),
+            None
+        );
+        // Code 2 is a program-path code only; with a short working directory no code gives a clause.
+        assert!(
+            spawn_failure(2, &batch).length_limit_hint(10).is_some(),
+            "error 2 on a long batch path"
+        );
+        assert_eq!(
+            spawn_failure(2, short_exe).length_limit_hint(300),
+            None,
+            "error 2 is never a working-directory code"
+        );
+        for code in [5, 87] {
+            assert_eq!(
+                spawn_failure(code, &batch).length_limit_hint(10),
+                None,
+                "error {code} with a short working directory"
+            );
+        }
+        let not_a_spawn = ShimError::DirectRefused { reason: batch };
+        assert_eq!(not_a_spawn.length_limit_hint(300), None);
+    }
+
+    /// A refusal names paths from `argv[0]`, the working directory and runfiles manifests, so it cannot drive the
+    /// terminal either.
+    #[test]
+    fn a_refusal_reaches_stderr_with_its_control_characters_escaped() {
+        let refused = ShimError::DirectRefused {
+            reason: "started path /v/to\u{1b}[2Jol is not the file this launcher runs from".to_string(),
+        };
+        assert_eq!(
+            refused.stderr_message(),
+            "ocx-shim: started path /v/to\\u{1b}[2Jol is not the file this launcher runs from"
+        );
+        let argument = ShimError::DirectArgumentRefused {
+            reason: "argument 1 for C:\\t\r.cmd holds a line break".to_string(),
+        };
+        assert!(
+            !argument.stderr_message().contains('\r'),
+            "{:?}",
+            argument.stderr_message()
         );
     }
 
     #[test]
-    fn e2_malformed_sidecar_exits_78() {
-        let err = ShimError::MalformedSidecar {
-            reason: "embedded newline".to_string(),
+    fn a_containment_path_and_a_canonicalization_notice_reach_stderr_with_control_characters_escaped() {
+        let violation = ShimError::ContainmentViolation {
+            path: "/o/pk\u{1b}[2Jg\r\n".to_string(),
         };
-        assert_eq!(err.exit_code(), 78, "E2 malformed sidecar → EX_CONFIG (78)");
+        assert_eq!(
+            violation.stderr_message(),
+            "ocx-shim: package root outside OCX home: /o/pk\\u{1b}[2Jg\\r\\n"
+        );
+        let notice = crate::direct::canonicalize_notice("/o/pk\u{1b}g\n", "denied");
+        assert!(!notice.contains(char::is_control), "{notice:?}");
+        assert!(notice.contains("/o/pk\\u{1b}g\\n"), "{notice:?}");
+    }
+
+    /// Bidirectional controls and zero-width characters are `Cf`, which `char::is_control` misses; the `ocx` CLI
+    /// strips the same classes from its terminal output.
+    #[test]
+    fn a_diagnostic_escapes_bidi_controls_and_zero_width_characters() {
+        let text = "a\u{202e}b\u{2066}c\u{200f}d\u{061c}e\u{200b}f\u{feff}g";
+        assert_eq!(
+            crate::escape_controls(text),
+            "a\\u{202e}b\\u{2066}c\\u{200f}d\\u{61c}e\\u{200b}f\\u{feff}g"
+        );
+        assert_eq!(crate::escape_controls("plain \u{e9}\u{4e2d}"), "plain \u{e9}\u{4e2d}");
+    }
+
+    #[test]
+    fn a_program_path_reaches_stderr_with_its_control_characters_escaped() {
+        let err = spawn_failure(2, "C:\\v\\to\u{1b}[31mol.exe");
+        assert_eq!(
+            err.stderr_message(),
+            "ocx-shim: failed to start C:\\v\\to\\u{1b}[31mol.exe: win32 error 2"
+        );
+        let pinned = ShimError::OcxNotFound {
+            program: "C:\\o\ncx.exe".to_string(),
+            source: crate::core::ProgramSource::Pin,
+        };
+        assert!(
+            pinned.stderr_message().contains("C:\\o\\ncx.exe"),
+            "{}",
+            pinned.stderr_message()
+        );
     }
 
     #[test]
@@ -678,10 +859,12 @@ mod tests {
     fn e5_ocx_not_found_exits_69() {
         // Win32-mock / acceptance-level: the *trigger* (CreateProcessW
         // ERROR_FILE_NOT_FOUND) needs Windows, but the code mapping is pure.
-        // Uses the new `OcxNotFound { pinned }` variant shape (amendment R2);
-        // red-by-COMPILE until the builder adds the `pinned` field.
         assert_eq!(
-            ShimError::OcxNotFound { pinned: None }.exit_code(),
+            ShimError::OcxNotFound {
+                program: "C:\\ocx.exe".to_string(),
+                source: crate::core::ProgramSource::Pin,
+            }
+            .exit_code(),
             69,
             "E5 ocx not found → EX_UNAVAILABLE (69)"
         );
@@ -748,40 +931,42 @@ mod tests {
         );
     }
 
-    // ── E5 OcxNotFound — pinned-vs-unset stderr branch (amendment R2) ───────
-    //
-    // Spec-to-builder (variant-shape change, red-by-COMPILE + behavior):
-    // `ShimError::OcxNotFound` MUST carry whether `OCX_BINARY_PIN` was
-    // DEFINED so the stderr line can name the pinned program instead of the
-    // misleading "add ocx to PATH" hint. Pinned shape pinned here:
-    //
-    //   OcxNotFound { pinned: Option<String> }
-    //
-    // - `pinned: None`  (env unset)        → message unchanged:
-    //       "ocx-shim: ocx not found (set OCX_BINARY_PIN or add ocx to PATH)"
-    // - `pinned: Some(p)` (env defined)    → names `p`, and MUST NOT contain
-    //       "add ocx to PATH" (the pin was the resolution path, not PATH).
-    //
-    // exit_code() stays 69 (EX_UNAVAILABLE) for both. These tests construct
-    // the new variant shape so they FAIL TO COMPILE until the builder adds
-    // the `pinned` field — that is the accepted red for a variant-shape
-    // contract. Builder: implement `OcxNotFound { pinned: Option<String> }`.
+    // ── E5 OcxNotFound — the stderr line names the resolved program ─────────
 
     #[test]
-    fn e5_ocx_not_found_unset_pin_keeps_path_hint_and_exits_69() {
-        let err = ShimError::OcxNotFound { pinned: None };
-        assert_eq!(err.exit_code(), 69, "E5 ocx not found → EX_UNAVAILABLE (69)");
-        assert_eq!(
-            err.stderr_message(),
-            "ocx-shim: ocx not found (set OCX_BINARY_PIN or add ocx to PATH)",
-            "unset OCX_BINARY_PIN → the original hint mentioning both OCX_BINARY_PIN and PATH"
+    fn a_missing_ocx_names_the_source_the_program_came_from() {
+        let line = |source| {
+            ShimError::OcxNotFound {
+                program: "C:\\tools\\ocx.exe".to_string(),
+                source,
+            }
+            .stderr_message()
+        };
+        let pin = line(crate::core::ProgramSource::Pin);
+        assert!(
+            pin.contains("from OCX_BINARY_PIN") && pin.contains("or unset it"),
+            "{pin}"
         );
+        let record = line(crate::core::ProgramSource::Record);
+        assert!(record.contains("from the launch record's ocx"), "{record}");
+        assert!(
+            !record.contains("from OCX_BINARY_PIN"),
+            "a record's ocx is not the pin: {record}"
+        );
+        assert!(
+            record.contains("OCX_BINARY_PIN") && record.contains("put ocx on PATH"),
+            "{record}"
+        );
+        let walk = line(crate::core::ProgramSource::PathWalk);
+        assert!(walk.contains("from the ocx found on PATH"), "{walk}");
+        assert!(!walk.contains("from OCX_BINARY_PIN"), "{walk}");
     }
 
     #[test]
     fn e5_ocx_not_found_pinned_names_program_and_drops_path_hint() {
         let err = ShimError::OcxNotFound {
-            pinned: Some("C:\\tools\\ocx.exe".to_string()),
+            program: "C:\\tools\\ocx.exe".to_string(),
+            source: crate::core::ProgramSource::Pin,
         };
         assert_eq!(
             err.exit_code(),
@@ -843,202 +1028,8 @@ mod tests {
         assert_eq!(stem, "tool.exe", "strip exactly one trailing `.exe`, not all");
     }
 
-    // ── parse_shim_sidecar — `.shim` Sidecar Format Contract (ADR / sysdesign §6)
-
-    #[test]
-    fn parse_shim_sidecar_accepts_trailing_lf() {
-        let pkg_root = parse_shim_sidecar(b"C:\\Users\\ci\\.ocx\\packages\\ocx.sh\\sha256\\ab\\cd\n")
-            .expect("a single trailing LF is the canonical generator form");
-        assert_eq!(
-            pkg_root.value(),
-            "C:\\Users\\ci\\.ocx\\packages\\ocx.sh\\sha256\\ab\\cd",
-            "the single trailing LF is stripped; body == pkg_root only"
-        );
-    }
-
-    #[test]
-    fn parse_shim_sidecar_accepts_trailing_crlf() {
-        let pkg_root =
-            parse_shim_sidecar(b"C:\\pkg\\root\r\n").expect("a trailing CRLF is tolerated (tolerant reader)");
-        assert_eq!(pkg_root.value(), "C:\\pkg\\root", "the trailing `\\r\\n` is stripped");
-    }
-
-    #[test]
-    fn parse_shim_sidecar_accepts_no_terminator() {
-        let pkg_root = parse_shim_sidecar(b"C:\\pkg\\root").expect("no terminator is tolerated (tolerant reader)");
-        assert_eq!(pkg_root.value(), "C:\\pkg\\root", "no terminator → body used verbatim");
-    }
-
-    #[test]
-    fn parse_shim_sidecar_rejects_empty_after_strip() {
-        let err = parse_shim_sidecar(b"\n").expect_err("empty body after stripping the LF is malformed");
-        assert!(
-            matches!(err, ShimError::MalformedSidecar { .. }),
-            "empty-after-strip → E2 MalformedSidecar, got {err:?}"
-        );
-        assert_eq!(err.exit_code(), 78, "E2 → exit 78");
-    }
-
-    #[test]
-    fn parse_shim_sidecar_rejects_truly_empty_input() {
-        let err = parse_shim_sidecar(b"").expect_err("a zero-byte sidecar is malformed");
-        assert!(
-            matches!(err, ShimError::MalformedSidecar { .. }),
-            "empty input → E2, got {err:?}"
-        );
-    }
-
-    #[test]
-    fn parse_shim_sidecar_rejects_interior_newline() {
-        let err =
-            parse_shim_sidecar(b"C:\\pkg\nroot\n").expect_err("an interior LF before the terminator is malformed");
-        assert!(
-            matches!(err, ShimError::MalformedSidecar { .. }),
-            "interior `\\n` → E2, got {err:?}"
-        );
-    }
-
-    #[test]
-    fn parse_shim_sidecar_rejects_interior_carriage_return() {
-        let err =
-            parse_shim_sidecar(b"C:\\pkg\rroot\n").expect_err("an interior CR before the terminator is malformed");
-        assert!(
-            matches!(err, ShimError::MalformedSidecar { .. }),
-            "interior `\\r` → E2, got {err:?}"
-        );
-    }
-
-    #[test]
-    fn parse_shim_sidecar_rejects_embedded_nul() {
-        let err = parse_shim_sidecar(b"C:\\pkg\0root\n").expect_err("an embedded NUL byte is malformed");
-        assert!(
-            matches!(err, ShimError::MalformedSidecar { .. }),
-            "embedded `\\0` → E2, got {err:?}"
-        );
-    }
-
-    #[test]
-    fn parse_shim_sidecar_rejects_invalid_utf8() {
-        // 0xFF is never valid UTF-8.
-        let err = parse_shim_sidecar(b"C:\\\xff\\root\n").expect_err("non-UTF-8 bytes are malformed");
-        assert!(
-            matches!(err, ShimError::MalformedSidecar { .. }),
-            "invalid UTF-8 → E2, got {err:?}"
-        );
-    }
-
-    #[test]
-    fn parse_shim_sidecar_rejects_non_absolute_path() {
-        let err = parse_shim_sidecar(b"relative\\pkg\\root\n").expect_err("a non-absolute pkg_root is malformed");
-        assert!(
-            matches!(err, ShimError::MalformedSidecar { .. }),
-            "non-absolute path → E2, got {err:?}"
-        );
-    }
-
-    #[test]
-    fn parse_shim_sidecar_rejects_over_32_kib() {
-        // 32 KiB + 1 byte → over the cap (defends against a corrupt/huge file).
-        let mut raw = vec![b'C', b':', b'\\'];
-        raw.resize(32 * 1024 + 1, b'a');
-        let err = parse_shim_sidecar(&raw).expect_err("a sidecar larger than 32 KiB is malformed");
-        assert!(
-            matches!(err, ShimError::MalformedSidecar { .. }),
-            "input > 32 KiB → E2, got {err:?}"
-        );
-    }
-
-    // ── resolve_program — pin ▸ baked ▸ literal (Wire-ABI matrix + V-9) ────
-
-    #[test]
-    fn resolve_program_no_pin_and_no_baked_falls_back_to_ocx() {
-        let program = resolve_program(None, None);
-        assert_eq!(
-            program.token, "ocx",
-            "OCX_BINARY_PIN unset and no baked line → literal `ocx`, parity with `.cmd` ELSE branch"
-        );
-        assert!(
-            !program.explicit,
-            "and it is the ONE rung spawned with lpApplicationName = NULL"
-        );
-    }
-
-    #[test]
-    fn resolve_program_set_nonempty_pin_uses_value() {
-        let program = resolve_program(Some("C:\\tools\\ocx.exe"), None);
-        assert_eq!(
-            program.token, "C:\\tools\\ocx.exe",
-            "OCX_BINARY_PIN set non-empty → that value, parity with `.cmd` IF DEFINED branch"
-        );
-        assert!(program.explicit, "a real path is always resolved explicitly (CWE-428)");
-    }
-
-    #[test]
-    fn resolve_program_set_empty_pin_takes_pin_branch_not_ocx() {
-        // Reconciled ABI decision (ADR §Error Taxonomy note E5/E6; plan
-        // parity matrix "set empty → take pin branch"). The shim mirrors the
-        // Windows `.cmd` `IF DEFINED OCX_BINARY_PIN` semantics: *defined at
-        // all* (even empty) → pin branch. It must NOT fall back to `ocx`
-        // (that is the Unix `${VAR:-ocx}` behaviour, deliberately out of
-        // scope here).
-        assert_eq!(
-            resolve_program(Some(""), None).token,
-            "",
-            "OCX_BINARY_PIN defined-but-empty → pin branch (empty value), NOT `ocx` fallback"
-        );
-        assert_ne!(
-            resolve_program(Some(""), None).token,
-            "ocx",
-            "empty pin must not collapse to the unset/`ocx` branch (parity-by-decision)"
-        );
-        assert!(
-            resolve_program(Some(""), None).explicit,
-            "and it still resolves explicitly, so the spawn fails deterministically \
-             rather than silently parsing the command line"
-        );
-    }
-
-    /// V-9: with no pin, a baked `ocx` is what the trampoline spawns — and it
-    /// is spawned EXPLICITLY, which is the half that closes the defect.
-    ///
-    /// A baked value that only won the token race would still be searched for
-    /// by `CreateProcessW`, and that search starts in `<home>/toolchain/active/bin`,
-    /// where `bin\ocx.exe` sits. `explicit` is therefore not a detail of the
-    /// return shape; it is the fix.
-    ///
-    /// RED: return `explicit: false` for the baked rung, or drop `baked` from
-    /// the `or` chain.
-    #[test]
-    fn resolve_program_prefers_a_baked_ocx_over_the_bare_literal() {
-        let program = resolve_program(None, Some("C:\\Users\\u\\.ocx\\bin\\ocx.exe"));
-        assert_eq!(
-            program.token, "C:\\Users\\u\\.ocx\\bin\\ocx.exe",
-            "the baked absolute wins over the literal `ocx`"
-        );
-        assert_eq!(
-            program.application_name(),
-            Some("C:\\Users\\u\\.ocx\\bin\\ocx.exe"),
-            "and CreateProcessW gets it as lpApplicationName, so NO directory search runs — \
-             a co-resident `bin\\ocx.exe` can never be reached"
-        );
-    }
-
-    /// The pin still wins over the baked line, on both platforms.
-    ///
-    /// The POSIX body spells it `exec "${OCX_BINARY_PIN:-${__ocx_binary}}"`;
-    /// this is the same precedence. Without this row, V-9's fix would silently
-    /// take the operator's override away.
-    #[test]
-    fn resolve_program_pin_outranks_a_baked_ocx() {
-        let program = resolve_program(Some("C:\\tools\\ocx.exe"), Some("C:\\baked\\ocx.exe"));
-        assert_eq!(
-            program.token, "C:\\tools\\ocx.exe",
-            "OCX_BINARY_PIN is the override and outranks the baked line (POSIX `${{VAR:-…}}` parity)"
-        );
-    }
-
     /// The two positional grammars carry no baked program and never could —
-    /// `Sidecar::baked_ocx` is `None` for both by construction, which is what
+    /// `HomeLaunch::baked_ocx` is `None` for both by construction, which is what
     /// keeps this fix scoped to the one sidecar that renders beside an `ocx`.
     #[test]
     fn only_the_exec_sidecar_can_carry_a_baked_ocx() {
@@ -1134,7 +1125,7 @@ mod tests {
     #[test]
     fn build_child_command_line_pkg_root_with_embedded_quote_is_escaped() {
         // Regression (B1): an embedded `"` in pkg_root (the sidecar is NOT a
-        // trust boundary — parse_shim_sidecar tolerantly accepts it) is escaped as
+        // trust boundary — the record's decoder accepts it) is escaped as
         // `\"` and the token is quoted, never breaking the argv boundary.
         let line = build_child_command_line("ocx", &root("C:\\p\"q\\r"), "cmake", &[]);
         assert_eq!(
@@ -1319,52 +1310,6 @@ mod tests {
         );
     }
 
-    // ── parse_shim_sidecar — boundary gaps (amendment, contract tightening) ─────
-    //
-    // Only ONE trailing terminator is stripped: a second trailing newline is
-    // an interior newline → E2. A lone trailing CR with no LF is NOT a
-    // terminator (only `\r\n` or `\n` are) so the CR is interior → E2. The
-    // size cap is `> MAX_LEN`, so exactly `MAX_LEN` bytes is accepted.
-
-    #[test]
-    fn parse_shim_sidecar_rejects_double_trailing_lf() {
-        // `C:\p\r\n\n`: strip one `\n`, leaving `C:\p\r\n` whose final `\n`
-        // is now an interior newline → E2 MalformedSidecar.
-        let err = parse_shim_sidecar(b"C:\\p\\r\n\n").expect_err("a second trailing LF is an interior newline");
-        assert!(
-            matches!(err, ShimError::MalformedSidecar { .. }),
-            "double trailing LF → E2 MalformedSidecar, got {err:?}"
-        );
-        assert_eq!(err.exit_code(), 78, "E2 → exit 78");
-    }
-
-    #[test]
-    fn parse_shim_sidecar_rejects_lone_trailing_cr_without_lf() {
-        // `C:\p\r\r`: no `\r\n`/`\n` suffix, so NOTHING is stripped; the
-        // trailing `\r` is then an interior CR → E2.
-        let err = parse_shim_sidecar(b"C:\\p\\r\r").expect_err("a lone trailing CR (no LF) is not a terminator");
-        assert!(
-            matches!(err, ShimError::MalformedSidecar { .. }),
-            "lone trailing CR without LF → E2 (CR is interior), got {err:?}"
-        );
-    }
-
-    #[test]
-    fn parse_shim_sidecar_accepts_exactly_32_kib() {
-        // The cap is `len > MAX_LEN` (32 KiB). A path of EXACTLY 32 KiB is at
-        // the boundary and must be accepted (the `>` is strict).
-        const MAX_LEN: usize = 32 * 1024;
-        let mut raw = vec![b'C', b':', b'\\'];
-        raw.resize(MAX_LEN, b'a');
-        assert_eq!(raw.len(), MAX_LEN, "fixture must be exactly MAX_LEN bytes");
-        let pkg_root = parse_shim_sidecar(&raw).expect("exactly MAX_LEN bytes is at the boundary and accepted");
-        assert_eq!(
-            pkg_root.value().len(),
-            MAX_LEN,
-            "no terminator present → the full MAX_LEN body is the pkg_root verbatim"
-        );
-    }
-
     // ── derive_stem — error branches (amendment, contract tightening) ──────
 
     #[test]
@@ -1452,47 +1397,6 @@ mod tests {
         );
     }
 
-    // ── application_name — B2 / CWE-428 + V-9 program-resolution policy ────
-
-    #[test]
-    fn application_name_is_null_only_for_the_bare_literal() {
-        // The literal `ocx` is the ONLY rung spawned with a NULL
-        // lpApplicationName, and that is not a free choice: the NULL search
-        // begins at the calling image's own directory, so this rung is exactly
-        // where V-9's co-resident `bin\ocx.exe` can win. It survives because
-        // it is the last resort, reached only when nothing absolute resolved.
-        assert_eq!(
-            resolve_program(None, None).application_name(),
-            None,
-            "no pin, no baked line → lpApplicationName = NULL (the accepted narrow risk)"
-        );
-    }
-
-    #[test]
-    fn application_name_pinned_is_explicit_never_parsed() {
-        // A pinned program (even a spaced `C:\Program Files\…`) MUST be passed
-        // explicitly via lpApplicationName so CreateProcessW does NO
-        // command-line program parsing (CWE-428: `C:\Program.exe` misresolve).
-        assert_eq!(
-            resolve_program(Some("C:\\Program Files\\ocx\\ocx.cmd"), None).application_name(),
-            Some("C:\\Program Files\\ocx\\ocx.cmd"),
-            "pinned program → explicit lpApplicationName (no command-line program search, CWE-428 closed)"
-        );
-    }
-
-    #[test]
-    fn application_name_empty_pin_still_explicit() {
-        // Reconciled `.cmd` IF DEFINED parity: defined-but-empty pin still
-        // takes the pin branch and resolves explicitly (an empty
-        // lpApplicationName then fails the spawn deterministically rather than
-        // silently parsing the command line).
-        assert_eq!(
-            resolve_program(Some(""), None).application_name(),
-            Some(""),
-            "defined-but-empty pin → still explicit lpApplicationName (parity-by-decision; deterministic fail, no silent cmdline parse)"
-        );
-    }
-
     // ── shim wire token is bound to the `.sh` body (2nd canary) ───────────
     //
     // The shim is the 2nd producer of the frozen `launcher exec` wire ABI
@@ -1565,7 +1469,7 @@ mod tests {
     /// so a crossed pair either fails on a missing package root or downloads a
     /// package that is already on disk.
     ///
-    /// The pairing is enforced by [`Sidecar`]'s shape rather than by a
+    /// The pairing is enforced by [`HomeLaunch`]'s shape rather than by a
     /// convention, and this is the test that says so.
     #[test]
     fn each_sidecar_dispatches_only_its_own_verb() {
@@ -1627,24 +1531,6 @@ mod tests {
         );
     }
 
-    /// The probe order and the extensions it probes, which decide WHICH verb a
-    /// shim dispatches — the choice is made by the file name found, never by
-    /// inspecting the file's contents.
-    #[test]
-    fn sidecar_probe_order_tries_shim_then_shimref_then_exec() {
-        let extensions: Vec<&str> = super::core::SIDECAR_PROBE_ORDER
-            .iter()
-            .map(|(extension, _parse)| *extension)
-            .collect();
-        assert_eq!(
-            extensions,
-            vec!["shim", "shimref", "exec"],
-            "an installed package's sidecar is probed first: it is the state \
-             that needs no download, so preferring it is the fail-safe tie-break. \
-             `.exec` is last — it names a home ocx must compose, not a thing to run"
-        );
-    }
-
     // ── E3 containment boundary (core::pkg_root_allowed) ───────────────────
     //
     // The boundary is a security control, so it lives in `core` as a pure
@@ -1688,462 +1574,6 @@ mod tests {
         }
     }
 
-    // ── parse_shimref_sidecar — the `.shimref` grammar, clause by clause ────
-    //
-    // C-017 is explicit that `.shimref` is its own frozen contract and that
-    // inheritance-by-assumption is the failure mode to avoid. So every clause
-    // is pinned here from the `.shimref` side — including the five it shares
-    // with `.shim` — rather than left to the `parse_shim_sidecar` rows above.
-    // Deleting the shared parser call from `parse_shimref_sidecar` must red
-    // something in THIS section, not only in that one.
-    //
-    // Each rejection row is built so exactly one clause can reject it: a row
-    // testing the printable-ASCII clause still carries a well-formed digest,
-    // a row testing the digest clause carries only printable ASCII. Otherwise
-    // a validator missing a clause entirely would still pass every row.
-
-    /// A well-formed pinned identifier — the shape `prepare_lazy` bakes. Used
-    /// wherever the exact value is not the subject of the assertion.
-    const PINNED_IDENTIFIER: &str =
-        "ocx.sh/tool/cmake:3.28@sha256:0000000000000000000000000000000000000000000000000000000000000001";
-
-    #[test]
-    fn parse_shimref_sidecar_yields_a_pinned_identifier_dispatching_launcher_shim() {
-        let sidecar = parse_shimref_sidecar(format!("{PINNED_IDENTIFIER}\n").as_bytes())
-            .expect("a digest-bearing identifier with a single trailing LF is the canonical form");
-        assert!(
-            matches!(sidecar, Sidecar::PinnedIdentifier(_)),
-            "a `.shimref` body must parse into the pinned-identifier variant, which is \
-             what binds it to the `launcher shim` verb: {sidecar:?}"
-        );
-        assert_eq!(
-            sidecar.value(),
-            PINNED_IDENTIFIER,
-            "the terminator is stripped, nothing else"
-        );
-        assert_eq!(
-            sidecar.wire_subcommand(),
-            "launcher shim",
-            "the verb follows from the variant, never from inspecting the value"
-        );
-    }
-
-    #[test]
-    fn parse_shimref_sidecar_accepts_the_three_terminator_forms() {
-        for (label, raw) in [
-            ("single LF", format!("{PINNED_IDENTIFIER}\n")),
-            ("CRLF", format!("{PINNED_IDENTIFIER}\r\n")),
-            ("no terminator", PINNED_IDENTIFIER.to_string()),
-        ] {
-            let sidecar =
-                parse_shimref_sidecar(raw.as_bytes()).unwrap_or_else(|e| panic!("{label} must be accepted: {e:?}"));
-            assert_eq!(
-                sidecar.value(),
-                PINNED_IDENTIFIER,
-                "{label}: exactly one terminator is stripped and the identifier is otherwise verbatim"
-            );
-        }
-    }
-
-    #[test]
-    fn parse_shimref_sidecar_rejects_a_second_trailing_newline() {
-        // The clause a careless reader gets wrong: strip ONE terminator, then
-        // the remaining `\n` is an *interior* newline, not a second terminator.
-        // An implementation using `trim_end` or a loop accepts this row.
-        let err = parse_shimref_sidecar(format!("{PINNED_IDENTIFIER}\n\n").as_bytes())
-            .expect_err("a second trailing LF is an interior newline");
-        assert!(
-            matches!(err, ShimError::MalformedSidecar { .. }),
-            "double trailing LF → E2 MalformedSidecar, got {err:?}"
-        );
-    }
-
-    #[test]
-    fn parse_shimref_sidecar_rejects_a_lone_trailing_carriage_return() {
-        // Only `\r\n` and `\n` are terminators. A bare trailing `\r` strips
-        // nothing, so the CR is interior → E2.
-        let err = parse_shimref_sidecar(format!("{PINNED_IDENTIFIER}\r").as_bytes())
-            .expect_err("a lone trailing CR is not a terminator");
-        assert!(
-            matches!(err, ShimError::MalformedSidecar { .. }),
-            "lone trailing CR → E2 MalformedSidecar, got {err:?}"
-        );
-    }
-
-    #[test]
-    fn parse_shimref_sidecar_rejects_an_empty_body() {
-        for (label, raw) in [("zero bytes", &b""[..]), ("only a terminator", &b"\n"[..])] {
-            let err = parse_shimref_sidecar(raw).expect_err("an empty `.shimref` names no tool");
-            assert!(
-                matches!(err, ShimError::MalformedSidecar { .. }),
-                "{label} → E2 MalformedSidecar, got {err:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn parse_shimref_sidecar_rejects_interior_nul_lf_and_cr() {
-        for (label, raw) in [
-            ("NUL", b"ocx.sh/tool\0cmake@sha256:00ab\n".to_vec()),
-            ("LF", b"ocx.sh/tool\ncmake@sha256:00ab\n".to_vec()),
-            ("CR", b"ocx.sh/tool\rcmake@sha256:00ab\n".to_vec()),
-        ] {
-            let err = parse_shimref_sidecar(&raw).expect_err("a control byte in the body is malformed");
-            assert!(
-                matches!(err, ShimError::MalformedSidecar { .. }),
-                "interior {label} → E2 MalformedSidecar, got {err:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn parse_shimref_sidecar_rejects_invalid_utf8() {
-        let err = parse_shimref_sidecar(b"ocx.sh/\xff/cmake@sha256:00ab\n").expect_err("non-UTF-8 bytes are malformed");
-        assert!(
-            matches!(err, ShimError::MalformedSidecar { .. }),
-            "invalid UTF-8 → E2 MalformedSidecar, got {err:?}"
-        );
-    }
-
-    #[test]
-    fn parse_shimref_sidecar_accepts_exactly_32_kib() {
-        // The cap is `len > MAX_LEN`, so exactly MAX_LEN bytes is at the
-        // boundary and accepted. Padding goes in the repository segment so the
-        // value stays a well-formed pinned identifier at that size.
-        const MAX_LEN: usize = 32 * 1024;
-        const DIGEST: &str = "@sha256:0000000000000000000000000000000000000000000000000000000000000001";
-        let padding = MAX_LEN - "ocx.sh/".len() - DIGEST.len();
-        let raw = format!("ocx.sh/{}{DIGEST}", "a".repeat(padding));
-        assert_eq!(raw.len(), MAX_LEN, "fixture must be exactly MAX_LEN bytes");
-        let sidecar = parse_shimref_sidecar(raw.as_bytes()).expect("exactly MAX_LEN bytes is accepted");
-        assert_eq!(sidecar.value().len(), MAX_LEN, "no terminator present → the full body");
-    }
-
-    #[test]
-    fn parse_shimref_sidecar_rejects_over_32_kib() {
-        const MAX_LEN: usize = 32 * 1024;
-        let raw = vec![b'a'; MAX_LEN + 1];
-        let err = parse_shimref_sidecar(&raw).expect_err("a sidecar larger than 32 KiB is malformed");
-        assert!(
-            matches!(err, ShimError::MalformedSidecar { .. }),
-            "over the cap → E2 MalformedSidecar, got {err:?}"
-        );
-    }
-
-    #[test]
-    fn parse_shimref_sidecar_does_not_strip_a_byte_order_mark() {
-        // UTF-8 is required; a BOM is not a terminator and is not stripped.
-        // The write side emits none, so a leading `\u{feff}` reaches the
-        // per-grammar clause and fails the printable-ASCII rule there. A
-        // reader that "helpfully" strips it would accept a file ocx never
-        // wrote, and hand `ocx` a value its own parser then re-rejects as 64.
-        let err = parse_shimref_sidecar(format!("\u{feff}{PINNED_IDENTIFIER}\n").as_bytes())
-            .expect_err("a leading BOM is not stripped and is not printable ASCII");
-        assert!(
-            matches!(err, ShimError::MalformedSidecar { .. }),
-            "leading BOM → E2 MalformedSidecar, got {err:?}"
-        );
-    }
-
-    #[test]
-    fn parse_shimref_sidecar_rejects_a_reference_without_a_digest() {
-        // The one clause with security value: a `.shimref` that has been
-        // tampered with cannot DOWNGRADE the reference to a mutable tag the
-        // registry side controls. (It can still name a different digest —
-        // C-011's trust boundary concedes that, and no row here claims
-        // otherwise.)
-        for value in [
-            "ocx.sh/tool/cmake:3.28",
-            "ocx.sh/tool/cmake",
-            "cmake",
-            "ocx.sh/tool/cmake:sha256-0000",
-        ] {
-            let err = parse_shimref_sidecar(format!("{value}\n").as_bytes())
-                .expect_err("a reference with no digest is not a pin");
-            assert!(
-                matches!(err, ShimError::MalformedSidecar { .. }),
-                "`{value}` carries no digest → E2 MalformedSidecar, got {err:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn parse_shimref_sidecar_rejects_a_leading_at_sign() {
-        // `@sha256:00ab` has a well-formed digest tail but names nothing to
-        // fetch. The `@` must not be the first byte.
-        let err = parse_shimref_sidecar(b"@sha256:00ab\n")
-            .expect_err("a bare digest with no repository is not an identifier");
-        assert!(
-            matches!(err, ShimError::MalformedSidecar { .. }),
-            "leading `@` → E2 MalformedSidecar, got {err:?}"
-        );
-    }
-
-    #[test]
-    fn parse_shimref_sidecar_measures_the_digest_from_the_last_at_sign() {
-        // Neither row is a realistic OCI reference — the clause is structural,
-        // and realism is adjudicated downstream by `ocx_lib::oci`. What the
-        // green row discriminates is FIRST-`@` versus LAST-`@`: split at the
-        // first `@` and the tail is `sha256:aa@sha512:bb`, which is not hex,
-        // so a first-`@` implementation rejects it.
-        let accepted = parse_shimref_sidecar(b"ocx.sh/repo@sha256:aa@sha512:bb\n")
-            .expect("the digest is everything after the LAST `@`");
-        assert_eq!(accepted.value(), "ocx.sh/repo@sha256:aa@sha512:bb");
-
-        let err = parse_shimref_sidecar(b"ocx.sh/repo@sha256:aa@notadigest\n")
-            .expect_err("the tail after the last `@` must itself be a digest");
-        assert!(
-            matches!(err, ShimError::MalformedSidecar { .. }),
-            "a non-digest tail after the last `@` → E2 MalformedSidecar, got {err:?}"
-        );
-    }
-
-    #[test]
-    fn parse_shimref_sidecar_rejects_a_malformed_digest_tail() {
-        // Every row is printable ASCII with no leading `-`, so only the
-        // digest-shape clause can reject it.
-        for (label, value) in [
-            ("no colon", "ocx.sh/repo@sha256"),
-            ("empty algorithm", "ocx.sh/repo@:00ab"),
-            ("empty hex", "ocx.sh/repo@sha256:"),
-            ("uppercase hex", "ocx.sh/repo@sha256:00AB"),
-            ("uppercase algorithm", "ocx.sh/repo@SHA256:00ab"),
-            ("non-hex letter", "ocx.sh/repo@sha256:00gh"),
-            ("underscore in algorithm", "ocx.sh/repo@sha_256:00ab"),
-            ("trailing junk after the hex", "ocx.sh/repo@sha256:00ab!"),
-            ("second colon", "ocx.sh/repo@sha256:00ab:cd"),
-        ] {
-            let err = parse_shimref_sidecar(format!("{value}\n").as_bytes())
-                .expect_err("a malformed digest tail is not a pin");
-            assert!(
-                matches!(err, ShimError::MalformedSidecar { .. }),
-                "{label} (`{value}`) → E2 MalformedSidecar, got {err:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn parse_shimref_sidecar_accepts_any_algorithm_and_any_digest_length() {
-        // The guard against someone hard-coding `sha256` and `{64}`. This blob
-        // is one-way: a reader that adjudicates the algorithm set would reject
-        // a future pin forever, and `oci::Algorithm` already carries sha384 and
-        // sha512. Authority for which algorithms exist stays downstream.
-        for (label, value) in [
-            ("sha256/64", format!("ocx.sh/repo@sha256:{}", "a".repeat(64))),
-            ("sha384/96", format!("ocx.sh/repo@sha384:{}", "b".repeat(96))),
-            ("sha512/128", format!("ocx.sh/repo@sha512:{}", "c".repeat(128))),
-            (
-                "an algorithm ocx does not know yet",
-                format!("ocx.sh/repo@blake3:{}", "d".repeat(64)),
-            ),
-            ("a length no digest actually has", "ocx.sh/repo@sha256:a".to_string()),
-        ] {
-            let sidecar = parse_shimref_sidecar(format!("{value}\n").as_bytes())
-                .unwrap_or_else(|e| panic!("{label} must be admitted structurally: {e:?}"));
-            assert_eq!(sidecar.value(), value, "{label}: the value passes through verbatim");
-        }
-    }
-
-    #[test]
-    fn parse_shimref_sidecar_rejects_a_leading_dash() {
-        // Diagnosability, not security: a value `ocx` reads as a flag fails as
-        // a clap usage error (64) from a process the user never invoked,
-        // instead of E2 (78) naming the file that is actually broken. The row
-        // carries a valid digest so only this clause can reject it.
-        let err = parse_shimref_sidecar(b"-ocx.sh/repo@sha256:00ab\n").expect_err("a leading `-` reads as a flag");
-        assert!(
-            matches!(err, ShimError::MalformedSidecar { .. }),
-            "leading `-` → E2 MalformedSidecar, got {err:?}"
-        );
-
-        let accepted =
-            parse_shimref_sidecar(b"ocx.sh/my-repo@sha256:00ab\n").expect("an interior `-` is an ordinary name byte");
-        assert_eq!(accepted.value(), "ocx.sh/my-repo@sha256:00ab");
-    }
-
-    /// The asymmetry a reader deriving its rules from the writer's would miss,
-    /// pinned as an assertion rather than left in a doc comment.
-    ///
-    /// `LauncherSafeString` — the single write-side validator for both the
-    /// `.sh` body and the `.shim` sidecar — deliberately permits a space,
-    /// because a Windows `pkg_root` routinely contains one
-    /// (`launcher/safety.rs::launcher_safe_string_accepts_path_with_spaces`
-    /// pins that from the writer's side). A pinned identifier never does, so
-    /// `.shimref`'s read side is STRICTER than the writer here. A test that
-    /// exercised only the shared rules would let someone "unify" the two
-    /// validators and silently widen `.shimref` with nothing going red.
-    ///
-    /// The write-side set is restated inside the test on purpose: importing it
-    /// is impossible (`ocx_shim` has no internal dependencies) and sharing a
-    /// constant would make the canary self-referential.
-    #[test]
-    fn shimref_rejects_the_space_the_launcher_write_side_deliberately_permits() {
-        const WRITE_SIDE_UNSAFE_CHARACTERS: [char; 5] = ['\'', '"', '\n', '\r', '\0'];
-        assert!(
-            !WRITE_SIDE_UNSAFE_CHARACTERS.contains(&' '),
-            "restated from `ocx_lib`'s LAUNCHER_UNSAFE_CHARS: the writer permits a \
-             space (a Windows pkg_root needs it). If that ever changes, the two \
-             grammars are no longer asymmetric here and this test is what says so."
-        );
-
-        let err = parse_shimref_sidecar(b"ocx.sh/my repo@sha256:00ab\n")
-            .expect_err("a pinned identifier never contains a space, whatever the writer permits");
-        assert!(
-            matches!(err, ShimError::MalformedSidecar { .. }),
-            "a space → E2 MalformedSidecar, got {err:?}"
-        );
-    }
-
-    #[test]
-    fn parse_shimref_sidecar_admits_only_printable_ascii() {
-        for (label, value) in [
-            ("tab", "ocx.sh/my\trepo@sha256:00ab"),
-            ("DEL", "ocx.sh/my\u{7f}repo@sha256:00ab"),
-            ("a control byte", "ocx.sh/my\u{1}repo@sha256:00ab"),
-            ("a non-ASCII letter", "ocx.sh/café@sha256:00ab"),
-            ("a non-ASCII homoglyph of `/`", "ocx.sh\u{2044}repo@sha256:00ab"),
-        ] {
-            let err = parse_shimref_sidecar(format!("{value}\n").as_bytes())
-                .expect_err("only bytes in 0x21..=0x7E are admitted");
-            assert!(
-                matches!(err, ShimError::MalformedSidecar { .. }),
-                "{label} → E2 MalformedSidecar, got {err:?}"
-            );
-        }
-
-        // Both ends of the admitted range are inside it, so the clause is a
-        // range and not a hand-picked character class.
-        for (label, value) in [
-            ("0x21 `!`", "ocx.sh/my!repo@sha256:00ab"),
-            ("0x7E `~`", "ocx.sh/my~repo@sha256:00ab"),
-        ] {
-            let sidecar = parse_shimref_sidecar(format!("{value}\n").as_bytes())
-                .unwrap_or_else(|e| panic!("{label} is inside the printable range: {e:?}"));
-            assert_eq!(sidecar.value(), value);
-        }
-    }
-
-    #[test]
-    fn parse_shimref_sidecar_rejections_are_e2_exit_78() {
-        // One row per rejection family, so the exit code is pinned for the
-        // whole grammar rather than for whichever clause happened to fire.
-        for (label, raw) in [
-            ("shared rule", b"\n".to_vec()),
-            ("grammar clause", b"ocx.sh/repo:3.28\n".to_vec()),
-        ] {
-            let err = parse_shimref_sidecar(&raw).expect_err("row must be rejected");
-            assert_eq!(
-                err.exit_code(),
-                78,
-                "{label}: a malformed `.shimref` is E2 → EX_CONFIG (78), named at the \
-                 shim rather than surfacing as exit 64 from `ocx`"
-            );
-        }
-    }
-
-    /// F-5: C-017 leaves multiple-sidecars-present undefined; the decision is
-    /// that `.shim` wins. It cannot arise from ocx's own writes (the three
-    /// sidecars are produced into different trees), so this is the tie-break
-    /// for a corrupted state — and preferring the installed package is
-    /// fail-safe, being the state that needs neither a download nor a project
-    /// re-resolution.
-    ///
-    /// This replays `run()`'s probe decision over the same `SIDECAR_PROBE_ORDER`
-    /// data with a directory listing standing in for the filesystem. The loop
-    /// in `run()` is itself `cfg(windows)` and is not exercised here — what is
-    /// pinned is the ordering the loop consumes.
-    #[test]
-    fn multiple_sidecars_present_resolve_to_the_installed_package() {
-        fn first_hit(on_disk: &[(&str, &[u8])]) -> Option<Sidecar> {
-            for (extension, parse) in super::core::SIDECAR_PROBE_ORDER {
-                if let Some((_, raw)) = on_disk.iter().find(|(name, _)| *name == extension) {
-                    return Some(parse(raw).expect("fixture bodies are well-formed for their own grammar"));
-                }
-            }
-            None
-        }
-
-        let all_three: [(&str, &[u8]); 3] = [
-            ("shim", b"C:\\pkg\\root\n"),
-            ("shimref", b"ocx.sh/repo@sha256:00ab\n"),
-            ("exec", b"C:\\w\\proj\n"),
-        ];
-        assert!(
-            matches!(first_hit(&all_three), Some(Sidecar::PackageRoot(_))),
-            "with every sidecar on disk the installed package wins — it needs no download"
-        );
-
-        // The controls: the probe is not simply always returning the first
-        // entry. Each sidecar alone resolves to its own grammar, so the order
-        // is a tie-break, not a filter.
-        let deferred_only: [(&str, &[u8]); 1] = [("shimref", b"ocx.sh/repo@sha256:00ab\n")];
-        assert!(
-            matches!(first_hit(&deferred_only), Some(Sidecar::PinnedIdentifier(_))),
-            "a deferred tool alone still resolves"
-        );
-        let trampoline_only: [(&str, &[u8]); 1] = [("exec", b"C:\\w\\proj\n")];
-        assert!(
-            matches!(first_hit(&trampoline_only), Some(Sidecar::ToolchainHome(..))),
-            "a trampoline alone still resolves — being probed LAST is not being probed less"
-        );
-    }
-
-    /// Each probe entry carries the parser for its OWN grammar. Crossing the
-    /// pair would make the verb depend on the file's contents rather than on
-    /// which file was found, which is the property `run()` relies on.
-    #[test]
-    fn each_probe_entry_is_paired_with_its_own_grammar() {
-        let [
-            (shim_extension, parse_shim),
-            (shimref_extension, parse_shimref),
-            (exec_extension, parse_exec),
-        ] = super::core::SIDECAR_PROBE_ORDER;
-        assert_eq!(
-            (shim_extension, shimref_extension, exec_extension),
-            ("shim", "shimref", "exec")
-        );
-
-        assert!(
-            matches!(parse_shim(b"C:\\pkg\\root\n"), Ok(Sidecar::PackageRoot(_))),
-            "the `.shim` entry parses an absolute package root"
-        );
-        assert!(
-            parse_shim(b"ocx.sh/repo@sha256:00ab\n").is_err(),
-            "the `.shim` entry must reject a pinned identifier — it is not an absolute path"
-        );
-        assert!(
-            matches!(
-                parse_shimref(b"ocx.sh/repo@sha256:00ab\n"),
-                Ok(Sidecar::PinnedIdentifier(_))
-            ),
-            "the `.shimref` entry parses a pinned identifier"
-        );
-        assert!(
-            parse_shimref(b"C:\\pkg\\root\n").is_err(),
-            "the `.shimref` entry must reject a package root — the two parsers are not \
-             the same function, so the extension genuinely selects the grammar"
-        );
-        assert!(
-            matches!(parse_exec(b"global\n"), Ok(Sidecar::ToolchainHome(..))),
-            "the `.exec` entry parses a toolchain home"
-        );
-        assert!(
-            parse_exec(b"ocx.sh/repo@sha256:00ab\n").is_err(),
-            "the `.exec` entry must reject a pinned identifier — it is neither absolute \
-             nor the literal `global`"
-        );
-        // …and the inverse crossing, which the two rows above cannot see: a
-        // package root IS an absolute path, so `.exec` accepts one — the two
-        // grammars genuinely overlap here, and only the extension tells them
-        // apart. Stated rather than left implicit, because it is the one place
-        // "the file name decides the verb" is doing real work.
-        assert!(
-            matches!(parse_exec(b"C:\\pkg\\root\n"), Ok(Sidecar::ToolchainHome(..))),
-            "an absolute path under `.exec` is a project home, not a package root — the \
-             extension is what distinguishes them"
-        );
-    }
-
     /// Sibling directories whose names merely share a prefix with an allowed
     /// root must not match. `Path::starts_with` is component-wise, so this
     /// holds by construction — the test exists because the obvious string
@@ -2160,285 +1590,6 @@ mod tests {
             assert!(
                 !super::core::pkg_root_allowed(home, std::path::Path::new(root)),
                 "{root} shares a name prefix with an allowed root but is a different directory"
-            );
-        }
-    }
-
-    // ── parse_exec_sidecar — the `.exec` grammar, clause by clause (C-031) ─
-    //
-    // The third frozen contract, pinned from ITS OWN side for the same reason
-    // `.shimref` is: the five shared read rules are reused verbatim, and a
-    // reader who deleted the `parse_one_line` call must red something in this
-    // section, not only in the `.shim` one.
-
-    #[test]
-    fn parse_exec_sidecar_accepts_the_global_literal() {
-        let sidecar = parse_exec_sidecar(b"global\n").expect("`global` is the second admitted clause");
-        assert!(
-            matches!(sidecar, Sidecar::ToolchainHome(ToolchainHome::Global, None)),
-            "the literal must parse into the valueless variant — that is what makes \
-             `--global` emit no value token: {sidecar:?}"
-        );
-        assert_eq!(sidecar.value(), "global", "and it round-trips to the line it came from");
-    }
-
-    #[test]
-    fn parse_exec_sidecar_accepts_an_absolute_project_root() {
-        for (label, value) in [
-            ("drive-absolute", "C:\\w\\proj"),
-            // Windows accepts either separator, and `ocx` renders whichever the
-            // producing host handed it — a `/`-spelled drive path is not a
-            // second grammar, it is the same one.
-            ("drive-absolute forward slash", "C:/w/proj"),
-            ("UNC", "\\\\server\\share\\proj"),
-            // The `\\?\` verbatim form `std::fs::canonicalize` returns on
-            // Windows. Refusing it would refuse a home ocx itself canonicalized.
-            ("verbatim", "\\\\?\\C:\\w\\proj"),
-            ("POSIX-absolute", "/w/proj"),
-        ] {
-            let sidecar = parse_exec_sidecar(format!("{value}\n").as_bytes())
-                .unwrap_or_else(|e| panic!("{label} must be accepted: {e:?}"));
-            assert!(
-                matches!(sidecar, Sidecar::ToolchainHome(ToolchainHome::Project(_), None)),
-                "{label}: an absolute path is a project home"
-            );
-            assert_eq!(sidecar.value(), value, "{label}: the value passes through verbatim");
-        }
-    }
-
-    #[test]
-    fn parse_exec_sidecar_matches_the_global_literal_by_byte_equality() {
-        // A tolerant compare here would be a second grammar nobody specified.
-        // Each row below is refused for the SAME reason: it is not the literal
-        // and it is not absolute.
-        for (label, value) in [
-            ("uppercase", "GLOBAL"),
-            ("mixed case", "Global"),
-            ("leading space", " global"),
-            ("trailing space", "global "),
-            ("a superstring", "globally"),
-        ] {
-            let err = parse_exec_sidecar(format!("{value}\n").as_bytes())
-                .expect_err("only the exact literal is the global home");
-            assert!(
-                matches!(err, ShimError::MalformedSidecar { .. }),
-                "{label} → E2 MalformedSidecar, got {err:?}"
-            );
-        }
-        // The near-miss that is NOT refused, and must not be: `/global` is an
-        // absolute path, so it is a project home called `global`. Without this
-        // row a reader could "fix" the clause by matching a suffix.
-        assert!(
-            matches!(
-                parse_exec_sidecar(b"/global\n"),
-                Ok(Sidecar::ToolchainHome(ToolchainHome::Project(_), None))
-            ),
-            "`/global` is an absolute path, so it is a project home — the two clauses \
-             cannot collide"
-        );
-    }
-
-    #[test]
-    fn parse_exec_sidecar_rejects_a_relative_home() {
-        for (label, value) in [
-            ("bare relative", "proj"),
-            ("dot-relative", ".\\proj"),
-            ("parent-relative", "..\\..\\proj"),
-            ("drive-relative", "C:proj"),
-        ] {
-            let err = parse_exec_sidecar(format!("{value}\n").as_bytes())
-                .expect_err("a relative home would resolve against the shim's CWD");
-            assert!(
-                matches!(err, ShimError::MalformedSidecar { .. }),
-                "{label} → E2 MalformedSidecar, got {err:?}"
-            );
-        }
-    }
-
-    // ── V-9: the baked `ocx` line, and the self-spawn it exists to stop ────
-
-    /// V-9. A `.exec` sidecar carries an OPTIONAL second line: the absolute
-    /// `ocx.exe` the rendering ocx resolved.
-    ///
-    /// Without it `resolve_program(None, ..)` answers the literal `ocx` and
-    /// the spawn goes out with `lpApplicationName = NULL` — and
-    /// `CreateProcessW`'s NULL search begins at **the directory the calling
-    /// image loaded from**, which is `<home>/toolchain/active/bin` itself. A package
-    /// claiming the name `ocx` (admitted by design — ADR D-4 removed
-    /// `ShimNameShadowsOcx`) renders `bin\ocx.exe` there, so every trampoline
-    /// beside it spawns *it* rather than ocx. Unbounded, and PATH-independent.
-    ///
-    /// This is the Windows half of the narrowing POSIX already has
-    /// (`launcher/body.rs`'s `__ocx_binary`), and it is what makes the pytest
-    /// leg `test_v9_a_co_resident_ocx_exe_cannot_capture_a_trampoline_spawn`
-    /// possible.
-    #[test]
-    fn parse_exec_sidecar_reads_the_baked_ocx_from_the_second_line() {
-        let sidecar = parse_exec_sidecar(b"C:\\w\\proj\nC:\\Users\\u\\.ocx\\bin\\ocx.exe\n")
-            .expect("a second line naming the absolute ocx is admitted");
-        assert!(
-            matches!(sidecar, Sidecar::ToolchainHome(ToolchainHome::Project(_), Some(_))),
-            "the first line is still the home: {sidecar:?}"
-        );
-        assert_eq!(
-            sidecar.value(),
-            "C:\\w\\proj",
-            "the home line is unchanged by the second line"
-        );
-        assert_eq!(
-            sidecar.baked_ocx(),
-            Some("C:\\Users\\u\\.ocx\\bin\\ocx.exe"),
-            "the second line is the program the trampoline must spawn"
-        );
-        // The `global` home takes a baked line too — the two lines are
-        // independent clauses, not one alternative.
-        let global = parse_exec_sidecar(b"global\nC:\\o\\ocx.exe\n").expect("the global home may bake one too");
-        assert!(
-            matches!(global, Sidecar::ToolchainHome(ToolchainHome::Global, Some(_))),
-            "{global:?}"
-        );
-        assert_eq!(global.value(), "global", "and `--global` still emits no value token");
-    }
-
-    /// The one-line form stays valid — the degraded arm, not a legacy form.
-    ///
-    /// `trampoline_ocx_binary`'s rung ladder answers `None` when the running
-    /// ocx cannot be resolved at all, and `launcher/generate.rs` records that
-    /// population's self-resolution loop as accepted rather than refusing the
-    /// render. A reader who made the second line mandatory would turn that
-    /// accepted risk into a home where nothing runs.
-    ///
-    /// RED: require the second line in `parse_exec_sidecar`.
-    #[test]
-    fn parse_exec_sidecar_still_accepts_the_one_line_form() {
-        for (label, raw) in [
-            ("project, LF", &b"C:\\w\\proj\n"[..]),
-            ("project, no terminator", &b"C:\\w\\proj"[..]),
-            ("project, CRLF", &b"C:\\w\\proj\r\n"[..]),
-        ] {
-            let sidecar = parse_exec_sidecar(raw).unwrap_or_else(|e| panic!("{label} must be accepted: {e:?}"));
-            assert_eq!(sidecar.value(), "C:\\w\\proj", "{label}");
-            assert_eq!(
-                sidecar.baked_ocx(),
-                None,
-                "{label}: no second line means no baked program"
-            );
-        }
-    }
-
-    /// The second line's own clause, and the shared rules applied to it.
-    ///
-    /// It is a program path, so `global` is NOT an alternative there — that
-    /// literal is the home clause's, and admitting it here would let a sidecar
-    /// name a program called `global` in the current directory.
-    #[test]
-    fn parse_exec_sidecar_refuses_an_inadmissible_second_line() {
-        for (label, raw) in [
-            ("relative", &b"C:\\w\\proj\nocx.exe\n"[..]),
-            ("dot-relative", &b"C:\\w\\proj\n.\\ocx.exe\n"[..]),
-            ("drive-relative", &b"C:\\w\\proj\nC:ocx.exe\n"[..]),
-            (
-                "the global literal, which names no program",
-                &b"C:\\w\\proj\nglobal\n"[..],
-            ),
-            ("empty", &b"C:\\w\\proj\n\n"[..]),
-            ("a third line", &b"C:\\w\\proj\nC:\\o\\ocx.exe\nC:\\extra\n"[..]),
-            ("an embedded NUL", &b"C:\\w\\proj\nC:\\o\\o\0x.exe\n"[..]),
-        ] {
-            let err = parse_exec_sidecar(raw).expect_err(label);
-            assert!(
-                matches!(err, ShimError::MalformedSidecar { .. }),
-                "{label} → E2 MalformedSidecar, got {err:?}"
-            );
-        }
-        // The CRLF control: the two-line form is admitted under CRLF too, so
-        // the rows above fail for their own clause and not because any file
-        // with a second line is refused.
-        let crlf =
-            parse_exec_sidecar(b"C:\\w\\proj\r\nC:\\o\\ocx.exe\r\n").expect("CRLF is one of the three terminators");
-        assert_eq!(
-            crlf.value(),
-            "C:\\w\\proj",
-            "the CR belongs to line one's terminator, not to the home"
-        );
-        assert_eq!(crlf.baked_ocx(), Some("C:\\o\\ocx.exe"));
-    }
-
-    /// The five shared read rules, exercised through `.exec` specifically.
-    /// Deleting the `parse_one_line` call from `parse_exec_sidecar` must red
-    /// here, not only in the `.shim` section.
-    #[test]
-    fn parse_exec_sidecar_applies_the_five_shared_read_rules() {
-        // 2. Exactly one terminator is stripped — all three accepted forms.
-        for (label, raw) in [
-            ("single LF", "C:\\w\\proj\n".to_string()),
-            ("CRLF", "C:\\w\\proj\r\n".to_string()),
-            ("no terminator", "C:\\w\\proj".to_string()),
-        ] {
-            let sidecar =
-                parse_exec_sidecar(raw.as_bytes()).unwrap_or_else(|e| panic!("{label} must be accepted: {e:?}"));
-            assert_eq!(
-                sidecar.value(),
-                "C:\\w\\proj",
-                "{label}: exactly one terminator is stripped"
-            );
-        }
-
-        // 1. 32 KiB cap; 3. empty after the strip; 4. no NUL/LF/CR remaining;
-        // 5. valid UTF-8.
-        let mut over_cap = vec![b'/'; 32 * 1024 + 1];
-        over_cap[0] = b'/';
-        for (label, raw) in [
-            ("over the 32 KiB cap", over_cap),
-            ("empty after the strip", b"\n".to_vec()),
-            ("truly empty", Vec::new()),
-            // Since V-9 the file may hold two lines, so these two rows are
-            // refused by the SECOND line's rules rather than by "no interior
-            // newline" — an empty line two, and a relative one. Both still
-            // reach `parse_one_line`, which is what this case is pinning.
-            ("a second trailing LF — an empty line two", b"/w/proj\n\n".to_vec()),
-            ("a lone trailing CR", b"/w/proj\r".to_vec()),
-            ("a relative line two", b"/w/pr\noj\n".to_vec()),
-            ("an embedded NUL", b"/w/pr\0oj\n".to_vec()),
-            ("invalid UTF-8", vec![b'/', 0xFF, 0xFE, b'\n']),
-        ] {
-            let err = parse_exec_sidecar(&raw).expect_err("a shared read rule must reject this");
-            assert!(
-                matches!(err, ShimError::MalformedSidecar { .. }),
-                "{label} → E2 MalformedSidecar, got {err:?}"
-            );
-        }
-
-        // The cap's own boundary: exactly 32 KiB is admitted, so the rule is
-        // `>` and not `>=` — the off-by-one every other row is blind to.
-        let at_cap = {
-            let mut raw = vec![b'a'; 32 * 1024];
-            raw[0] = b'/';
-            raw
-        };
-        assert_eq!(at_cap.len(), 32 * 1024);
-        assert_eq!(
-            parse_exec_sidecar(&at_cap)
-                .expect("exactly 32 KiB is inside the cap")
-                .value()
-                .len(),
-            32 * 1024,
-            "no terminator present → the full body is the home"
-        );
-    }
-
-    #[test]
-    fn parse_exec_sidecar_rejections_are_e2_exit_78() {
-        for (label, raw) in [
-            ("shared rule", b"\n".to_vec()),
-            ("grammar clause", b"not-a-home\n".to_vec()),
-        ] {
-            let err = parse_exec_sidecar(&raw).expect_err("row must be rejected");
-            assert_eq!(
-                err.exit_code(),
-                78,
-                "{label}: a malformed `.exec` is E2 → EX_CONFIG (78), named at the shim \
-                 rather than surfacing as exit 64 from `ocx`"
             );
         }
     }
@@ -2462,12 +1613,6 @@ mod tests {
              update `crates/ocx_package_manager/src/launcher/body.rs` \
              `unix_trampoline_body` — the native shim is the 2nd producer of this verb too)"
         );
-        assert_eq!(
-            ToolchainHome::GLOBAL,
-            "global",
-            "the `.exec` sidecar's global literal, matched by byte equality — paired with \
-             `body.rs`'s EXEC_SIDECAR_GLOBAL, which writes it"
-        );
 
         // The root flag comes FIRST, before the verb — the `.sh` body emits
         // `--project '<root>' exec -- "${0##*/}"`, this emits the same shape
@@ -2485,15 +1630,6 @@ mod tests {
             "the global selector emits NO value token between the flag and the verb — a \
              `\"\"` there would make ocx read `exec` as the flag's argument: {global}"
         );
-
-        // The fifth shared token is a SHAPE, not a word (V-9): the baked `ocx`
-        // is line TWO of the sidecar. Restated here from the reader's side;
-        // `body.rs`'s `trampoline_wire_tokens_are_bound_to_shim_producer`
-        // states the writer's. A writer that appended the path to line one, or
-        // put it before the home, would pass every assertion above.
-        let two_line = parse_exec_sidecar(b"/w/proj\n/o/ocx\n").expect("the two-line form is the shared shape");
-        assert_eq!(two_line.value(), "/w/proj", "line one is the home");
-        assert_eq!(two_line.baked_ocx(), Some("/o/ocx"), "line two is the baked ocx");
     }
 
     /// The drift the paired goldens cannot catch on their own, extended to the
@@ -2532,102 +1668,6 @@ mod tests {
         assert!(
             line.ends_with(" --build \"a b\" \"\\\"q\\\"\""),
             "forwarded argv keeps its order and its quoting: {line}"
-        );
-    }
-
-    /// C-031 (E-37): the reader strips **no** BOM. The writer emits none, so a
-    /// leading `\u{feff}` is content — and content that is neither `global` nor
-    /// an absolute path.
-    ///
-    /// The write side's `exec_sidecar_body_is_utf8_without_bom_and_one_lf`
-    /// asserts only that the writer does not emit one; a tolerant reader here
-    /// would silently accept a hand-edited or editor-rewritten sidecar and
-    /// resolve a home the writer never wrote.
-    #[test]
-    fn parse_exec_sidecar_does_not_strip_a_byte_order_mark() {
-        for (label, raw) in [
-            ("BOM before an absolute path", "\u{feff}C:\\w\\proj\n"),
-            ("BOM before the global literal", "\u{feff}global\n"),
-        ] {
-            let err =
-                parse_exec_sidecar(raw.as_bytes()).expect_err("the BOM is content, so the value fails the home clause");
-            assert!(
-                matches!(err, ShimError::MalformedSidecar { .. }),
-                "{label} → E2 MalformedSidecar, got {err:?}"
-            );
-        }
-        // The control: the same two bodies WITHOUT the BOM are accepted, so the
-        // rows above fail for the BOM and not for something else in the fixture.
-        assert!(parse_exec_sidecar(b"C:\\w\\proj\n").is_ok());
-        assert!(parse_exec_sidecar(b"global\n").is_ok());
-    }
-
-    /// RUL-16 (E-39, E-40, E-41): the probe order over **every** pair, not just
-    /// the two the shipped row happens to cover.
-    ///
-    /// The `.shim` and `.exec` grammars genuinely overlap — an absolute path is
-    /// valid under both — so the pair carrying **byte-identical** content is
-    /// the row that proves the extension, and nothing in the file, selects the
-    /// verb. `.shim` wins every tie: it is the state that needs neither a
-    /// download nor a project re-resolution.
-    #[test]
-    fn every_sidecar_pair_resolves_to_the_earlier_probe_entry() {
-        fn first_hit(on_disk: &[(&str, &[u8])]) -> Option<Sidecar> {
-            for (extension, parse) in super::core::SIDECAR_PROBE_ORDER {
-                if let Some((_, raw)) = on_disk.iter().find(|(name, _)| *name == extension) {
-                    return Some(parse(raw).expect("fixture bodies are well-formed for their own grammar"));
-                }
-            }
-            None
-        }
-
-        const PACKAGE_ROOT: &[u8] = b"C:\\pkg\\root\n";
-        const PINNED: &[u8] = b"ocx.sh/repo@sha256:00ab\n";
-        const HOME: &[u8] = b"C:\\w\\proj\n";
-
-        // `.shim` + `.exec`, and `.shimref` + `.exec` — the two pairs the
-        // shipped row never formed, so the third entry's precedence rested on
-        // array order alone.
-        assert!(
-            matches!(
-                first_hit(&[("shim", PACKAGE_ROOT), ("exec", HOME)]),
-                Some(Sidecar::PackageRoot(_))
-            ),
-            "`.shim` outranks `.exec`"
-        );
-        assert!(
-            matches!(
-                first_hit(&[("shimref", PINNED), ("exec", HOME)]),
-                Some(Sidecar::PinnedIdentifier(_))
-            ),
-            "`.shimref` outranks `.exec`"
-        );
-        assert!(
-            matches!(
-                first_hit(&[("shim", PACKAGE_ROOT), ("shimref", PINNED)]),
-                Some(Sidecar::PackageRoot(_))
-            ),
-            "`.shim` outranks `.shimref`"
-        );
-
-        // The overlap itself: identical bytes under both extensions. Only the
-        // file name distinguishes an installed package from a project home.
-        let overlapping = first_hit(&[("shim", PACKAGE_ROOT), ("exec", PACKAGE_ROOT)]);
-        assert!(
-            matches!(overlapping, Some(Sidecar::PackageRoot(_))),
-            "with the SAME bytes in both, the probe order resolves it to the installed \
-             package: {overlapping:?}"
-        );
-        let alone = first_hit(&[("exec", PACKAGE_ROOT)]);
-        assert!(
-            matches!(alone, Some(Sidecar::ToolchainHome(ToolchainHome::Project(_), None))),
-            "…and those exact bytes under `.exec` alone are a project home — being probed \
-             LAST is not being probed less: {alone:?}"
-        );
-        assert_eq!(
-            alone.as_ref().map(Sidecar::value),
-            Some("C:\\pkg\\root"),
-            "the value is the same string in both readings; only the verb differs"
         );
     }
 
@@ -2715,56 +1755,5 @@ mod tests {
                  nothing to shadow — the caller's chosen tier must survive (D-V3's correction)"
             );
         }
-    }
-
-    // ── RUL-35: the `.shimref` paired golden, the READER's half ────────────
-
-    /// The reader half of C-026's producer/reader pair (RUL-35).
-    ///
-    /// `ocx_lib` cannot depend on this binary crate, so nothing the compiler
-    /// sees binds `prepare_lazy`'s `write_windows_shim_slot` to the parser that
-    /// has to read what it wrote. The binding is the same paired golden C-034
-    /// already uses for the wire tokens: `prepare_lazy.rs` asserts the produced
-    /// bytes against this literal, and this asserts the shipped reader accepts
-    /// it — byte for byte, terminator included.
-    ///
-    /// The literal is declared INSIDE the test rather than reusing
-    /// [`PINNED_IDENTIFIER`], because a golden built from a shared constant
-    /// moves with that constant and can never go red on a spelling change.
-    #[test]
-    fn the_shimref_golden_literal_is_accepted_byte_for_byte() {
-        const SHIMREF_GOLDEN: &[u8] =
-            b"ocx.sh/tool/cmake:3.28@sha256:0000000000000000000000000000000000000000000000000000000000000001\n";
-
-        assert_eq!(
-            SHIMREF_GOLDEN.len(),
-            95,
-            "the golden is 94 identifier bytes plus exactly one LF — a length drift on either \
-             half of the pair is the cheapest thing to miss in a diff"
-        );
-        assert_eq!(
-            SHIMREF_GOLDEN.last(),
-            Some(&b'\n'),
-            "one trailing LF, and it is the last byte: no CRLF, no second terminator"
-        );
-
-        let sidecar = parse_shimref_sidecar(SHIMREF_GOLDEN)
-            .expect("the bytes `prepare_lazy` writes must parse under the grammar that reads them");
-        assert!(
-            matches!(sidecar, Sidecar::PinnedIdentifier(_)),
-            "the golden parses into the pinned-identifier variant — which is what binds it to \
-             `launcher shim` rather than to a package root: {sidecar:?}"
-        );
-        assert_eq!(
-            sidecar.value().as_bytes(),
-            &SHIMREF_GOLDEN[..SHIMREF_GOLDEN.len() - 1],
-            "the reader strips the terminator and NOTHING else — the identifier reaches `ocx` \
-             byte-identical to what the producer baked"
-        );
-        assert_eq!(
-            sidecar.wire_subcommand(),
-            "launcher shim",
-            "…and dispatches the materializing verb"
-        );
     }
 }

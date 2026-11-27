@@ -1176,7 +1176,7 @@
       "launcher",
       "launchers"
     ],
-    "definition": "A generated executable that starts one entry point through `ocx launcher exec`, with the package root baked in; a native `.exe` on Windows.",
+    "definition": "A generated native executable that starts a program as the record `NAME.launch` beside it directs; the record's `kind` says which kind of program.",
     "learnMore": "explanation/launcher-forwarding/#launcher-embedding",
     "category": "ocx",
     "avoid": [
@@ -1237,7 +1237,7 @@
     "variants": [
       "native launcher"
     ],
-    "definition": "The Windows `.exe` form of a launcher, the one executable every Windows caller can start.",
+    "definition": "The compiled program every launcher is on every OS, one shared blob copied under each name, with its record `NAME.launch` beside it.",
     "learnMore": "explanation/entry-points/#windows",
     "category": "ocx"
   },
@@ -1398,7 +1398,7 @@
       "shim",
       "shims"
     ],
-    "definition": "A placeholder executable written for a deferred package; its first run downloads the package, then starts the real binary.",
+    "definition": "The launcher of a deferred package (record kind `deferred`); its first run downloads the package, then starts the real binary.",
     "learnMore": "explanation/deferred-packages/#deferred-tools-compose",
     "category": "ocx",
     "except": [

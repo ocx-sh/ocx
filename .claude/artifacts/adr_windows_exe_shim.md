@@ -51,7 +51,7 @@ re-derived here):**
    PATH `ocx`). The `.exe` shim MUST reproduce this exact invocation. It carries
    `pkg_root` in a sibling `.shim` sidecar and spawns `ocx launcher exec` — it
    does **not** exec the target binary directly (the Scoop model differs; OCX
-   keeps the `launcher exec` resolution indirection).
+   keeps the `launcher exec` resolution indirection). This describes the launchers already on disk; the launcher of `adr_unified_launcher.md` reads only `NAME.launch` (§ 3.4 there).
 2. **Seam:** `launcher::generate()` loop spawns one write task per entrypoint
    per platform. Windows now emits exactly two files: `<name>.exe` (verbatim
    `SHIM_BYTES`) + `<name>.shim` (one-line absolute `pkg_root`). **No
@@ -391,7 +391,7 @@ edge cases). The shim runtime contract is testable at acceptance level
 **Behavior (ordered):**
 1. `GetModuleFileNameW(NULL, …)` → own full path. Derive `stem` = file name
    without final `.exe` (case-insensitive). Failure → **E4**.
-2. Compute sidecar path = `<dir>/<stem>.shim`. Read fully. Absence → **E1**.
+2. Compute sidecar path = `<dir>/<stem>.shim`. Read fully. Absence → **E1**. This describes the launchers already on disk; the launcher of `adr_unified_launcher.md` reads only `NAME.launch` (§ 3.4 there).
 3. Validate sidecar (Contract: see §`.shim` format below). Invalid → **E2**.
    `pkg_root` = the validated single line, trailing newline stripped.
 4. Optionally (only if `OCX_HOME` readable) `dunce::canonicalize(pkg_root)` and
@@ -559,6 +559,8 @@ pub const SHIM_SHA256: &str;
 
 ## `.shim` Sidecar Format Contract
 
+Frozen for launchers already on disk; newly written launchers carry `NAME.launch` instead (`adr_unified_launcher.md` § 3).
+
 | Property | Value |
 |----------|-------|
 | Location | `<dest>/<name>.shim`, sibling of `<name>.exe` |
@@ -570,10 +572,7 @@ pub const SHIM_SHA256: &str;
 | Not | a digest, not the target binary path, not config flags (those are env-var territory). Carrying anything but `pkg_root` would lose the `ocx launcher exec` resolution indirection |
 | Security boundary | The sidecar is **not** itself a trust boundary. `ocx launcher exec` runs `validate_package_root` against `$OCX_HOME/packages/` — identical to today's `.cmd` |
 
-This is the **One-Way-Door artifact**. Once installed packages carry `.shim`
-files, changing the encoding/terminator/semantics requires regenerating every
-installed launcher. The format is deliberately minimal (one line, one meaning)
-to make it durable.
+The `.shim` format stays frozen for the launchers already on disk: each `.exe` beside one is the blob of the release that wrote it, and nothing rewrites either. New launchers write `NAME.launch` (`adr_unified_launcher.md` § 3), and a format change is a new generation directory (§ 4 there), so no installed launcher is ever regenerated.
 
 **Amendment (review-fix R2, 2026-05-18) — `%` removed from the forbidden-byte
 set.** `%` is no longer in `LAUNCHER_UNSAFE_CHARS`
@@ -583,7 +582,7 @@ no consumer of the baked string treats `%` specially — the `.sh` launcher body
 inside a single-quoted POSIX literal), the one-line `.shim` sidecar is read
 **verbatim** by the native shim, and the shim spawns through `CreateProcessW`
 with **no `cmd.exe`** in the chain (so no `%VAR%` environment-variable
-substitution ever occurs). The only producer that treated `%` specially was the
+substitution ever occurs). This describes the launchers already on disk; the launcher of `adr_unified_launcher.md` reads only `NAME.launch` (§ 3.4 there). The only producer that treated `%` specially was the
 `.cmd` body, which the cutover removed. A real Windows install path can legally
 contain `%` (e.g. a user folder named `100%real`); forbidding it would reject
 valid roots for no security benefit. **This change is a backward-compatible
@@ -769,6 +768,7 @@ doc-writer at landing; no rebuttal/matrix row needs rewording now.
 | 2026-05-18 | Builder (Opus 4.7, Codex gate one-shot) | Contract 1 §Behavior re-sequenced for the combined `STARTUPINFOEXW`(HANDLE_LIST+JOB_LIST, no-suspend) rewrite: console handler before child runs (finding 4); stdio-only handle whitelist (finding 1, CWE-403); job-at-create via attribute list — removed `CREATE_SUSPENDED`/`AssignProcessToJobObject`/`ResumeThread` race window. Postconditions updated. Context fact #4 updated. |
 | 2026-05-18 | Builder (Opus 4.7, review-fix R2 doc-reconcile) | **R2 design-record reconciliation to shipped review-fix code (code behavior unchanged except a behavior-preserving dead-arm collapse).** §`.shim` Sidecar Format Contract: removed `%` from the forbidden-byte set (`LAUNCHER_UNSAFE_CHARS` is now `'`,`"`,`\n`,`\r`,`\0`), added the amendment paragraph + this row — rationale (no post-cutover consumer treats `%` specially: `.sh` single-quotes `pkg_root`, one-line `.shim` read verbatim, `CreateProcessW` has no `cmd.exe`) and the explicit statement that this is a **backward-compatible admissible-set widening** (old `.shim` files are a strict subset of the new grammar — no installed-launcher migration; the dangerous narrowing direction is not taken). Fixed the §Content row (was "the same string baked into the `.cmd` body" — `.cmd` removed in the cutover; now references the `.sh` body single-quoted literal). §Error Taxonomy stderr column reconciled to the shipped lines: E1/E2 carry the `(re-run \`ocx install\` …)` recovery hint; E5 has two messages (unset-pin vs defined-but-missing-pin naming the path); E6 is `failed to start {program}: win32 error {win32}` (not the old `<win32 error>` placeholder / hard-coded `ocx`) — exit codes 69/74/77/78 unchanged. Contract 1: added the third degraded mode (no-console parent → neither `STARTF_USESTDHANDLES` nor the std trio, OS default streams, child still launches) to §Postconditions; annotated step 9 that `STARTF_USESTDHANDLES` is gated on all-three-valid via `core::use_std_handles`. Code: collapsed the now-identical `ERROR_ACCESS_DENIED`/`other` `SpawnFailure` match arms in `ocx_shim::run()` into one (77-vs-74 discrimination already lives in `exit_code()`); behavior identical, verified by `ocx_shim` tests. |
 | 2026-05-18 | Builder (Opus 4.7, user-directed scope change) | **Axis C C1→C2 cutover (Status → Accepted).** Stop emitting `.cmd` entirely; Windows launcher is `.exe`+`.shim` only. Rewrote Axis C verdict + weighted table + §Decision Outcome + §Quantified Impact (2 files/entry, PATHEXT machinery removed) + §Consequences (residual `%*` orphan GONE; accepted negative now = no launcher in unsigned-`.exe`-blocked locked-down envs) + §Reversibility + §Migration (clean break, pre-1.0, no migration code) + Context facts #2/#6 + Implementation Plan (PATHEXT removal now in-scope/done, not deferred) + doc-surface list. Title + Status updated. Removed the dead PATHEXT inject/warn subsystem (`pathext` module, `warn_if_pathext_missing_launcher`, `emplace_pathext` call sites, `synthetic_pathext_entry`). Shim blob unaffected — not rebuilt. |
+| 2026-11-26 | architect worker | Amended by adr_unified_launcher.md |
 
 ## Rationale from code: ocx_package_manager
 
@@ -777,7 +777,7 @@ doc-writer at landing; no rebuttal/matrix row needs rewording now.
 for an installed package's `entrypoints/`) and writes its `<name>.shimref`
 sidecar — one line, the pinned identifier, newline-terminated — so
 `ocx launcher shim`'s Windows dispatch (`materialize_lazy`'s
-`GENERATED_SIBLING_EXTENSIONS`) can find it. `.shimref`, never `.shim`:
+`GENERATED_SIBLING_EXTENSIONS`) can find it. This describes the launchers already on disk; the launcher of `adr_unified_launcher.md` reads only `NAME.launch` (§ 3.4 there). `.shimref`, never `.shim`:
 `.shim` names an installed package's sidecar under `entrypoints/`, and a
 shim tree's `bin/` is a different grammar (`materialize_lazy.rs`).
 

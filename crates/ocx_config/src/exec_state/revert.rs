@@ -55,7 +55,7 @@ fn revert_path(env: &mut Env, record: &AppliedValue, element: &str) -> RevertOut
     let Some(existing) = env.get(&record.key) else {
         return RevertOutcome::Kept;
     };
-    let remaining = ocx_util::path::remove_segment(existing, OsStr::new(element));
+    let remaining = ocx_env_apply::remove_segment(existing, OsStr::new(element));
     let segments = |value: &OsStr| {
         std::env::split_paths(value)
             .filter(|s| !s.as_os_str().is_empty())
@@ -88,7 +88,7 @@ fn revert_list(env: &mut Env, record: &AppliedValue, element: &str) -> RevertOut
         return RevertOutcome::Withheld;
     };
     // Removal is `append_unique` minus its re-append, so the flank rule has one copy.
-    let appended = ocx_util::list::append_unique(&existing, element, separator);
+    let appended = ocx_env_apply::append_unique(&existing, element, separator);
     let tail = format!("{separator}{element}");
     let remaining = appended.strip_suffix(&tail).unwrap_or_default();
     if remaining == existing {

@@ -18,8 +18,8 @@ use crate::{api, conventions, options};
 
 /// Resolve one or more packages and print their package root paths.
 ///
-/// The package root holds `content/` (installed files), `entrypoints/`
-/// (generated launchers) and per-package files such as `metadata.json`.
+/// The package root holds `content/` (installed files), `launchers/<generation>/`
+/// (generated launchers, one `NAME.launch` record each) and per-package files such as `metadata.json`.
 /// `--candidate` or `--current` return the stable install symlink instead,
 /// for editor configs, Makefiles or scripts; it targets the same root. Nothing
 /// is downloaded. Each entry reports `package` for a materialized root, or
@@ -89,7 +89,7 @@ type Located = (PathBuf, PathKind);
 
 /// Which directory `ocx package which` reports for one package; `None` becomes [`PackageErrorKind::NotFound`].
 fn located_directory(mode: LazyMode, package_root: Option<PathBuf>, shim_root: Option<PathBuf>) -> Option<Located> {
-    // A materialized package wins under either policy: its `entrypoints/` and `bin/` shadow the shim on `PATH`.
+    // A materialized package wins under either policy: its `launchers/` and `bin/` shadow the shim on `PATH`.
     if let Some(root) = package_root {
         return Some((root, PathKind::Package));
     }
@@ -122,9 +122,15 @@ async fn locate(
         None
     } else {
         let resolved = manager.resolve(package, platform).await?;
-        let shim = file_structure.shims.shim_dir(&resolved.pinned);
-        // `prepare_lazy` publishes the whole tree by one rename, so existence is completeness.
-        path_exists_lossy(shim.root()).await.then(|| shim.root().to_path_buf())
+        // No launcher blob for this host: no tree was ever published.
+        match ocx_store::launcher_generation::LauncherGeneration::host() {
+            Some(generation) => {
+                let shim = file_structure.deferred(&generation).shim_dir(&resolved.pinned);
+                // `prepare_lazy` publishes the whole tree by one rename, so existence is completeness.
+                path_exists_lossy(shim.root()).await.then(|| shim.root().to_path_buf())
+            }
+            None => None,
+        }
     };
 
     located_directory(mode, package_root, shim_root).ok_or(PackageErrorKind::NotFound)
@@ -266,7 +272,7 @@ mod tests {
 
     /// Both forms present: the package root wins.
     ///
-    /// Once the first invocation has materialized the tool, its `entrypoints/`
+    /// Once the first invocation has materialized the tool, its `launchers/`
     /// and `bin/` shadow the shim on `PATH`, so reporting the shim would name
     /// a directory the caller's own environment no longer routes through.
     #[test]

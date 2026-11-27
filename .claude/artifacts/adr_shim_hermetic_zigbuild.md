@@ -93,6 +93,10 @@ The hermetic toolchain (pinned Zig + rustc, no MS manifest) shipped, but the **b
 
 `test_shim_resolves_via_pathext[git-bash]` (rc=1/empty-stderr, pre-existing, toolchain-independent) root-caused via runner instrumentation: bare `bash` on the GitHub Windows runner resolves to `C:\Windows\System32\bash.exe` (the WSL launcher); with no WSL distro it prints "no installed distributions" to stdout and exits rc=1 **without ever exec'ing the shim**. The shim and heterogeneous-environment (MSYS) support were never broken. Fixed by resolving Git-for-Windows bash explicitly (`_git_bash()` in the test). Build Windows Shims now fully green (Linux gate + both cross-builds + Windows acceptance).
 
+### Addendum 4 2026-11-27 — size budget raised 512 to 640 KiB
+
+The unified launcher carries four record kinds, the image-path read and the runfiles manifest lookup, so the x86_64 Windows binary (535040 bytes) passed the 512 KiB budget. `SHIM_SIZE_BUDGET` is now 640 KiB. Measured: x86_64-linux-musl 496256, aarch64-linux-musl 448672, x86_64-apple-darwin 427952, aarch64-apple-darwin 402096, x86_64-windows-gnullvm 534016, aarch64-windows-gnullvm 410624 bytes. The size lever named above (`build-std` with `panic_immediate_abort`) stays available.
+
 ### Consequences
 
 **Positive:** deterministic blob; treadmill gone; msvc/gnu TODO resolved; smaller attack/repro surface.

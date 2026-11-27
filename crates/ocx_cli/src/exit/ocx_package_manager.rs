@@ -260,6 +260,87 @@ mod tests {
 
     // ── moved from ocx_package_manager::tasks::patch_discovery with the impl ──
 
+    /// Design § 5.2: every refusal `PackageManager::vendor` raises exits with the documented code and slug.
+    ///
+    /// Reds on: a vendor variant or a wrapped resolution, trust or I/O failure taking another code or slug
+    /// than its table row.
+    #[test]
+    fn vendor_refusals_exit_with_their_documented_code_and_slug() {
+        use crate::exit::tests::assert_detail;
+        use ocx_package_manager::VendorError;
+        use ocx_package_manager::tasks::signer_rounds::RoundsError;
+
+        let rows: Vec<(VendorError, ExitCode, &str)> = vec![
+            (
+                VendorError::OutputNotEmpty {
+                    path: PathBuf::from("/out"),
+                },
+                ExitCode::UsageError,
+                "vendor_output_not_empty",
+            ),
+            (
+                VendorError::ValueUnrepresentable { reason: "x".into() },
+                ExitCode::DataError,
+                "vendor_value_unrepresentable",
+            ),
+            (
+                VendorError::PathUnrepresentable { path: "/x".into() },
+                ExitCode::DataError,
+                "vendor_path_unrepresentable",
+            ),
+            (
+                VendorError::Package(PackageManagerError::InternalFile(
+                    PathBuf::from("/out"),
+                    std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+                )),
+                ExitCode::PermissionDenied,
+                "permission_denied",
+            ),
+            (
+                VendorError::Package(PackageManagerError::from(ocx_project::Error::from(
+                    ocx_project::ProjectError::new(
+                        PathBuf::from("/work/ocx.lock"),
+                        ocx_project::error::ProjectErrorKind::NoHostLeaf {
+                            name: "pnpm".into(),
+                            platform: "darwin/amd64".into(),
+                        },
+                    ),
+                ))),
+                ExitCode::ConfigError,
+                "no_host_leaf",
+            ),
+            (
+                VendorError::Package(PackageManagerError::ResolveFailed(vec![PackageError::new(
+                    ocx_oci::PackageRef::new_registry("tool", "example.com"),
+                    PackageErrorKind::NotFound,
+                )])),
+                ExitCode::NotFound,
+                "package_not_found",
+            ),
+            (
+                VendorError::Package(PackageManagerError::ResolveFailed(vec![PackageError::new(
+                    ocx_oci::PackageRef::new_registry("tool", "example.com"),
+                    PackageErrorKind::Internal(PackageManagerError::Rounds(RoundsError::PublishersRequired {
+                        package: "example.com/tool".into(),
+                        registry: "example.com".into(),
+                        root: "example.com".into(),
+                    })),
+                )])),
+                ExitCode::PolicyBlocked,
+                "publishers_required",
+            ),
+            (
+                VendorError::Package(PackageManagerError::OfflineMode),
+                ExitCode::PolicyBlocked,
+                "offline_mode",
+            ),
+        ];
+        for (error, code, slug) in &rows {
+            assert_eq!(crate::exit::classify_error(error), *code, "{error:?}");
+            assert_detail(error, slug);
+        }
+    }
+
     /// Reds on: a package-manager slug, batched, delegated or walked, naming another cause than the
     /// exit code does.
     #[test]

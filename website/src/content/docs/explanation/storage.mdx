@@ -83,11 +83,11 @@ Content-addressed storage, a local index, persistent state, stable symlinks, and
     <Node name="temp/" icon="🧪">
       <Description slot="description">download staging, cleaned on successful install</Description>
     </Node>
-    <Node name="shims/" icon="🪄">
-      <Description slot="description">generated launcher directories for deferred packages, described under <a href="/docs/explanation/deferred-packages/#deferred-tools-compose">Deferred packages</a></Description>
+    <Node name="deferred/" icon="🪄">
+      <Description slot="description">launcher directories for deferred packages, one subtree per launcher generation, described under <a href="/docs/explanation/deferred-packages/#deferred-tools-compose">Deferred packages</a></Description>
     </Node>
     <Node name=".bin/" icon="⚙️">
-      <Description slot="description">the shared <code>ocx-shim</code> executable blob</Description>
+      <Description slot="description">the shared <code>ocx-shim</code> executable blob that Windows launchers of an earlier release link to</Description>
     </Node>
     <Node name="locks/" icon="🔒">
       <Description slot="description">cross-process lock files, content-keyed and safe to delete when no OCX process is running. Also holds the project mutation mutex for every ocx.toml this machine has written to, scoped under project-mutate/</Description>
@@ -118,8 +118,8 @@ When OCX installs a package, the actual files land in `packages/`. The critical 
         <Node name="content/" icon="📂">
           <Description slot="description">package files: binaries, libraries, headers</Description>
         </Node>
-        <Node name="entrypoints/" icon="🚀">
-          <Description slot="description">generated launchers for declared entry points, one script per name</Description>
+        <Node name="launchers/" icon="🚀">
+          <Description slot="description">one directory per launcher generation, holding <code>NAME</code> and <code>NAME.launch</code> for each declared entry point</Description>
         </Node>
         <Node name="metadata.json" icon="📋">
           <Description slot="description">declared env vars and extraction options</Description>
@@ -143,11 +143,13 @@ The [Nix package manager][nix] stores every package at `/nix/store/{hash}-name/`
 
 ### Generated Launchers \{#generated-launchers\}
 
-When a package's [`metadata.json`][metadata-ref] declares a non-empty [`entrypoints`][metadata-entry-points] object, OCX materializes a sibling `entrypoints/` directory at install time. It holds a launcher for each entry: a POSIX `.sh` launcher for Unix shells and, on Windows, a native `<name>.exe` launcher with a one-line `<name>.shim` sidecar.
+When a package's [`metadata.json`][metadata-ref] declares a non-empty [`entrypoints`][metadata-entry-points] object, OCX writes a `launchers/<generation>/` directory inside the package directory. It holds a launcher for each entry: a native program `<name>` (`<name>.exe` on Windows) and a record `<name>.launch` beside it. The program and the record are the same on every platform.
 
-Each launcher carries the digest-addressed package root and re-enters via [`ocx launcher exec`][cmd-launcher-exec]. Every invocation therefore runs under the same clean-environment guarantee as [`ocx package exec <package>`][cmd-exec].
+The generation names the launcher program and record format that wrote the directory. A directory is written whole in a staging directory and published with one rename, so it is never partial. A published directory is never edited. A new generation is a new directory beside the old one, and [`ocx clean`][cmd-clean] retires the superseded ones.
 
-Packages that declare no entry points never get an `entrypoints/` directory. See the [entry points guide][in-depth-entry-points] for the publisher workflow.
+Each record holds the digest-addressed package root, and the launcher re-enters via [`ocx launcher exec`][cmd-launcher-exec]. Every invocation therefore runs under the same clean-environment guarantee as [`ocx package exec <package>`][cmd-exec].
+
+Packages that declare no entry points never get a `launchers/` directory. An `entrypoints/` directory that an earlier release wrote stays untouched and keeps working. See the [entry points guide][in-depth-entry-points] for the publisher workflow.
 
 ### Garbage Collection \{#gc\}
 
@@ -278,7 +280,7 @@ Package paths embed the digest: `~/.ocx/packages/ocx.sh/sha256/ab/c123…/`. Tha
           <Node name="current" icon="➡️" open>
             <Description slot="description">selected package root, set by <code>ocx package select</code></Description>
             <Node name="content/" icon="📂" />
-            <Node name="entrypoints/" icon="🚀" />
+            <Node name="launchers/" icon="🚀" />
             <Node name="metadata.json" icon="📋" />
           </Node>
           <Node name="candidates/" icon="📁" open-icon="📂" open>
@@ -295,7 +297,7 @@ Package paths embed the digest: `~/.ocx/packages/ocx.sh/sha256/ab/c123…/`. Tha
   </Node>
 </Tree>
 
-Two symlink entries cover most uses, and `ocx package install --link PATH` adds a third handle at a path you choose. All three target the **package root** (`packages/{registry}/{algorithm}/{2hex}/{30hex}/`) rather than the `content/` subdirectory. Consumers traverse into `…/content/` for files and `…/entrypoints/` for launcher scripts, or read `…/metadata.json` directly.
+Two symlink entries cover most uses, and `ocx package install --link PATH` adds a third handle at a path you choose. All three target the **package root** (`packages/{registry}/{algorithm}/{2hex}/{30hex}/`) rather than the `content/` subdirectory. Consumers traverse into `…/content/` for files and `…/launchers/<generation>/` for launchers, or read `…/metadata.json` directly.
 
 **`candidates/{tag}`**: pinned to a specific version. Created by [`ocx package install`][cmd-install] and pointed at the exact digest that tag resolved to at install time. Several versions can coexist. The candidates for node 22 and 24 both remain until you explicitly uninstall one. Even if the registry re-pushes the `22` tag with a different binary, your candidate still points to the build you installed.
 
@@ -303,7 +305,7 @@ This slot is **host-only**. Installing a foreign platform (`-p windows/amd64` on
 
 **`current`**: a floating pointer to whichever candidate you last selected. Set by [`ocx package select`][cmd-select] (or `ocx package install --select` in one step). It is never updated automatically, not when you install a newer version and not when you refresh the local index. This is intentional: tools referencing `current` should only change behavior when *you* decide they should.
 
-When the selected package declares [`entrypoints`][metadata-entry-points], the composed environment emits a `PATH` export for `{repo}/current/entrypoints`. The environment comes from [`ocx package env`][cmd-package-env] or from the global toolchain activation `eval "$(ocx --global env --shell=sh)"`. Every declared launcher becomes a top-level command. See [Entry points][in-depth-entry-points] for how launchers, PATH, and clean-env execution compose.
+When the selected package declares [`entrypoints`][metadata-entry-points], the composed environment emits a `PATH` export for the package's launcher directory. The environment comes from [`ocx package env`][cmd-package-env] or from the global toolchain activation `eval "$(ocx --global env --shell=sh)"`. Every declared launcher becomes a top-level command. See [Entry points][in-depth-entry-points] for how launchers, PATH, and clean-env execution compose.
 
 :::note[Inspired by SDKMAN and Homebrew]
 [SDKMAN][sdkman] (the Java SDK manager) uses the same two-level pattern: `~/.sdkman/candidates/{tool}/{version}/` for pinned installs and a `current` symlink updated by `sdk default {version}`. [Homebrew][homebrew] does the same with its `Cellar/{formula}/{version}/` store and a stable `opt/{formula}` symlink pointing at the active version. Linux's `update-alternatives` is the system-level equivalent, managing tools like `java` and `python3` via a layer of stable symlinks in `/etc/alternatives/`.

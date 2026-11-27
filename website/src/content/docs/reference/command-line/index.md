@@ -184,11 +184,11 @@ Every command is documented on the page of its group.
 
 | Page | Commands |
 | --- | --- |
-| [Top-level commands](./commands.md) | `ocx about`, `ocx add`, `ocx clean`, `ocx env`, `ocx exec`, `ocx export`, `ocx import`, `ocx init`, `ocx inspect`, `ocx lock`, `ocx login`, `ocx logout`, `ocx pull`, `ocx remove`, `ocx status`, `ocx update`, `ocx upgrade`, `ocx version` |
+| [Top-level commands](./commands.md) | `ocx about`, `ocx add`, `ocx clean`, `ocx env`, `ocx exec`, `ocx export`, `ocx import`, `ocx init`, `ocx inspect`, `ocx lock`, `ocx login`, `ocx logout`, `ocx pull`, `ocx remove`, `ocx status`, `ocx update`, `ocx upgrade`, `ocx vendor`, `ocx version` |
 | [`ocx config`](./config.md) | `ocx config`, `ocx config push`, `ocx config setup`, `ocx config test`, `ocx config update` |
 | [`ocx direnv`](./direnv.md) | `ocx direnv`, `ocx direnv export`, `ocx direnv init` |
 | [`ocx index`](./index-commands.md) | `ocx index`, `ocx index catalog`, `ocx index list`, `ocx index regenerate`, `ocx index sync`, `ocx index update` |
-| [`ocx package`: publishing](./package-publishing.md) | `ocx package`, `ocx package announce`, `ocx package attest`, `ocx package cascade`, `ocx package cascade check`, `ocx package cascade repair`, `ocx package claim`, `ocx package copy`, `ocx package create`, `ocx package description`, `ocx package description pull`, `ocx package description push`, `ocx package export`, `ocx package push`, `ocx package sign`, `ocx package test` |
+| [`ocx package`: publishing](./package-publishing.md) | `ocx package`, `ocx package announce`, `ocx package attest`, `ocx package cascade`, `ocx package cascade check`, `ocx package cascade repair`, `ocx package claim`, `ocx package copy`, `ocx package create`, `ocx package description`, `ocx package description pull`, `ocx package description push`, `ocx package export`, `ocx package push`, `ocx package sign`, `ocx package test`, `ocx package vendor` |
 | [`ocx package`: consuming](./package-consuming.md) | `ocx package deps`, `ocx package deselect`, `ocx package env`, `ocx package exec`, `ocx package import`, `ocx package inspect`, `ocx package install`, `ocx package prune`, `ocx package pull`, `ocx package receipt`, `ocx package sbom`, `ocx package select`, `ocx package uninstall`, `ocx package verify`, `ocx package which` |
 | [`ocx patch`](./patch.md) | `ocx patch`, `ocx patch freeze`, `ocx patch publish`, `ocx patch sync`, `ocx patch test`, `ocx patch why` |
 | [`ocx self`](./self.md) | `ocx self`, `ocx self activate`, `ocx self setup`, `ocx self update` |
@@ -256,6 +256,7 @@ These anchors resolve on the page listed.
 | `package-sign` | [package-publishing.md#package-sign](./package-publishing.md#package-sign) |
 | `package-test` | [package-publishing.md#package-test](./package-publishing.md#package-test) |
 | `package-uninstall` | [package-consuming.md#package-uninstall](./package-consuming.md#package-uninstall) |
+| `package-vendor` | [package-publishing.md#package-vendor](./package-publishing.md#package-vendor) |
 | `package-verify` | [package-consuming.md#package-verify](./package-consuming.md#package-verify) |
 | `patch` | [patch.md#patch](./patch.md#patch) |
 | `patch-freeze` | [patch.md#patch-freeze](./patch.md#patch-freeze) |
@@ -277,5 +278,6 @@ These anchors resolve on the page listed.
 | `status` | [commands.md#status](./commands.md#status) |
 | `update` | [commands.md#update](./commands.md#update) |
 | `upgrade` | [commands.md#upgrade](./commands.md#upgrade) |
+| `vendor` | [commands.md#vendor](./commands.md#vendor) |
 | `version` | [commands.md#version](./commands.md#version) |
 | `which` | [package-consuming.md#which](./package-consuming.md#which) |

@@ -446,6 +446,109 @@ pub async fn setup_owned(
     Ok(info)
 }
 
+/// A package's place in a vendor tree: its directory `p/<HEX16>` and the content directory `p/<HEX16>/c` inside it.
+#[derive(Debug, Clone)]
+pub(crate) struct VendorTarget {
+    package_dir: std::path::PathBuf,
+    content_dir: std::path::PathBuf,
+}
+
+impl VendorTarget {
+    /// The package directory `key` names under `layout`, and its content directory.
+    pub(crate) fn new(layout: &file_structure::VendorLayout, key: &file_structure::PackageKey) -> Self {
+        Self {
+            package_dir: layout.resolve(&file_structure::VendorLayout::relative_package_dir(key)),
+            content_dir: layout.resolve(&file_structure::VendorLayout::relative_content_dir(key)),
+        }
+    }
+
+    pub(crate) fn package_dir(&self) -> &std::path::Path {
+        &self.package_dir
+    }
+
+    pub(crate) fn content_dir(&self) -> &std::path::Path {
+        &self.content_dir
+    }
+}
+
+/// Assembles `pinned`'s layers into `target`'s content directory `p/<HEX16>/c` and writes nothing else.
+///
+/// The layers are copied, not hardlinked, since the tree leaves the volume `$OCX_HOME` sits on. Its package
+/// directory holds no `metadata.json`, `resolve.json`, `install.json`, `digest`, `refs/` or `launchers/`, and no
+/// install symlink: the caller writes the direct launchers beside it in `p/<HEX16>/e/`. Dependencies are set up in
+/// the store as for any pull; the caller vendors each package of the closure itself.
+///
+/// The returned [`InstallInfo`] is rooted at `target`'s package directory, so its `content()` names `content` there,
+/// not `c`; nothing reads it.
+///
+/// # Errors
+///
+/// As [`setup_owned`].
+pub(crate) async fn setup_vendored(
+    mgr: &PackageManager,
+    pinned: &ocx_oci::PinnedPackageRef,
+    resolved: super::resolve::ResolvedChain,
+    platform: ocx_oci::Platform,
+    groups: SetupGroups,
+    target: &VendorTarget,
+    provided_metadata: Option<metadata::Metadata>,
+) -> Result<InstallInfo, PackageErrorKind> {
+    let manifest = resolved.final_manifest.clone();
+    let metadata = load_package_metadata(mgr, pinned, &manifest, provided_metadata).await?;
+    check_package_artifact_type(&manifest)?;
+
+    let (layers, dependencies) = tokio::join!(
+        extract_layers(
+            mgr,
+            pinned,
+            &resolved.transport_pinned,
+            &manifest,
+            groups.layers.clone()
+        ),
+        setup_dependencies(mgr, &metadata, pinned, platform, groups.clone()),
+    );
+    let (layer_digests, dependencies) = (layers?.digests, dependencies?);
+
+    tokio::fs::create_dir_all(target.package_dir())
+        .await
+        .map_err(|e| PackageErrorKind::Internal(crate::Error::InternalFile(target.package_dir().to_path_buf(), e)))?;
+    assemble_layers(
+        mgr.file_structure(),
+        pinned,
+        &layer_digests,
+        &manifest,
+        &metadata,
+        target.content_dir(),
+        ocx_store::hardlink::LinkMode::Copy,
+    )
+    .await?;
+
+    let resolved_package = resolved_package_of(&metadata, &dependencies);
+    let dir = file_structure::PackageDir::with_root(target.package_dir().to_path_buf());
+    Ok(InstallInfo::new(pinned.clone(), metadata, resolved_package, dir).with_platform(resolved.platform))
+}
+
+/// Writes `launchers/<G>/` into the temp package directory `pkg`, each record naming `final_root`.
+///
+/// The package move publishes it; `entrypoints/` is never written.
+///
+/// # Errors
+///
+/// The host has no launcher blob (the error names the launcher path), or as [`crate::launcher::generate`].
+async fn write_package_launchers(
+    pkg: &file_structure::PackageDir,
+    final_root: &std::path::Path,
+    entrypoints: &ocx_package::metadata::entrypoint::Entrypoints,
+) -> Result<(), crate::Error> {
+    let generation = ocx_store::launcher_generation::LauncherGeneration::host().ok_or_else(|| {
+        crate::error::file_error(
+            pkg.launchers_root(),
+            std::io::Error::other("no launcher blob for this host"),
+        )
+    })?;
+    crate::launcher::generate(final_root, entrypoints, &pkg.launchers(&generation)).await
+}
+
 /// [`setup_owned`] plus what it observed.
 async fn setup_owned_outcome(
     mgr: &PackageManager,
@@ -546,23 +649,8 @@ async fn setup_owned_impl(
     }
 
     let manifest = resolved.final_manifest.clone();
-    let metadata = if let Some(meta) = provided_metadata {
-        meta
-    } else {
-        super::common::load_config_metadata(mgr.index(), pinned, &manifest)
-            .await?
-            .into()
-    };
-
-    // Zero layers is valid: a config-only package with an empty `content/`.
-    if manifest.artifact_type.as_deref() != Some(MEDIA_TYPE_PACKAGE_V1) {
-        return Err(PackageErrorKind::from(
-            ocx_oci::client::error::ClientError::UnexpectedArtifactType {
-                expected: MEDIA_TYPE_PACKAGE_V1.to_string(),
-                actual: manifest.artifact_type.clone(),
-            },
-        ));
-    }
+    let metadata = load_package_metadata(mgr, pinned, &manifest, provided_metadata).await?;
+    check_package_artifact_type(&manifest)?;
 
     let pkg = file_structure::PackageDir::with_root(temp.dir.dir.clone());
 
@@ -615,46 +703,31 @@ async fn setup_owned_impl(
         .map_err(|e| PackageErrorKind::Internal(crate::Error::InternalFile(layers_dir.clone(), e)))?;
     link_layers_in_temp(&pkg, pinned.registry(), &layer_digests, fs)?;
 
-    let layer_contents: Vec<std::path::PathBuf> = layer_digests
-        .iter()
-        .map(|d| fs.layers.content(pinned.registry(), d))
-        .collect();
-    let sources: Vec<&std::path::Path> = layer_contents.iter().map(AsRef::as_ref).collect();
-    // Layers are stored unstripped, so placement applies here; `placements` aligns 1:1 with
-    // `sources` only because `extract_layers` returns manifest order.
-    let bundle_strip = metadata.strip_components();
-    let mut placements: Vec<ocx_util::fs::path::LayerPlacement> = Vec::with_capacity(manifest.layers.len());
-    for layer in &manifest.layers {
-        let placement = ocx_oci::resolve_layer_placement(layer.annotations.as_ref(), bundle_strip)
-            .map_err(|e| PackageErrorKind::Internal(crate::Error::LayerLayout(e)))?;
-        placements.push(placement);
-    }
     let extract_watch = Stopwatch::start(timed);
-    ocx_store::file_structure::assemble_from_layers_with_layouts(&sources, &placements, &pkg.content())
-        .await
-        .map_err(|error| PackageErrorKind::Internal(error.into()))?;
+    assemble_layers(
+        fs,
+        pinned,
+        &layer_digests,
+        &manifest,
+        &metadata,
+        &pkg.content(),
+        ocx_store::hardlink::LinkMode::Hardlink,
+    )
+    .await?;
 
     if let Some(entrypoints) = metadata.entrypoints()
         && !entrypoints.is_empty()
     {
-        let dest = pkg.entrypoints();
         // The post-move root, not the temp path, or every launcher breaks after the rename.
         let final_pkg_root = dest_override
             .map(std::path::Path::to_path_buf)
             .unwrap_or_else(|| fs.packages.path(pinned));
-        crate::launcher::generate(&final_pkg_root, entrypoints, &dest, &fs.shim_bin)
+        write_package_launchers(&pkg, &final_pkg_root, entrypoints)
             .await
             .map_err(PackageErrorKind::Internal)?;
     }
 
-    // The `zip` relies on `setup_dependencies` returning declaration order.
-    let resolved_package = ResolvedPackage::new().with_dependencies(
-        metadata
-            .dependencies()
-            .iter()
-            .zip(dependencies.iter())
-            .map(|(decl, info)| (info.identifier().clone(), info.resolved().clone(), decl.visibility)),
-    );
+    let resolved_package = resolved_package_of(&metadata, &dependencies);
 
     // Before `resolve.json` is written, so a duplicate interface launcher name never reaches disk.
     {
@@ -700,6 +773,84 @@ async fn setup_owned_impl(
         extract: extract_watch.elapsed(),
     };
     Ok((install_info, outcome))
+}
+
+/// Relies on `setup_dependencies` returning declaration order, to zip declarations with their installs.
+fn resolved_package_of(metadata: &metadata::Metadata, dependencies: &[Arc<InstallInfo>]) -> ResolvedPackage {
+    ResolvedPackage::new().with_dependencies(
+        metadata
+            .dependencies()
+            .iter()
+            .zip(dependencies.iter())
+            .map(|(decl, info)| (info.identifier().clone(), info.resolved().clone(), decl.visibility)),
+    )
+}
+
+/// The package's metadata: `provided`, which is trusted as validated, or the config blob of `manifest`.
+async fn load_package_metadata(
+    mgr: &PackageManager,
+    pinned: &ocx_oci::PinnedPackageRef,
+    manifest: &ocx_oci::ImageManifest,
+    provided: Option<metadata::Metadata>,
+) -> Result<metadata::Metadata, PackageErrorKind> {
+    match provided {
+        Some(metadata) => Ok(metadata),
+        None => Ok(super::common::load_config_metadata(mgr.index(), pinned, manifest)
+            .await?
+            .into()),
+    }
+}
+
+/// Zero layers is valid: a config-only package with an empty `content/`.
+fn check_package_artifact_type(manifest: &ocx_oci::ImageManifest) -> Result<(), PackageErrorKind> {
+    if manifest.artifact_type.as_deref() != Some(MEDIA_TYPE_PACKAGE_V1) {
+        return Err(PackageErrorKind::from(
+            ocx_oci::client::error::ClientError::UnexpectedArtifactType {
+                expected: MEDIA_TYPE_PACKAGE_V1.to_string(),
+                actual: manifest.artifact_type.clone(),
+            },
+        ));
+    }
+    Ok(())
+}
+
+/// Assembles the extracted layers into `content_dir`; `placements` aligns 1:1 with the layer
+/// contents only because `extract_layers` returns manifest order.
+async fn assemble_layers(
+    fs: &file_structure::FileStructure,
+    pinned: &ocx_oci::PinnedPackageRef,
+    layer_digests: &[ocx_oci::Digest],
+    manifest: &ocx_oci::ImageManifest,
+    metadata: &metadata::Metadata,
+    content_dir: &std::path::Path,
+    link_mode: ocx_store::hardlink::LinkMode,
+) -> Result<(), PackageErrorKind> {
+    let layer_contents: Vec<std::path::PathBuf> = layer_digests
+        .iter()
+        .map(|digest| fs.layers.content(pinned.registry(), digest))
+        .collect();
+    let sources: Vec<&std::path::Path> = layer_contents.iter().map(AsRef::as_ref).collect();
+    let placements = layer_placements(manifest, metadata)?;
+    ocx_store::file_structure::assemble_from_layers_with_layouts(&sources, &placements, content_dir, link_mode)
+        .await
+        .map_err(|error| PackageErrorKind::Internal(error.into()))?;
+    Ok(())
+}
+
+/// One placement per layer, aligned with `manifest.layers`; layers are stored unstripped, so placement applies at assembly.
+fn layer_placements(
+    manifest: &ocx_oci::ImageManifest,
+    metadata: &metadata::Metadata,
+) -> Result<Vec<ocx_util::fs::path::LayerPlacement>, PackageErrorKind> {
+    let bundle_strip = metadata.strip_components();
+    manifest
+        .layers
+        .iter()
+        .map(|layer| {
+            ocx_oci::resolve_layer_placement(layer.annotations.as_ref(), bundle_strip)
+                .map_err(|e| PackageErrorKind::Internal(crate::Error::LayerLayout(e)))
+        })
+        .collect()
 }
 
 /// Acquires the exclusive temp directory for `identifier`, waiting up to `lock_timeout`
@@ -1361,6 +1512,33 @@ mod tests {
         },
     };
     use ocx_store::file_structure::FileStructure;
+
+    /// A pull writes `launchers/<G>/` recording the post-move root, and nothing under `entrypoints/`.
+    #[tokio::test]
+    async fn pull_writes_launchers_with_the_final_root_and_no_entrypoints() {
+        use ocx_store::launcher_generation::LauncherGeneration;
+        let tmp = tempfile::tempdir().unwrap();
+        let temp_pkg = tmp.path().join("temp-pkg");
+        let final_root = tmp.path().join("packages").join("final");
+        std::fs::create_dir_all(&temp_pkg).unwrap();
+        let pkg = ocx_store::file_structure::PackageDir::with_root(temp_pkg.clone());
+
+        super::write_package_launchers(&pkg, &final_root, &Entrypoints::from_names(["cmake"]))
+            .await
+            .unwrap();
+
+        let generation = LauncherGeneration::host().unwrap();
+        let record = std::fs::read(
+            temp_pkg
+                .join("launchers")
+                .join(generation.as_str())
+                .join("cmake.launch"),
+        )
+        .unwrap();
+        let record: ocx_env_apply::launch::PackageRecord = serde_json::from_slice(&record).unwrap();
+        assert_eq!(record.package_root, final_root.to_str().unwrap());
+        assert!(!temp_pkg.join("entrypoints").exists());
+    }
 
     /// Drives `setup_owned` against a leaf that is a perfectly valid OCI
     /// artifact but not an OCX package, and returns the refusal.
@@ -3309,6 +3487,166 @@ mod tests {
 
         assert!(origins_of(&manager, &root_pinned).await.is_empty());
         assert!(origins_of(&manager, &dep_pinned).await.is_empty());
+    }
+
+    // ── vendored destination ─────────────────────────────────────────────────
+
+    /// A gzipped tar of `bin/tool` (executable), a link `bin/alias -> tool` and `share/readme.txt`.
+    fn vendor_layer() -> (Vec<u8>, ocx_oci::Descriptor) {
+        use std::io::Write as _;
+
+        let mut tar_bytes = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut tar_bytes);
+            for (name, content, mode) in [
+                ("bin/tool", &b"#!tool"[..], 0o755),
+                ("share/readme.txt", b"read me", 0o644),
+            ] {
+                let mut header = tar::Header::new_gnu();
+                header.set_size(content.len() as u64);
+                header.set_mode(mode);
+                header.set_cksum();
+                builder.append_data(&mut header, name, content).unwrap();
+            }
+            // A Windows host refuses an in-layer symlink (`WindowsSymlinksUnsupported`), so only Unix gets the link.
+            if cfg!(unix) {
+                let mut link = tar::Header::new_gnu();
+                link.set_entry_type(tar::EntryType::Symlink);
+                link.set_size(0);
+                link.set_mode(0o777);
+                builder.append_link(&mut link, "bin/alias", "tool").unwrap();
+            }
+            builder.finish().unwrap();
+        }
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&tar_bytes).unwrap();
+        let bytes = encoder.finish().unwrap();
+        let descriptor = ocx_oci::Descriptor {
+            media_type: ocx_oci::media_type::MEDIA_TYPE_TAR_GZ.to_string(),
+            digest: ocx_oci::Algorithm::Sha256.hash(&bytes).to_string(),
+            size: bytes.len() as i64,
+            urls: None,
+            artifact_type: None,
+            annotations: None,
+        };
+        (bytes, descriptor)
+    }
+
+    /// Vendors the one-layer fixture package from a blob directory into `out`; returns the manager, the
+    /// target and the outcome.
+    async fn vendor_fixture_package(
+        home: &std::path::Path,
+        out: &std::path::Path,
+    ) -> (
+        PackageManager,
+        super::VendorTarget,
+        Result<InstallInfo, PackageErrorKind>,
+    ) {
+        let (bytes, layer) = vendor_layer();
+        let blobs = tempfile::tempdir().unwrap();
+        plant(blobs.path(), &layer, &bytes);
+        let manager = lookup_manager(home, lookup_of(&[blobs.path()], None), None);
+        let pinned = plain_pinned();
+        let resolved = ResolvedChain {
+            pinned: pinned.clone(),
+            transport_pinned: Ok(ocx_oci::OciIdentifier::from_parts("test/lookup", LOGICAL).pinned_at(pinned.digest())),
+            chain: Vec::new(),
+            final_manifest: ocx_oci::ImageManifest {
+                artifact_type: Some(super::MEDIA_TYPE_PACKAGE_V1.to_string()),
+                layers: vec![layer.clone()],
+                ..Default::default()
+            },
+            platform: linux_amd64(),
+            leaf_origin: ocx_index::BlobOrigin::Home,
+        };
+        let layout = ocx_store::file_structure::VendorLayout::new(out);
+        let target = super::VendorTarget::new(&layout, &plain_key());
+        let outcome = super::setup_vendored(
+            &manager,
+            &pinned,
+            resolved,
+            linux_amd64(),
+            SetupGroups::new(),
+            &target,
+            Some(bundle_metadata()),
+        )
+        .await;
+        (manager, target, outcome)
+    }
+
+    /// The vendored name of the fixture package.
+    fn plain_key() -> ocx_store::file_structure::PackageKey {
+        let digest = plain_pinned().digest();
+        ocx_store::file_structure::VendorLayout::package_keys([&digest]).expect("one key")[&digest].clone()
+    }
+
+    /// The package directory holds `c/` alone: no store bookkeeping, nothing a GC would follow.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_vendored_package_holds_only_its_content() {
+        let (home, out) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let (manager, target, outcome) = vendor_fixture_package(home.path(), out.path()).await;
+
+        let info = outcome.expect("the package vendors");
+
+        let mut names: Vec<_> = std::fs::read_dir(target.package_dir())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["c"]);
+        assert_eq!(info.dir().root(), target.package_dir());
+        assert_eq!(
+            std::fs::read(target.content_dir().join("share/readme.txt")).unwrap(),
+            b"read me"
+        );
+        assert!(
+            !manager.file_structure().packages.path(&plain_pinned()).exists(),
+            "a vendored package is not installed in the store"
+        );
+    }
+
+    /// Hardlinks into the layer store would leave the volume `$OCX_HOME` sits on.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_vendored_file_is_a_copy_not_a_hardlink() {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let (home, out) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let (_manager, target, outcome) = vendor_fixture_package(home.path(), out.path()).await;
+        outcome.expect("the package vendors");
+
+        let metadata = std::fs::metadata(target.content_dir().join("bin/tool")).unwrap();
+        assert_eq!(metadata.nlink(), 1, "the file shares no inode with the layer store");
+        assert_ne!(metadata.mode() & 0o111, 0, "the executable bit survives the copy");
+    }
+
+    /// The listing of a vendored package: the files with their executable bit, the link, the link-free directory.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_vendored_package_lists_its_tree() {
+        let (home, out) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let (_manager, _target, outcome) = vendor_fixture_package(home.path(), out.path()).await;
+        outcome.expect("the package vendors");
+
+        let layout = ocx_store::file_structure::VendorLayout::new(out.path());
+        let content = ocx_store::file_structure::VendorLayout::relative_content_dir(&plain_key());
+        let tree = crate::tasks::vendor::list_tree(&layout, &content, false)
+            .await
+            .expect("the tree lists");
+
+        let file = |name: &str, executable| ocx_package::vendor::FileEntry {
+            path: format!("{content}/{name}"),
+            executable,
+        };
+        assert_eq!(tree.files, [file("bin/tool", true), file("share/readme.txt", false)]);
+        assert_eq!(
+            tree.links,
+            [ocx_package::vendor::LinkEntry {
+                path: format!("{content}/bin/alias"),
+                target: "tool".into(),
+            }]
+        );
+        assert_eq!(tree.link_free_dirs, [format!("{content}/share")]);
     }
 
     /// A layer whose decompressed size passes the cap, as a blob-directory copy with a matching digest.

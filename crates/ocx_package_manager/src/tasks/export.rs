@@ -145,7 +145,7 @@ impl PackageManager {
                 .await
                 .map_err(|error| file_error(parent, error))?;
         }
-        let staging = export_archive::scratch(self.file_structure(), "export").await?;
+        let staging = self.file_structure().temp.scratch("export").await?;
         let staged = ExportRequest {
             output: staging.path().to_path_buf(),
             archive: false,
@@ -1306,7 +1306,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
-    async fn an_unwritable_parent_keeps_its_io_classification() {
+    async fn an_unwritable_parent_is_a_permission_refusal() {
         use std::os::unix::fs::PermissionsExt;
         let home = TempDir::new().unwrap();
         let work = TempDir::new().unwrap();
@@ -1329,7 +1329,7 @@ mod tests {
 
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
         assert!(!matches!(error, Error::ExportDirInvalid { .. }), "{error}");
-        assert_eq!(exit_of(&error), Some(ExitCode::IoError), "{error}");
+        assert_eq!(exit_of(&error), Some(ExitCode::PermissionDenied), "{error}");
     }
 
     #[tokio::test(flavor = "multi_thread")]

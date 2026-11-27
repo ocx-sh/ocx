@@ -239,9 +239,10 @@ fn windows_claim_name(file_name: &str) -> Option<&str> {
     Some(&file_name[..file_name.len() - ext.len()])
 }
 
+/// Whether a regular file's mode carries an execute bit; always `false` where the host has no such bit.
 // Duplicated by `ocx_config::env`'s `executable_verdict`: change the bit test in both.
 #[cfg(unix)]
-fn unix_is_executable(metadata: &std::fs::Metadata) -> bool {
+pub fn unix_is_executable(metadata: &std::fs::Metadata) -> bool {
     use std::os::unix::fs::PermissionsExt;
     // Callers filter to `is_file()` first: a directory's `x` bit means traversable.
     metadata.permissions().mode() & 0o111 != 0
@@ -251,7 +252,7 @@ fn unix_is_executable(metadata: &std::fs::Metadata) -> bool {
 // candidate reads as non-executable rather than erroring. Upgrade if
 // cross-host Unix-convention scanning becomes a real requirement.
 #[cfg(not(unix))]
-fn unix_is_executable(_metadata: &std::fs::Metadata) -> bool {
+pub fn unix_is_executable(_metadata: &std::fs::Metadata) -> bool {
     false
 }
 

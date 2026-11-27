@@ -234,6 +234,7 @@ key_unreadable	IoError	A signing or verification key could not be read from its 
 key_unreadable	IoError	A signing or verification key could not be read from its location
 launch_spawn_failed	Failure	The resolved command could not be started
 launcher_path_not_utf8	DataError	A path baked into a generated launcher is not valid UTF-8
+launcher_record_refused	DataError	A launch record breaks a rule the launcher enforces when it reads it
 launcher_unsafe_character	DataError	A value baked into a generated launcher contains an unsafe character
 layer_layout_failed	Failure	Resolving a layer layout failed with an unclassified cause
 layer_not_staged	Failure	A layer the package needs was not staged
@@ -359,6 +360,7 @@ patch_unexpected_manifest	DataError	A patch descriptor manifest has an unexpecte
 patch_wrong_layer_count	DataError	A patch descriptor manifest carries other than exactly one layer
 path_escape	DataError	A relative path is absolute, escapes its root, or is otherwise unsafe to join
 payload_type_unsupported	DataError	The envelope payload type is not in-toto JSON
+permission_denied	PermissionDenied	The operating system refused access to a file or directory
 permission_denied	PermissionDenied	The operating system refused access to a file or directory
 pin_digest_mismatch	DataError	The registry resolved the pinned tag to a different digest
 pin_digest_mismatch	DataError	The registry resolved the pinned tag to a different digest
@@ -565,6 +567,9 @@ unyank_tag_not_curated	Failure	A tag to unyank is not a curated tag
 update_section_in_project	ConfigError	ocx.toml declares an [update] section, which only config.toml may hold
 usage	UsageError	The command was invoked with arguments it cannot act on
 users_api_unavailable	UsageError	The forge offers no users API to resolve owners through
+vendor_output_not_empty	UsageError	The vendor output directory exists and is not an empty directory
+vendor_path_unrepresentable	DataError	A path cannot be written inside the vendor directory
+vendor_value_unrepresentable	DataError	A value cannot be written relative to the vendor directory
 version_invalid	DataError	A package version does not parse
 walked_digest_mismatch	DataError	A source answered a digest request with different content
 wrong_layer_count	DataError	An artifact carries other than exactly one layer

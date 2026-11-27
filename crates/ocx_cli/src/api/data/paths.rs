@@ -9,7 +9,7 @@ use serde::Serialize;
 use crate::api::Printable;
 use crate::api::data::path_kind::PathKind;
 
-/// A resolved package and its package root, the parent of `content/` and `entrypoints/`.
+/// A resolved package and its package root, the parent of `content/` and `launchers/`.
 pub struct PathEntry {
     pub package: String,
     pub path: PathBuf,

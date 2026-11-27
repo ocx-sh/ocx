@@ -5,6 +5,8 @@ use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
+use ocx_env_apply::{ApplyKind, KeyFold, apply_one};
+
 /// Environment variable key, uppercased on Windows (case-insensitive there); an `OsString`
 /// so a non-UTF-8 Unix name survives.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -75,15 +77,27 @@ impl Env {
         self.vars.insert(EnvKey::new(key), value.into());
     }
 
+    /// Folds `value` into the variable `key` through the one apply rule, `ocx_env_apply::apply_one`.
+    fn apply(&mut self, key: impl Into<OsString>, kind: ApplyKind, value: &OsStr, separator: Option<&str>) {
+        let key = EnvKey::new(key);
+        let fold = if cfg!(windows) {
+            KeyFold::AsciiCaseInsensitive
+        } else {
+            KeyFold::Exact
+        };
+        let folded = apply_one(
+            self.vars.get(&key).map(OsString::as_os_str),
+            kind,
+            value,
+            separator,
+            fold,
+        );
+        self.vars.insert(key, folded);
+    }
+
     /// Prepends `value` to the path-style variable `key`, moving an existing occurrence to the front.
     pub fn add_path(&mut self, key: impl Into<OsString>, value: impl Into<OsString>) {
-        let key = EnvKey::new(key);
-        let value = value.into();
-        let new_value = match self.vars.get(&key) {
-            Some(existing) => ocx_util::path::move_to_front(existing, &value),
-            None => value,
-        };
-        self.vars.insert(key, new_value);
+        self.apply(key, ApplyKind::Path, &value.into(), None);
     }
 
     /// Appends `value` to the list-style variable `key`, moving an existing occurrence to the back.
@@ -93,10 +107,7 @@ impl Env {
         if value.is_empty() {
             return;
         }
-        let key = EnvKey::new(key);
-        let existing = self.vars.get(&key).map(|v| v.to_string_lossy().into_owned());
-        let folded = ocx_util::list::append_unique(existing.as_deref().unwrap_or_default(), value, separator);
-        self.vars.insert(key, OsString::from(folded));
+        self.apply(key, ApplyKind::List, OsStr::new(value), Some(separator));
     }
 
     /// Borrowing iterator over `(key, value)` pairs, in unspecified order.
@@ -113,7 +124,7 @@ impl Env {
     ///
     /// Does not set `PATH`: called alone it records a directory the child cannot see.
     pub fn note_package_path(&mut self, dir: &OsStr) {
-        self.package_path = ocx_util::path::move_to_front(&self.package_path, dir);
+        self.package_path = ocx_env_apply::move_to_front(&self.package_path, dir);
     }
 
     /// Resolve a command name through this env's `PATH` and, on Windows, its own `PATHEXT`.
@@ -212,7 +223,7 @@ impl Env {
         }
 
         let pruned = excluded.iter().fold(path, |value, dir| {
-            ocx_util::path::remove_segment(&value, dir.as_os_str())
+            ocx_env_apply::remove_segment(&value, dir.as_os_str())
         });
 
         if pruned.is_empty() {
@@ -249,28 +260,10 @@ impl Env {
             .find_map(|dir| probe(Some(dir.as_os_str())))
     }
 
-    /// Windows-only: this env's PATHEXT (else the default), in order.
-    ///
-    /// `.EXE` is appended when absent, or a hardened `PATHEXT=.BAT;.CMD` hides every `<name>.exe` shim.
+    /// Windows-only: this env's PATHEXT (else the default), in order; see [`pathext_extensions`].
     #[cfg(windows)]
     fn pathext(&self) -> Vec<String> {
-        let pathext_str = self
-            .get("PATHEXT")
-            .and_then(|v| v.to_str())
-            .unwrap_or(".COM;.EXE;.BAT;.CMD")
-            .to_string();
-
-        let mut extensions: Vec<String> = pathext_str
-            .split(';')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-            .collect();
-
-        if !extensions.iter().any(|ext| ext.eq_ignore_ascii_case(".EXE")) {
-            extensions.push(".EXE".to_string());
-        }
-        extensions
+        pathext_extensions(self.get("PATHEXT").and_then(|v| v.to_str()))
     }
 
     /// Resolve a command for `ocx * test` / launcher re-entry, package-contributed `PATH` first,
@@ -372,6 +365,25 @@ impl Env {
         );
         Ok(found)
     }
+}
+
+/// The extensions a Windows command lookup probes, in order: `pathext` (a `PATHEXT` value), else the default
+/// `.COM;.EXE;.BAT;.CMD`. The bare name is probed after them.
+///
+/// `.EXE` is appended when absent, or a hardened `PATHEXT=.BAT;.CMD` hides every `<name>.exe` shim. Pure, so
+/// `ocx vendor` applies the same rule for a Windows target on any host.
+pub fn pathext_extensions(pathext: Option<&str>) -> Vec<String> {
+    let mut extensions: Vec<String> = pathext
+        .unwrap_or(".COM;.EXE;.BAT;.CMD")
+        .split(';')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    if !extensions.iter().any(|ext| ext.eq_ignore_ascii_case(".EXE")) {
+        extensions.push(".EXE".to_string());
+    }
+    extensions
 }
 
 /// True unless `command` is exactly one [`Component::Normal`](std::path::Component).
@@ -487,31 +499,53 @@ pub const TRAMPOLINE_PROBE_BYTES: usize = 256;
 /// Judges the file, not a directory list, so it catches two project homes on one `PATH`,
 /// which no exclusion set can name. Any I/O error answers "not a trampoline".
 pub fn is_ocx_trampoline(path: &std::path::Path) -> bool {
-    trampoline_signal(path)
+    (cfg!(windows) && windows_exec_signal(path)) || record_signal(path) || (cfg!(not(windows)) && marker_signal(path))
 }
 
-/// POSIX half of [`is_ocx_trampoline`]: [`TRAMPOLINE_MARKER`] as line two of the probed prefix.
-#[cfg(not(windows))]
-fn trampoline_signal(path: &std::path::Path) -> bool {
-    use std::io::Read as _;
+/// A launch record of kind `toolchain` at `path` (when it ends in `.launch`) or beside it.
+/// `package` and `deferred` records are not trampolines, so `ocx launcher exec` re-entry stays allowed.
+fn record_signal(path: &std::path::Path) -> bool {
+    use ocx_env_apply::launch::{LaunchKind, RECORD_EXTENSION, peek_kind, record_path_for};
 
-    // Before the open: opening a FIFO blocks forever on the path that runs before every `exec`.
-    if !std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file()) {
-        return false;
-    }
-    // Fails open: this runs before every exec, so failing closed refuses on a transient `EACCES`.
-    let Ok(file) = std::fs::File::open(path) else {
+    let Some(text) = path.to_str() else {
         return false;
     };
-    // A prefix read, never `read_bounded`, which errors past its cap and so disarms deep checkouts.
-    let mut prefix = Vec::with_capacity(TRAMPOLINE_PROBE_BYTES);
-    if file
-        .take(TRAMPOLINE_PROBE_BYTES as u64)
-        .read_to_end(&mut prefix)
-        .is_err()
+    let record = if path.extension().is_some_and(|extension| extension == RECORD_EXTENSION) {
+        path.to_path_buf()
+    } else {
+        std::path::PathBuf::from(record_path_for(text, cfg!(windows)))
+    };
+    read_regular_prefix(&record, ocx_env_apply::launch::MAX_PEEK_BYTES + 1)
+        .is_some_and(|bytes| peek_kind(&bytes) == Some(LaunchKind::Toolchain))
+}
+
+/// At most `limit` bytes of a regular file; `None` for anything else or on any error.
+/// `O_NONBLOCK` keeps an open of a FIFO from waiting for a writer on the path that runs before every `exec`.
+fn read_regular_prefix(path: &std::path::Path, limit: u64) -> Option<Vec<u8>> {
+    use std::io::Read as _;
+
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
     {
-        return false;
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NONBLOCK);
     }
+    let file = options.open(path).ok()?;
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.take(limit).read_to_end(&mut bytes).ok()?;
+    Some(bytes)
+}
+
+/// [`TRAMPOLINE_MARKER`] as line two of the probed prefix, for scripts an older ocx wrote.
+fn marker_signal(path: &std::path::Path) -> bool {
+    // A prefix read, never `read_bounded`, which errors past its cap and so disarms deep checkouts.
+    let Some(prefix) = read_regular_prefix(path, TRAMPOLINE_PROBE_BYTES as u64) else {
+        return false;
+    };
     // Line two matched whole, never anywhere, or a baked path spelling the marker refuses an ordinary launcher.
     prefix
         .split(|byte| *byte == b'\n')
@@ -519,11 +553,10 @@ fn trampoline_signal(path: &std::path::Path) -> bool {
         .is_some_and(|line| line == TRAMPOLINE_MARKER.as_bytes())
 }
 
-/// Windows half of [`is_ocx_trampoline`]: a sibling `.exec` sidecar, or an `.exec` path itself.
+/// A sibling `.exec` sidecar, or an `.exec` path itself, for launchers an older ocx wrote.
 ///
 /// No content check: trampolines and lazy shims hardlink one blob, so a content match refuses shims.
-#[cfg(windows)]
-fn trampoline_signal(path: &std::path::Path) -> bool {
+fn windows_exec_signal(path: &std::path::Path) -> bool {
     // A `PATHEXT` containing `.EXEC` makes the sidecar itself an answer.
     if path
         .extension()
@@ -541,7 +574,14 @@ mod tests {
     // reads neither validator, but the grammar they define is still this
     // module's contract to state.
     use ocx_env::{is_reserved_ocx_key, is_valid_env_key};
-    use ocx_util::path::PATH_SEPARATOR;
+    use ocx_env_apply::PATH_SEPARATOR;
+
+    #[test]
+    fn pathext_extensions_default_order_and_exe_appended() {
+        assert_eq!(pathext_extensions(None), [".COM", ".EXE", ".BAT", ".CMD"]);
+        assert_eq!(pathext_extensions(Some(" .BAT;;.CMD ")), [".BAT", ".CMD", ".EXE"]);
+        assert_eq!(pathext_extensions(Some(".exe;.cmd")), [".exe", ".cmd"]);
+    }
 
     /// `OCX_NO_MODIFY_PATH` is read through `flag` (the same `BooleanString`
     /// path as `--remote`/`--offline`), so both `=1` and `=true` set it true and
@@ -1939,6 +1979,79 @@ mod tests {
             !is_ocx_trampoline(&path),
             "a non-regular file is 'not a trampoline' without ever being opened"
         );
+    }
+
+    fn write_record(dir: &std::path::Path, name: &str, body: &str) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    /// A regular file with a sibling `cmake.launch` of kind `toolchain` is a native trampoline.
+    #[test]
+    fn a_sibling_toolchain_record_is_a_trampoline() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_record(dir.path(), "cmake", "MZ");
+        write_record(dir.path(), "cmake.launch", r#"{"kind":"toolchain","schema_version":1}"#);
+        assert!(is_ocx_trampoline(&path));
+    }
+
+    /// A later schema with keys this build does not know is still recognised: only `kind` is read.
+    #[test]
+    fn a_schema_two_toolchain_record_is_a_trampoline() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_record(dir.path(), "cmake", "MZ");
+        write_record(
+            dir.path(),
+            "cmake.launch",
+            r#"{"kind":"toolchain","schema_version":2,"future":{"a":[1,2]},"other":"x"}"#,
+        );
+        assert!(is_ocx_trampoline(&path));
+    }
+
+    /// `package` and `deferred` records are not trampolines.
+    #[test]
+    fn package_and_deferred_records_are_not_trampolines() {
+        for kind in ["package", "deferred"] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = write_record(dir.path(), "cmake", "MZ");
+            write_record(
+                dir.path(),
+                "cmake.launch",
+                &format!(r#"{{"kind":"{kind}","schema_version":1}}"#),
+            );
+            assert!(!is_ocx_trampoline(&path), "kind {kind}");
+        }
+    }
+
+    /// The record path itself, passed as the command, is answered from its own bytes.
+    #[test]
+    fn a_launch_path_is_peeked_directly() {
+        let dir = tempfile::tempdir().unwrap();
+        let record = write_record(dir.path(), "cmake.launch", r#"{"kind":"toolchain","schema_version":1}"#);
+        assert!(is_ocx_trampoline(&record));
+    }
+
+    /// A FIFO at the record path must not hang: only "returns false" can report green.
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_at_the_record_path_is_not_a_trampoline() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_record(dir.path(), "cmake", "MZ");
+        let record = dir.path().join("cmake.launch");
+        ocx_test_support::fifo::mkfifo(&record);
+        assert!(std::fs::metadata(&record).is_ok_and(|m| !m.is_file()));
+        assert!(!is_ocx_trampoline(&path));
+    }
+
+    /// Windows (CI only): `cmake.exe` resolves its record as `cmake.launch`.
+    #[cfg(windows)]
+    #[test]
+    fn a_windows_exe_with_a_toolchain_record_is_a_trampoline() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = write_record(dir.path(), "cmake.exe", "MZ");
+        write_record(dir.path(), "cmake.launch", r#"{"kind":"toolchain","schema_version":1}"#);
+        assert!(is_ocx_trampoline(&exe));
     }
 
     /// Windows: the sibling `.shim` sidecar of a lazy shim

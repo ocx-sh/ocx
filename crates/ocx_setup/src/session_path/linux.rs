@@ -122,7 +122,7 @@ const INHERITED: &str = "$PATH";
 
 /// The directories `content` would still prepend once `removed` are taken out, or `None` when it
 /// prepends none of them or is not this writer's shape; an empty `Some` means delete the file.
-// Not `ocx_util::path::remove_segment`: that splits on the host's separator, this format always on `:`.
+// Not `ocx_env_apply::remove_segment`: that splits on the host's separator, this format always on `:`.
 // Segment-exact: a prefix match removing a retired directory would take its siblings under the same root.
 pub fn subtract<'a>(content: &'a str, removed: &[&str]) -> Option<Vec<&'a str>> {
     let value = content.strip_prefix(PREPEND_PREFIX)?.trim_end_matches('\n');

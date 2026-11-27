@@ -6,16 +6,15 @@
 crate::env_vars! {
     // ── Core configuration ──
 
-    /// Absolute path to the running `ocx`, set on every spawn so a child OCX runs the
-    /// same binary, not whatever `$PATH` resolves.
+    /// Absolute path to the running `ocx`, set on every spawn so a child OCX runs the same
+    /// binary, not whatever `$PATH` resolves.
     ///
-    /// Set by OCX on every subprocess it spawns, so the inner `ocx launcher exec` of a generated
-    /// launcher runs the binary that installed the package. Unset, launchers fall back to
-    /// `$PATH`-resolved `ocx`; set it by hand only to pin a specific binary.
-    ///
-    /// The Windows `.exe` shim treats a defined but empty value as defined, the Unix launcher's
-    /// `${OCX_BINARY_PIN:-ocx}` as unset. The value is the installed `ocx` path when the running
-    /// binary is that one and the path is safely owned, else the running binary; never empty.
+    /// Set it by hand only to pin a specific `ocx`; the pin must be an absolute path. Unset, or
+    /// empty (empty counts as unset on every platform), a launcher falls back to the `ocx` its
+    /// record names (toolchain launchers only), else the first `ocx` on `PATH`. That walk takes
+    /// absolute entries only and skips the launcher's own directory and any other launcher.
+    /// OCX sets the installed `ocx` path when the running binary is that one and the path is
+    /// safely owned, else the running binary; never empty.
     pub OCX_BINARY_PIN: Path, Public, propagation = BinaryPin;
     /// The OCX data root — `$OCX_HOME`, else `~/.ocx`.
     ///
@@ -540,6 +539,12 @@ crate::env_vars! {
     /// OCX would install the package the outer OCX is still pulling and wait on its lock. Under the
     /// marker OCX behaves as if `--offline` were given.
     pub __OCX_CREDENTIAL_HELPER: Bool, Plumbing, propagation = HookLocal;
+    /// How many launchers have started one another in this process chain; a launcher refuses past the limit.
+    ///
+    /// Written by a launcher into the child it starts and passed on unchanged by every other spawn, so a
+    /// launcher that starts itself (a trampoline resolving to its own directory) ends in an error, not a
+    /// fork loop. Never set it by hand.
+    pub __OCX_LAUNCHER_DEPTH: Integer, Plumbing, propagation = UserInput;
 
     // ── Test seams ──
 
@@ -573,8 +578,8 @@ crate::env_vars! {
     pub __OCX_TESTING_REQUIRE_LIVE_SHELLS: String, Testing, propagation = UserInput;
     /// OCI reference `ocx self` treats as its own image.
     pub __OCX_TESTING_SELF_IMAGE: String, Testing, propagation = UserInput;
-    /// Store root whose shim publish loses its race.
-    pub __OCX_TESTING_SHIM_LOST_PUBLISH_RACE: Path, Testing, propagation = UserInput;
+    /// Marks the child re-run of the seam's no-global-subscriber test, which needs a process no sibling test has touched.
+    pub __OCX_TESTING_SEAM_CHILD: String, Testing, propagation = UserInput;
     /// Path replacing the system-tier config file.
     pub __OCX_TESTING_SYSTEM_CONFIG: Path, Testing, propagation = UserInput;
     /// Marks the child re-run of a telemetry unit test that must see the proxy variables its parent set.

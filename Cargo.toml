@@ -70,6 +70,7 @@ ocx_announce = { path = "crates/ocx_announce" }
 ocx_config = { path = "crates/ocx_config" }
 ocx_console = { path = "crates/ocx_console" }
 ocx_env = { path = "crates/ocx_env" }
+ocx_env_apply = { path = "crates/ocx_env_apply" }
 ocx_exit = { path = "crates/ocx_exit" }
 ocx_exit_derive = { path = "crates/ocx_exit_derive" }
 ocx_index = { path = "crates/ocx_index" }
@@ -333,6 +334,8 @@ uuid = { version = "1.28", default-features = false, features = ["v4"] }
 
 # Platform
 libc = "0.2"
+# Sets a symlink's own mtime (std follows the link); already in the tree through `tar`.
+filetime = "0.2"
 # Pure-Rust ELF parser (zero runtime deps, zero `unsafe`, dual MIT/Apache).
 # Used by host libc detection to read a system binary's `PT_INTERP` — the
 # host's exact native loader path — for discovery-then-identify libc probing.
@@ -342,6 +345,9 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",
     "Win32_Storage_FileSystem",
     "Win32_System_Console",
+    # Unified launcher: file-identity, process-image and reparse-point queries.
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
     # SetEnvironmentVariableW — the shim deletes the withdrawn selector variables from its own
     # block before spawning, which is how they are stripped from the
     # child (CreateProcessW runs with lpEnvironment = NULL). Already in the
@@ -353,6 +359,9 @@ windows-sys = { version = "0.61.2", features = [
     # REG_EXPAND_SZ through Win32_System_Registry, then announced with a
     # `WM_SETTINGCHANGE` broadcast (`SendMessageTimeoutW`) from
     # Win32_UI_WindowsAndMessaging. Both in the pinned 0.61.2; no new crate.
+    "Win32_System_ProcessStatus",
+    # NtQueryVirtualMemory (the launcher image name past MAX_PATH).
+    "Wdk_Storage_FileSystem",
     "Win32_System_Registry",
     "Win32_System_Threading",
     "Win32_UI_WindowsAndMessaging",

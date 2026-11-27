@@ -10,7 +10,7 @@
 
 use std::path::{Path, PathBuf};
 
-use ocx_util::path::path_element_eq;
+use ocx_env_apply::path_element_eq;
 
 use crate::shell::{Dialect, Shell, hook, msys};
 

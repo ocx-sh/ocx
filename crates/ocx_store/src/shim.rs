@@ -1,37 +1,80 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Embedded prebuilt `ocx-shim` executable bytes (`adr_windows_exe_shim.md` Contract 3).
+//! Embedded prebuilt `ocx-shim` launcher blobs, one per target triple (`adr_windows_exe_shim.md` Contract 3).
 //!
-//! Refresh on every `crates/ocx_shim` change: take the `ocx-shim-fresh-<target>` artifacts from that
-//! change's `build-windows-shims.yml` run (or `task rust:shim:build TARGET=<arch>-pc-windows-gnullvm`),
-//! copy them to `shims/`, update [`SHIM_SHA256`].
+//! Every `ocx` embeds every blob so it can vendor for any platform. Refresh on every `crates/ocx_shim` or
+//! `crates/ocx_env_apply` change: take the `ocx-shim-fresh-<target>` artifacts from that change's
+//! `build-windows-shims.yml` run (or `task rust:shim:build TARGET=<triple>`), copy them to `shims/`, update
+//! the matching sha256 in the test module's `RECORDED_SHA256`, and write `python3 scripts/shim_inputs.py
+//! --print` to `shim_inputs.sha256`. A change to any other build input (toolchain, `shim` profile, the
+//! launcher's dependencies, the Zig or cargo-zigbuild pin) needs the same refresh; that digest is how CI sees one.
 
 // Blobs built with rustc 1.95.0, cargo-zigbuild 0.22.3, Zig 0.16.0 (PyPI `ziglang==0.16.0`, sha256
 // 2317bbb91798556d9d0f38aabdac23db83f0979b25f767259ae474546724087c): nothing else pins Zig.
 
-/// Upper bound on the embedded shim size, asserted at compile time on Windows.
-pub const SHIM_SIZE_BUDGET: usize = 512 * 1024;
+use ocx_oci::{Architecture, OperatingSystem, Platform};
 
-/// The prebuilt `ocx-shim` for the target arch; empty off Windows.
-#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-pub const SHIM_BYTES: &[u8] = include_bytes!("shims/ocx-shim-x86_64.exe");
+/// Upper bound on each embedded blob, checked per blob by a unit test. The unified launcher carries four record kinds, the image-path read and the runfiles manifest lookup (largest: x86_64 Windows, 546816 bytes); the earlier 256 to 512 KiB raise is in `adr_shim_hermetic_zigbuild.md`.
+pub const SHIM_SIZE_BUDGET: usize = 640 * 1024;
 
-/// SHA-256 of the committed blob: a corruption canary, not a provenance control; empty off Windows.
-#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-pub const SHIM_SHA256: &str = "f04520165a5e92b5197e2fa09eaf7279732a4ad69810dd5e90ed84c78650d4ca";
+/// One embedded launcher: its target triple and bytes.
+struct Blob {
+    target: &'static str,
+    bytes: &'static [u8],
+}
 
-#[cfg(all(target_os = "windows", target_arch = "aarch64"))]
-pub const SHIM_BYTES: &[u8] = include_bytes!("shims/ocx-shim-aarch64.exe");
+// Blobs cut by `build-windows-shims.yml`; the SLSA attestation of that workflow run is their provenance.
+const BLOBS: [Blob; 6] = [
+    Blob {
+        target: "x86_64-unknown-linux-musl",
+        bytes: include_bytes!("shims/ocx-shim-x86_64-unknown-linux-musl"),
+    },
+    Blob {
+        target: "aarch64-unknown-linux-musl",
+        bytes: include_bytes!("shims/ocx-shim-aarch64-unknown-linux-musl"),
+    },
+    Blob {
+        target: "x86_64-apple-darwin",
+        bytes: include_bytes!("shims/ocx-shim-x86_64-apple-darwin"),
+    },
+    Blob {
+        target: "aarch64-apple-darwin",
+        bytes: include_bytes!("shims/ocx-shim-aarch64-apple-darwin"),
+    },
+    Blob {
+        target: "x86_64-pc-windows-gnullvm",
+        bytes: include_bytes!("shims/ocx-shim-x86_64-pc-windows-gnullvm.exe"),
+    },
+    Blob {
+        target: "aarch64-pc-windows-gnullvm",
+        bytes: include_bytes!("shims/ocx-shim-aarch64-pc-windows-gnullvm.exe"),
+    },
+];
 
-#[cfg(all(target_os = "windows", target_arch = "aarch64"))]
-pub const SHIM_SHA256: &str = "d60ae9d331e02ff870c0ce54689edabcf1e3675acfc2a8c0991b23a7afbee05a";
+/// The launcher blob serving `platform`, one per target triple; `None` when none exists (e.g. `wasip1/wasm`).
+///
+/// Libc, variant and OS features do not select a blob: the musl build runs on glibc hosts too.
+pub fn blob_for(platform: &Platform) -> Option<&'static [u8]> {
+    let Platform::Specific { os, arch, .. } = platform else {
+        return None;
+    };
+    let target = match (os, arch) {
+        (OperatingSystem::Linux, Architecture::Amd64) => "x86_64-unknown-linux-musl",
+        (OperatingSystem::Linux, Architecture::Arm64) => "aarch64-unknown-linux-musl",
+        (OperatingSystem::Darwin, Architecture::Amd64) => "x86_64-apple-darwin",
+        (OperatingSystem::Darwin, Architecture::Arm64) => "aarch64-apple-darwin",
+        (OperatingSystem::Windows, Architecture::Amd64) => "x86_64-pc-windows-gnullvm",
+        (OperatingSystem::Windows, Architecture::Arm64) => "aarch64-pc-windows-gnullvm",
+        _ => return None,
+    };
+    BLOBS.iter().find(|blob| blob.target == target).map(|blob| blob.bytes)
+}
 
-#[cfg(not(target_os = "windows"))]
-pub const SHIM_BYTES: &[u8] = &[];
-
-#[cfg(not(target_os = "windows"))]
-pub const SHIM_SHA256: &str = "";
+/// The blob for the platform this binary runs on; `None` when the host has no launcher target.
+pub fn host_blob() -> Option<&'static [u8]> {
+    blob_for(&Platform::current()?)
+}
 
 /// Whether `image` carries a Win32 VERSIONINFO resource, whose `OriginalFilename` would contradict every hardlinked name.
 pub fn contains_version_resource(image: &[u8]) -> bool {
@@ -44,115 +87,117 @@ pub fn contains_version_resource(image: &[u8]) -> bool {
     })
 }
 
-/// Whether a published blob of `published_len` bytes matches `embedded`; an empty `embedded` admits every length.
+/// Whether a published blob of `published_len` bytes matches the length of `embedded`.
 pub fn published_blob_is_intact(published_len: u64, embedded: &[u8]) -> bool {
-    embedded.is_empty() || published_len == embedded.len() as u64
+    published_len == embedded.len() as u64
 }
-
-#[cfg(all(target_os = "windows", any(target_arch = "x86_64", target_arch = "aarch64")))]
-const _: () = assert!(
-    SHIM_BYTES.len() <= SHIM_SIZE_BUDGET,
-    "embedded ocx-shim blob exceeds SHIM_SIZE_BUDGET"
-);
 
 #[cfg(test)]
 mod tests {
-    use super::{SHIM_BYTES, SHIM_SHA256, contains_version_resource, published_blob_is_intact};
-    // `SHIM_SIZE_BUDGET` is only asserted on Windows builds (the only targets
-    // that embed a non-empty blob); importing it unconditionally would be an
-    // unused import on the Linux CI host.
-    #[cfg(all(target_os = "windows", any(target_arch = "x86_64", target_arch = "aarch64")))]
-    use super::SHIM_SIZE_BUDGET;
+    use super::{BLOBS, SHIM_SIZE_BUDGET, blob_for, contains_version_resource, host_blob, published_blob_is_intact};
 
-    // ── F-1 fail-closed corruption canary (Phase 3.1) ─────────────────────
-    //
-    // Plan Progress Log F-1 (Warn, Specify-actionable): the blob↔SHA guard
-    // must be FAIL-CLOSED on Windows — an empty SHA or empty blob is a test
-    // FAILURE on a Windows build, NOT a skip. This catches a truncated
-    // `include_bytes!`, a wrong relative path, or a partial checkout. It is a
-    // corruption canary, NOT a provenance control (4.4 adds SLSA attestation;
-    // see ADR §"SHA256 = corruption canary").
-    //
-    // Today, against the 0-byte placeholder blobs + empty SHA on a Windows
-    // build, this test FAILS — that is the correct failing-spec state. Phase
-    // 4.3 fills the real bytes + digest atomically (commit blob, record SHA
-    // in the same change), turning it green.
+    /// Each committed blob's sha256: a corruption canary, not a provenance control. Refresh with the blob.
+    const RECORDED_SHA256: [(&str, &str); 6] = [
+        (
+            "x86_64-unknown-linux-musl",
+            "ba38e9f3ef4fd3a6f1e2c4078d91c17e8a7c08825d8c3a6e0dcc1d500dbd6761",
+        ),
+        (
+            "aarch64-unknown-linux-musl",
+            "be1a5b7430738d6990d0a449075b4af031e1dfd634605658f4d32e7c03b50523",
+        ),
+        (
+            "x86_64-apple-darwin",
+            "9184d2b75a35f5b0b7b13bde1c1d6ae1c075d44d683bdaefe22c9a23df0a5dd0",
+        ),
+        (
+            "aarch64-apple-darwin",
+            "bc16c6fdea4c934eb8ffaacaf8684ced5d7e1ffe6420bb630370314c4c222776",
+        ),
+        (
+            "x86_64-pc-windows-gnullvm",
+            "22ca1c547832e4452126b3c832b00799964f4705bd229f8e0d90f8b7bd3a2890",
+        ),
+        (
+            "aarch64-pc-windows-gnullvm",
+            "09ddc0726d86c9569c33ae6b51a516ebe57b7845940254f6c6da00399efdd77a",
+        ),
+    ];
 
-    #[cfg(all(target_os = "windows", any(target_arch = "x86_64", target_arch = "aarch64")))]
+    // ── fail-closed corruption canary and size budget, per blob ───────────
+    //
+    // An empty blob or a drifted digest is a failure, never a skip: it catches a truncated
+    // `include_bytes!`, a wrong relative path or a partial checkout. A corruption canary, not a
+    // provenance control (SLSA attestation is the provenance control).
+
     #[test]
-    fn shim_blob_matches_recorded_sha256_fail_closed_on_windows() {
+    fn every_blob_matches_its_recorded_sha256() {
         use sha2::{Digest, Sha256};
 
-        assert!(
-            !SHIM_BYTES.is_empty(),
-            "FAIL-CLOSED: embedded ocx-shim blob is empty on a Windows build — \
-             a 0-byte placeholder or a wrong `include_bytes!` path. This MUST \
-             fail (not skip) until Phase 4.3 commits the real blob."
-        );
         assert_eq!(
-            SHIM_SHA256.len(),
-            64,
-            "FAIL-CLOSED: SHIM_SHA256 must be a 64-char lowercase hex digest on \
-             a Windows build; empty/short = unrecorded blob (test FAILURE, not skip)"
+            RECORDED_SHA256.len(),
+            BLOBS.len(),
+            "one recorded digest per embedded blob"
         );
-        let computed = {
-            let mut hasher = Sha256::new();
-            hasher.update(SHIM_BYTES);
-            let digest = hasher.finalize();
-            let mut hex = String::with_capacity(64);
-            for byte in digest {
-                use std::fmt::Write as _;
-                write!(hex, "{byte:02x}").expect("writing to a String is infallible");
-            }
-            hex
-        };
-        assert_eq!(
-            computed, SHIM_SHA256,
-            "corruption canary: sha256(SHIM_BYTES) must equal the recorded \
-             SHIM_SHA256 — committed blob has drifted from its recorded digest"
-        );
+        for blob in &BLOBS {
+            assert!(!blob.bytes.is_empty(), "FAIL-CLOSED: the {} blob is empty", blob.target);
+            let (_, recorded) = RECORDED_SHA256
+                .iter()
+                .find(|(target, _)| *target == blob.target)
+                .unwrap_or_else(|| panic!("{}: no recorded sha256", blob.target));
+            let computed = Sha256::digest(blob.bytes)
+                .iter()
+                .fold(String::with_capacity(64), |mut hex, byte| {
+                    use std::fmt::Write as _;
+                    write!(hex, "{byte:02x}").expect("writing to a String is infallible");
+                    hex
+                });
+            assert_eq!(
+                computed, *recorded,
+                "{}: the committed blob has drifted from its recorded sha256",
+                blob.target
+            );
+        }
     }
 
-    #[cfg(all(target_os = "windows", any(target_arch = "x86_64", target_arch = "aarch64")))]
     #[test]
-    fn shim_blob_within_size_budget_on_windows() {
-        assert!(
-            !SHIM_BYTES.is_empty(),
-            "FAIL-CLOSED: blob must be non-empty before the size assertion is meaningful"
-        );
-        assert!(
-            SHIM_BYTES.len() <= SHIM_SIZE_BUDGET,
-            "embedded ocx-shim blob ({} bytes) exceeds SHIM_SIZE_BUDGET ({} bytes)",
-            SHIM_BYTES.len(),
-            SHIM_SIZE_BUDGET
-        );
+    fn every_blob_is_within_the_size_budget() {
+        for blob in &BLOBS {
+            assert!(
+                blob.bytes.len() <= SHIM_SIZE_BUDGET,
+                "{}: {} bytes exceeds SHIM_SIZE_BUDGET ({SHIM_SIZE_BUDGET} bytes)",
+                blob.target,
+                blob.bytes.len()
+            );
+        }
     }
 
-    // On non-Windows targets `ocx` carries zero shim weight: the blob and the
-    // SHA are both empty. This is the inverse contract — it MUST hold on the
-    // Linux CI host (and is the host-runnable half of the F-1 spec).
-    #[cfg(not(target_os = "windows"))]
     #[test]
-    fn shim_blob_is_empty_off_windows() {
+    fn every_blob_is_the_image_format_of_its_target() {
+        for blob in &BLOBS {
+            let (kind, magic): (&str, &[u8]) = if blob.target.ends_with("windows-gnullvm") {
+                ("PE", b"MZ")
+            } else if blob.target.ends_with("linux-musl") {
+                ("ELF", b"\x7fELF")
+            } else {
+                ("64-bit Mach-O", &[0xcf, 0xfa, 0xed, 0xfe])
+            };
+            assert!(blob.bytes.starts_with(magic), "{} is not a {kind} image", blob.target);
+        }
+    }
+
+    #[test]
+    fn host_blob_serves_the_machine_running_the_tests() {
         assert!(
-            SHIM_BYTES.is_empty(),
-            "non-Windows builds must embed no shim bytes (zero weight off Windows)"
-        );
-        assert!(
-            SHIM_SHA256.is_empty(),
-            "non-Windows builds must record no SHA (no blob to guard)"
+            host_blob().is_some(),
+            "every supported development host has a launcher blob"
         );
     }
 
     // ── C-019 VERSIONINFO-absence canary ──────────────────────────────────
     //
-    // The canary's own detection method is what these rows pin, on inputs the
-    // test owns. Applying it to `SHIM_BYTES` alone would be the Unchecked
-    // Green `quality-core.md` names: off Windows that slice is empty, so a
-    // green there is indistinguishable from a scanner that never ran. Every
-    // row below therefore feeds a synthetic image and demonstrates BOTH
-    // outcomes; the assertion against the real blobs is the last test, and it
-    // reads them from disk so it runs — and scans both arches — on every host.
+    // These rows pin the canary's own detection method on synthetic images, demonstrating BOTH
+    // outcomes; the last row applies it to the real Windows blobs.
 
     /// The UTF-16LE encoding a Win32 resource compiler writes for a structure
     /// key — the exact byte form [`contains_version_resource`] scans for, and
@@ -236,186 +281,144 @@ mod tests {
         );
     }
 
-    /// C-019 itself, on the bytes that actually ship — **on every host**.
-    ///
-    /// It reads the committed blobs from disk rather than [`SHIM_BYTES`],
-    /// which is the whole point: that constant is `&[]` off Windows, so a
-    /// canary applied to it would be green on the only host CI actually runs,
-    /// and that green would be indistinguishable from a scan that never
-    /// happened (`quality-core.md` "Unchecked Green", sitting on a security
-    /// canary). The blobs are ordinary committed files, so reading them is
-    /// host-independent and every Linux run genuinely scans both arches — not
-    /// only the one the running build embeds.
-    ///
-    /// Fail-closed in the same shape as the SHA canary: an unreadable or empty
-    /// blob is a failure, and the loop's own coverage is asserted afterwards so
-    /// an empty directory cannot pass vacuously.
+    /// C-019 itself, on the bytes that actually ship. Fail-closed: an empty blob or a missing Windows target fails.
     #[test]
-    fn committed_shim_blobs_carry_no_version_resource() {
-        let shims_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/shims");
-        let mut scanned: Vec<String> = Vec::new();
-
-        for entry in std::fs::read_dir(&shims_dir).unwrap_or_else(|e| {
-            panic!(
-                "FAIL-CLOSED: the committed shim blobs must be readable at {}: {e}",
-                shims_dir.display()
-            )
-        }) {
-            let path = entry.expect("readable directory entry").path();
-            if path.extension().and_then(|extension| extension.to_str()) != Some("exe") {
-                continue;
-            }
-            let image = std::fs::read(&path).unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+    fn committed_windows_blobs_carry_no_version_resource() {
+        let windows: Vec<_> = BLOBS.iter().filter(|b| b.target.ends_with("windows-gnullvm")).collect();
+        assert_eq!(windows.len(), 2, "both Windows blobs must be scanned");
+        for blob in windows {
             assert!(
-                !image.is_empty(),
+                !blob.bytes.is_empty(),
                 "FAIL-CLOSED: {} is empty, so scanning it proves nothing",
-                path.display()
+                blob.target
             );
             assert!(
-                !contains_version_resource(&image),
+                !contains_version_resource(blob.bytes),
                 "{} has grown a VERSIONINFO resource. One blob is hardlinked \
                  under N tool names, so its fixed OriginalFilename now disagrees \
                  with every one of them at once (T1036.005). Refresh the blob \
                  without the version resource, or take the mismatch as a \
                  deliberate decision and retire this canary.",
-                path.display()
-            );
-            scanned.push(
-                path.file_name()
-                    .expect("a file has a name")
-                    .to_string_lossy()
-                    .into_owned(),
-            );
-        }
-
-        // Without this the loop body could execute zero times and the test
-        // would still pass — the exact shape the canary exists to avoid. A
-        // membership check rather than an equality one, so a third arch added
-        // later is scanned by the loop without having to be listed twice.
-        for required in ["ocx-shim-x86_64.exe", "ocx-shim-aarch64.exe"] {
-            assert!(
-                scanned.iter().any(|name| name == required),
-                "the canary must have scanned {required}; it scanned {scanned:?}"
+                blob.target
             );
         }
     }
 
     // ── C-035 blob-freshness canary ───────────────────────────────────────
 
-    /// The committed blobs must carry the `.exec` grammar `crates/ocx_shim`
-    /// gained in WP-6 (`plan_toolchain_activation.md` C-035, D-V4).
+    /// The committed Windows blobs must be built from the current launcher source.
     ///
-    /// # Why a canary is needed at all
-    ///
-    /// The blobs are committed binaries embedded by `include_bytes!`, so
-    /// **changing `crates/ocx_shim/src/{core,main}.rs` changes nothing that
-    /// ships** until the blob is rebuilt. Every existing check passes on an
-    /// untouched blob beside changed source: the PE magic is unchanged, the
-    /// size budget is unchanged, and `sha256(blob) == SHIM_SHA256` holds
-    /// precisely *because* nothing was rebuilt. Worse, all three are
-    /// `_on_windows`-gated and do not run on the Linux leg at all. Without this
-    /// row, a Windows trampoline would silently keep the two-sidecar shim: no
-    /// `.exec` probe, no root-flag arm, no selector-variable strip, and no test
-    /// anywhere would notice.
-    ///
-    /// # Both states were observed on the real artifact
-    ///
-    /// It was **red on the blobs WP-6 inherited** (exit 101: neither literal
-    /// present in either arch) and went green the moment WP-14 rebuilt them
-    /// through `task rust:shim:build`, so no mutation is needed to prove it
-    /// discriminates (D-V4). It carried `#[ignore]` for exactly that window —
-    /// a born-red canary in the default set would have left `task rust:verify`
-    /// red for every work package between WP-6 and WP-14. That window closed
-    /// with the refresh, and the attribute went with it: nothing in
-    /// `taskfiles/` or `.github/workflows/` passes `--ignored`, so leaving it
-    /// would have made this the one check whose green is indistinguishable
-    /// from never having run (`quality-core.md` "Unchecked Green").
-    ///
-    /// # What reds it from here on
-    ///
-    /// A future `crates/ocx_shim` source change with no blob refresh — the
-    /// exact drift this row exists for. Also a truncated or zero-byte blob, a
-    /// deleted `ocx-shim-{x86_64,aarch64}.exe` (the required-filename loop),
-    /// an unreadable `src/shims`, and any rebuild whose root-flag arm stops
-    /// emitting either literal.
-    ///
-    /// # What it scans for
-    ///
-    /// Two `&'static str` literals `build_child_command_line`'s root-flag arm
-    /// emits and no earlier shim could contain, in their plain-ASCII rodata
-    /// form. Deliberately not a PE parser and not a symbol table walk — the
-    /// same "few lines with no edge cases" rung
-    /// [`contains_version_resource`] takes, and for the same reason.
-    ///
-    /// Read from disk rather than from [`SHIM_BYTES`], and fail-closed on an
-    /// empty file, so it scans **both** arches on every host instead of only
-    /// the one the running build embeds — off Windows that constant is `&[]`,
-    /// and a canary applied to it would be green on the only host CI runs
-    /// (`quality-core.md` "Unchecked Green").
+    /// The blobs are committed binaries, so changing `crates/ocx_shim/src/**` changes nothing that ships until
+    /// the blob is rebuilt, and the size, magic and sha256 checks all pass on an untouched blob. It scans for
+    /// three literals the launcher emits as separate argv elements or names (`--project`, `--global`, `.launch`),
+    /// the last of which no pre-unified-launcher blob contains; not a PE parser. Reds on a shim source change
+    /// with no blob refresh, a truncated blob, or a rebuild that stops emitting any of them.
     #[test]
-    fn committed_shim_blobs_carry_the_exec_sidecar_grammar() {
-        /// Literals introduced by C-032's root-flag arm. Both, not either: a
-        /// single short needle could match by coincidence in a 200 KiB image,
-        /// and requiring both makes a partial rebuild visible too.
-        const EXEC_GRAMMAR_LITERALS: [&str; 2] = [" --project ", " --global"];
+    fn committed_windows_blobs_carry_the_launcher_literals() {
+        /// All, not any: one short needle could match by coincidence, and a stale blob shows.
+        const LAUNCHER_LITERALS: [&str; 3] = ["--project", "--global", ".launch"];
 
-        let shims_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/shims");
-        let mut scanned: Vec<String> = Vec::new();
-
-        for entry in std::fs::read_dir(&shims_dir).unwrap_or_else(|e| {
-            panic!(
-                "FAIL-CLOSED: the committed shim blobs must be readable at {}: {e}",
-                shims_dir.display()
-            )
-        }) {
-            let path = entry.expect("readable directory entry").path();
-            if path.extension().and_then(|extension| extension.to_str()) != Some("exe") {
-                continue;
-            }
-            let image = std::fs::read(&path).unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+        let windows: Vec<_> = BLOBS.iter().filter(|b| b.target.ends_with("windows-gnullvm")).collect();
+        assert_eq!(windows.len(), 2, "both Windows blobs must be scanned");
+        for blob in windows {
             assert!(
-                !image.is_empty(),
+                !blob.bytes.is_empty(),
                 "FAIL-CLOSED: {} is empty, so scanning it proves nothing",
-                path.display()
+                blob.target
             );
-            for literal in EXEC_GRAMMAR_LITERALS {
+            for literal in LAUNCHER_LITERALS {
                 let needle = literal.as_bytes();
                 assert!(
-                    image.windows(needle.len()).any(|window| window == needle),
-                    "{} predates the `.exec` sidecar grammar: it carries no `{literal}`. \
-                     The shim SOURCE changed but the committed blob did not, so Windows \
-                     trampolines still run the two-sidecar shim — no `.exec` probe, no \
-                     root-flag arm, no selector-variable strip. Rebuild both arches via \
-                     `task rust:shim:build` and re-record SHIM_SHA256.",
-                    path.display()
+                    blob.bytes.windows(needle.len()).any(|window| window == needle),
+                    "{} predates the current launcher: it carries no `{literal}`. The launcher SOURCE \
+                     changed but the committed blob did not. Rebuild via `task rust:shim:build` and \
+                     re-record its sha256 in RECORDED_SHA256.",
+                    blob.target
                 );
             }
-            scanned.push(
-                path.file_name()
-                    .expect("a file has a name")
-                    .to_string_lossy()
-                    .into_owned(),
-            );
         }
+    }
 
-        // Without this the loop body could execute zero times and the test
-        // would still pass — the exact shape the canary exists to avoid.
-        for required in ["ocx-shim-x86_64.exe", "ocx-shim-aarch64.exe"] {
-            assert!(
-                scanned.iter().any(|name| name == required),
-                "the canary must have scanned {required}; it scanned {scanned:?}"
-            );
+    // ── C-019 / V-26: the arm64 darwin launcher is signed ─────────────────
+
+    const MACHO_MAGIC_64: u32 = 0xfeed_facf;
+    const LC_CODE_SIGNATURE: u32 = 0x1d;
+
+    /// The `(cputype, load command ids)` of a thin little-endian 64-bit Mach-O image.
+    fn macho_load_commands(image: &[u8]) -> (u32, Vec<u32>) {
+        let word = |at: usize| -> u32 {
+            u32::from_le_bytes(
+                image
+                    .get(at..at + 4)
+                    .unwrap_or_else(|| panic!("Mach-O image truncated at byte {at}"))
+                    .try_into()
+                    .expect("a 4-byte slice"),
+            )
+        };
+        assert_eq!(word(0), MACHO_MAGIC_64, "not a thin little-endian 64-bit Mach-O image");
+        let (cputype, ncmds) = (word(4), word(16));
+        let mut at = 32; // `mach_header_64` is 32 bytes
+        let mut commands = Vec::new();
+        for _ in 0..ncmds {
+            commands.push(word(at));
+            at += word(at + 4) as usize;
         }
+        (cputype, commands)
+    }
+
+    fn darwin_blob(target: &str) -> &'static [u8] {
+        BLOBS
+            .iter()
+            .find(|blob| blob.target == target)
+            .unwrap_or_else(|| panic!("no {target} blob"))
+            .bytes
+    }
+
+    #[test]
+    fn macho_parser_reads_the_load_commands_it_is_given() {
+        let mut image = Vec::new();
+        for word in [MACHO_MAGIC_64, 7, 0, 2, 2, 24, 0, 0] {
+            image.extend(word.to_le_bytes());
+        }
+        for (command, size) in [(0x19_u32, 8_u32), (LC_CODE_SIGNATURE, 16)] {
+            image.extend(command.to_le_bytes());
+            image.extend(size.to_le_bytes());
+            image.extend(std::iter::repeat_n(0u8, size as usize - 8));
+        }
+        assert_eq!(macho_load_commands(&image), (7, vec![0x19, LC_CODE_SIGNATURE]));
+    }
+
+    /// The `aarch64-apple-darwin` blob from the Linux cross build carries a code signature (arm64 macOS kills an
+    /// unsigned image); `x86_64-apple-darwin` carries none, which is the control showing the check can go red.
+    #[test]
+    fn only_the_arm64_darwin_blob_carries_a_code_signature() {
+        const CPU_TYPE_X86_64: u32 = 0x0100_0007;
+        const CPU_TYPE_ARM64: u32 = 0x0100_000c;
+
+        let (arm_cpu, arm_commands) = macho_load_commands(darwin_blob("aarch64-apple-darwin"));
+        let (x86_cpu, x86_commands) = macho_load_commands(darwin_blob("x86_64-apple-darwin"));
+
+        assert_eq!(arm_cpu, CPU_TYPE_ARM64, "the aarch64 blob must be an arm64 image");
+        assert_eq!(x86_cpu, CPU_TYPE_X86_64, "the x86_64 blob must be an x86_64 image");
+        assert!(
+            arm_commands.len() > 1 && x86_commands.len() > 1,
+            "both parses must have read real load commands"
+        );
+        assert!(
+            arm_commands.contains(&LC_CODE_SIGNATURE),
+            "the aarch64-apple-darwin blob lacks LC_CODE_SIGNATURE: arm64 macOS refuses to run it"
+        );
+        assert!(
+            !x86_commands.contains(&LC_CODE_SIGNATURE),
+            "the x86_64-apple-darwin blob carries a code signature, so the arm64 check above proves nothing"
+        );
     }
 
     // ── C-001 corrupt-blob pre-check ──────────────────────────────────────
     //
-    // `ShimBinStore::ensure` decides "already published" by existence, so a
-    // torn write is served forever. `published_blob_is_intact` is the predicate
-    // that pre-check consults. Its empty-`embedded` clause makes it inert off
-    // Windows — which is the whole reason `embedded` is a parameter: the rows
-    // below drive it red and green from a NON-EMPTY fixture on the Linux host,
-    // where the shipped call site can never do so.
+    // A publisher that decides "already published" by existence serves a
+    // torn write forever. `published_blob_is_intact` is the predicate
+    // that pre-check consults, driven here red and green from a fixture.
 
     /// The six-byte fixture the length rows compare against. Its content is
     /// irrelevant — only `len()` is read — but it must not be empty, or every
@@ -460,19 +463,62 @@ mod tests {
         );
     }
 
+    /// One blob per target triple, each within budget; a libc feature does not change the triple.
     #[test]
-    fn published_blob_is_intact_admits_every_length_when_nothing_is_embedded() {
-        // Load-bearing, not a shortcut. Off Windows `SHIM_BYTES` is empty, so a
-        // length carries no information; two `ShimBinStore` specification tests
-        // park a 17-byte sentinel at the published path and require it to
-        // survive. Without this clause a length check would republish over it
-        // and red both.
-        for published_len in [0u64, 17, 329_000, u64::MAX] {
-            assert!(
-                published_blob_is_intact(published_len, &[]),
-                "with nothing embedded there is no length to compare against, so \
-                 {published_len} must be admitted and the pre-check stay existence-only"
-            );
+    fn blob_for_serves_the_six_launcher_targets() {
+        for platform in [
+            "linux/amd64",
+            "linux/arm64",
+            "darwin/amd64",
+            "darwin/arm64",
+            "windows/amd64",
+            "windows/arm64",
+        ] {
+            let parsed: ocx_oci::Platform = platform.parse().unwrap();
+            let blob = blob_for(&parsed).unwrap_or_else(|| panic!("no launcher blob for {platform}"));
+            assert!(!blob.is_empty(), "{platform}");
+            assert!(blob.len() <= super::SHIM_SIZE_BUDGET, "{platform}");
         }
+        let glibc: ocx_oci::Platform = "linux/amd64+libc.glibc".parse().unwrap();
+        let bare: ocx_oci::Platform = "linux/amd64".parse().unwrap();
+        assert_eq!(blob_for(&glibc), blob_for(&bare));
+    }
+
+    #[test]
+    fn blob_for_serves_each_platform_its_own_target_image() {
+        let image_start = |platform: &str| -> Vec<u8> {
+            let parsed: ocx_oci::Platform = platform.parse().unwrap();
+            blob_for(&parsed).unwrap()[..4].to_vec()
+        };
+        assert_eq!(image_start("linux/arm64"), b"\x7fELF");
+        assert_eq!(image_start("darwin/arm64"), [0xcf, 0xfa, 0xed, 0xfe]);
+        assert_eq!(&image_start("windows/amd64")[..2], b"MZ");
+        let target_of = |platform: &str| {
+            let parsed: ocx_oci::Platform = platform.parse().unwrap();
+            BLOBS
+                .iter()
+                .find(|blob| blob.bytes == blob_for(&parsed).unwrap())
+                .unwrap()
+                .target
+        };
+        assert_eq!(target_of("linux/amd64"), "x86_64-unknown-linux-musl");
+        assert_eq!(target_of("linux/arm64"), "aarch64-unknown-linux-musl");
+        assert_eq!(target_of("darwin/amd64"), "x86_64-apple-darwin");
+        assert_eq!(target_of("darwin/arm64"), "aarch64-apple-darwin");
+        assert_eq!(target_of("windows/amd64"), "x86_64-pc-windows-gnullvm");
+        assert_eq!(target_of("windows/arm64"), "aarch64-pc-windows-gnullvm");
+    }
+
+    #[test]
+    fn blob_for_has_no_blob_for_wasm() {
+        for platform in ["wasip1/wasm", "wasip2/wasm"] {
+            let parsed: ocx_oci::Platform = platform.parse().unwrap();
+            assert_eq!(blob_for(&parsed), None, "{platform}");
+        }
+    }
+
+    #[test]
+    fn blob_for_has_no_blob_for_the_any_platform() {
+        assert_eq!(blob_for(&ocx_oci::Platform::any()), None);
     }
 }

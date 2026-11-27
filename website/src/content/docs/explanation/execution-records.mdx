@@ -206,7 +206,7 @@ The pin defends against a script or a log rotator redirecting the trail by accid
 :::
 
 :::caution[Records contain absolute paths, including the user's home directory]
-`process.executable` and the package `content/` and `entrypoints/` paths inside each `packages[]` entry are absolute filesystem paths. They sit under the invoking user's home directory, or under `$OCX_HOME` if set elsewhere. Size sink permissions and retention accordingly. That matters most once records leave their machine for a central SIEM or a long-retention archive. Those have a wider audience than the operator who configured the sink.
+`process.executable` and the package `content/` and `launchers/` paths inside each `packages[]` entry are absolute filesystem paths. They sit under the invoking user's home directory, or under `$OCX_HOME` if set elsewhere. Size sink permissions and retention accordingly. That matters most once records leave their machine for a central SIEM or a long-retention archive. Those have a wider audience than the operator who configured the sink.
 :::
 
 ## Failure posture in detail \{#required-details\}

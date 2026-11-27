@@ -182,6 +182,10 @@ pub fn compose(inherited: &Inherited, spawn: &Spawn<'_>) -> Projected {
             if cfg!(windows) {
                 carry_system_root(&mut env, &Env::new());
             }
+            // A clean exec that drops the launcher depth lets two launchers that start each other fork forever.
+            if let Some(depth) = Env::new().get(ocx_env::__OCX_LAUNCHER_DEPTH.name) {
+                env.set(ocx_env::__OCX_LAUNCHER_DEPTH.name, depth);
+            }
             env
         }
         ExecMode::Layer | ExecMode::Isolate => Env::new(),
@@ -245,10 +249,16 @@ const SYSTEM_ROOT: &str = "SystemRoot";
 /// Removes what never reaches a child from the caller: credentials, hook-local bookkeeping and the
 /// received state, which [`project`] replaces with the one it encodes.
 fn remove_unforwarded(env: &mut Env) {
-    let unforwarded = [Propagation::Credential, Propagation::HookLocal, Propagation::State];
-    for key in unforwarded.into_iter().flat_map(ocx_env::keys_with) {
+    for key in unforwarded_keys() {
         env.remove(key);
     }
+}
+
+/// The variables no child inherits from the caller; shared with the direct launcher's sidecar.
+pub(crate) fn unforwarded_keys() -> impl Iterator<Item = &'static str> {
+    [Propagation::Credential, Propagation::HookLocal, Propagation::State]
+        .into_iter()
+        .flat_map(ocx_env::keys_with)
 }
 
 /// Sets `OCX_BINARY_PIN`, or removes it when the pin is unknown. Never writes an empty value.
@@ -380,7 +390,7 @@ fn record_of(start: &Env, value: &ComposedValue, owner: &Owner) -> Option<Applie
 }
 
 fn path_holds(existing: &OsStr, element: &str) -> bool {
-    let remaining = ocx_util::path::remove_segment(existing, OsStr::new(element));
+    let remaining = ocx_env_apply::remove_segment(existing, OsStr::new(element));
     let segments = |value: &OsStr| {
         std::env::split_paths(value)
             .filter(|segment| !segment.as_os_str().is_empty())

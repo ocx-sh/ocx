@@ -1,0 +1,49 @@
+name: Launcher Blobs
+
+# Runs every committed launcher blob under crates/ocx_store/src/shims/ on its own OS and architecture: the
+# bytes `ocx` embeds and ships, not a fresh build. `scripts/launcher_blob_check.sh` lays out a vendored
+# directory by hand, starts the blob from it and checks status and output; on Apple silicon it also
+# verifies the blob's code signature. Called by `build-windows-shims.yml` (a pull request or a push to
+# main that touches a blob or a build input) and by `deep-repo.yml` (the nightly deep tier, whose red
+# opens the template's `nightly-red` issue).
+#
+# The legs install nothing and build nothing: no ocx toolchain composes on macOS x64 or Windows arm64,
+# so the script runs directly rather than through `task rust:shim:blob:check`, which is its local form.
+
+on:
+  workflow_call:
+
+permissions: {}
+
+jobs:
+  run:
+    name: Run ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    strategy:
+      # One leg per blob; a red leg must not hide another platform's result.
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-24.04, blob: ocx-shim-x86_64-unknown-linux-musl }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-24.04-arm, blob: ocx-shim-aarch64-unknown-linux-musl }
+          - { target: x86_64-apple-darwin, os: macos-15-intel, blob: ocx-shim-x86_64-apple-darwin }
+          - { target: aarch64-apple-darwin, os: macos-latest, blob: ocx-shim-aarch64-apple-darwin }
+          - { target: x86_64-pc-windows-gnullvm, os: windows-latest, blob: ocx-shim-x86_64-pc-windows-gnullvm.exe }
+          - { target: aarch64-pc-windows-gnullvm, os: windows-11-arm, blob: ocx-shim-aarch64-pc-windows-gnullvm.exe }
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            crates/ocx_store/src/shims
+            scripts
+      - name: Run the committed blob
+        shell: bash
+        env:
+          BLOB: crates/ocx_store/src/shims/${{ matrix.blob }}
+          TARGET: ${{ matrix.target }}
+        run: bash scripts/launcher_blob_check.sh "$BLOB" "$TARGET"

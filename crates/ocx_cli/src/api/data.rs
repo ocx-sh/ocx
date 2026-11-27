@@ -48,6 +48,7 @@ pub mod sweep;
 pub mod tag;
 pub mod update;
 pub mod upgrade;
+pub mod vendor;
 pub mod verification;
 pub mod version;
 pub mod warmed_paths;

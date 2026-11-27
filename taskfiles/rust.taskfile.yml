@@ -552,15 +552,19 @@ tasks:
         vars: { TOOL: cargo-zigbuild, CRATE: cargo-zigbuild@0.22.3 }
 
   shim:build:
-    desc: Cross-build the stripped Windows shim blob (issue #66)
+    desc: Cross-build the stripped native launcher blob for one target (issue #66)
     summary: |
       Hermetically cross-builds crates/ocx_shim with the size-tuned `shim`
-      profile for one *-pc-windows-gnullvm target via cargo-zigbuild and
-      writes the stripped binary to target/<TARGET>/shim/ocx-shim.exe. The
+      profile for one target via cargo-zigbuild and writes the stripped binary
+      to target/<TARGET>/shim/ocx-shim (ocx-shim.exe on Windows). The
       committed blobs under crates/ocx_store/src/shims/ and the SHIM_SHA256
       constants are refreshed from this output in a dedicated PR (see
       shim.rs module docs and adr_shim_hermetic_zigbuild.md). Required var:
-      TARGET (x86_64-pc-windows-gnullvm | aarch64-pc-windows-gnullvm).
+      TARGET, one of x86_64-unknown-linux-musl, aarch64-unknown-linux-musl,
+      x86_64-apple-darwin, aarch64-apple-darwin, x86_64-pc-windows-gnullvm,
+      aarch64-pc-windows-gnullvm. The aarch64-apple-darwin blob needs the
+      ad-hoc code signature zig's linker writes; the CI size and signature
+      gates are in build-windows-shims.yml.
     requires:
       vars: [TARGET]
     deps:
@@ -603,6 +607,33 @@ tasks:
     cmd: >-
       RUSTFLAGS="-D warnings --remap-path-prefix={{.RUST_SRC_DIR}}=/rustc/{{.RUSTC_COMMIT_HASH}}"
       cargo zigbuild -p ocx_shim --profile shim --locked --target {{.TARGET}}
+
+  shim:inputs:check:
+    desc: Fail when a launcher build input changed since the committed blobs were cut
+    summary: |
+      Compares the digest scripts/shim_inputs.py takes over the non-source
+      inputs of the launcher blobs (toolchain, `shim` profile, dependency
+      entries and lock closure, the shim:build command, the Zig and
+      cargo-zigbuild pins) with crates/ocx_store/src/shim_inputs.sha256.
+      Source changes under crates/ocx_shim and crates/ocx_env_apply are
+      judged by build-windows-shims.yml's recency step instead.
+    cmd: python3 -I scripts/shim_inputs.py --check
+
+  shim:blob:check:
+    desc: Run one committed launcher blob natively from a hand-laid vendored directory
+    summary: |
+      Starts crates/ocx_store/src/shims/ocx-shim-<TARGET>[.exe] through
+      scripts/launcher_blob_check.sh: refusals, a started child, argument,
+      environment and exit-status pass-through, and on aarch64-apple-darwin the
+      code signature. Run it with the TARGET this host executes, e.g.
+      TARGET=x86_64-unknown-linux-musl. launcher-blobs.yml runs the same script
+      on every blob's own runner, calling it directly because those runners
+      carry no task.
+    requires:
+      vars: [TARGET]
+    vars:
+      EXT: '{{if contains "windows" .TARGET}}.exe{{end}}'
+    cmd: bash scripts/launcher_blob_check.sh crates/ocx_store/src/shims/ocx-shim-{{.TARGET}}{{.EXT}} {{.TARGET}}
 
   check:windows:
     desc: Cross-compile-check both Windows MSVC targets via Docker (cargo-xwin, cached)

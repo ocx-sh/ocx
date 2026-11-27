@@ -25,7 +25,12 @@ FINDING_KEYS = {"code", "pointer", "subjects"}
 OUTPUT_CODES = {f"B0{n}" for n in range(1, 9)} | {"D01", "U01"}
 ERRORS_CODES = OUTPUT_CODES | {"R01", "R02", "R03"}
 CLI_CODES = {f"G{n:02}" for n in range(1, 16)}
-CODES_BY_KIND = {"reports": OUTPUT_CODES, "errors": ERRORS_CODES, "cli": CLI_CODES}
+CODES_BY_KIND = {
+    "reports": OUTPUT_CODES,
+    "errors": ERRORS_CODES,
+    "vendor-manifest": OUTPUT_CODES,
+    "cli": CLI_CODES,
+}
 ALL_CODES = ERRORS_CODES | CLI_CODES
 
 # A named tuple, not `except A, B:`: CI's census parses this file with the
@@ -101,6 +106,7 @@ def subject_universe(kind: str, docs: list[dict]) -> set[str]:
         return {name for doc in docs for name in doc.get("reports", {})}
     if kind == "cli":
         return {"*"} | {path for doc in docs for path in command_paths(doc)}
+    # `errors` and `vendor-manifest` are whole documents: one document-wide subject.
     return {"*"}
 
 
@@ -199,6 +205,8 @@ def test_checker_reds_a_malformed_corpus(tmp_path: Path) -> None:
     assert corpus_problems(corpus) == []
 
     (corpus / "b02_property_removed" / "expect.json").unlink()
+    # The vendor-manifest case also covers the property-removed code; drop it so that code is uncovered.
+    (corpus / "vendor_manifest_property_removed" / "expect.json").unlink()
     expect = corpus / "g15_stdin_secret_changed" / "expect.json"
     doc = json.loads(expect.read_text(encoding="utf-8"))
     doc["findings"][0]["pointer"] = "/root/commands/9"

@@ -11,7 +11,7 @@ use super::types::{
     ExportReport, ImportReport, InspectReport, Installs, LocatedPaths, LockReport, LoginResult, LogoutResult,
     PackageCascadeCheck, PackageCascadeRepair, PackageDescriptions, PackageReceipt, PatchFreezeReport,
     PatchPublishReport, PatchSyncReport, PatchWhyReport, Paths, PruneOutcome, PushReport, RegenerateReport, Removed,
-    SelfSetupData, StatusReport, Tags, VerificationReport,
+    SelfSetupData, StatusReport, Tags, VendorReport, VerificationReport,
 };
 use super::wire::{Argv, Hyphen, Presence, Secret};
 
@@ -1793,6 +1793,32 @@ impl PackageUninstallArgs {
     }
 }
 
+/// The arguments of `ocx package vendor`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PackageVendorArgs {
+    /// Target platform to resolve packages against
+    pub platform: Option<String>,
+    /// Directory to write; absent or empty
+    pub output: PathBuf,
+    /// Write `manifest.json` only: no package content and no launcher
+    pub manifest_only: bool,
+    /// Create no symlink under the directory
+    pub omit_links: bool,
+    /// Packages to vendor, as `registry/repository:tag` or `registry/repository@sha256:<hex>`
+    pub packages: Vec<String>,
+}
+
+impl PackageVendorArgs {
+    /// Appends the arguments to `argv`.
+    pub fn push(&self, argv: &mut Argv) {
+        argv.flag("platform", &self.platform, Presence::Optional, &[]);
+        argv.flag("output", [&self.output], Presence::Required, &[]);
+        argv.switch("manifest-only", self.manifest_only);
+        argv.switch("omit-links", self.omit_links);
+        argv.positional("packages", &self.packages, Presence::Required, Hyphen::Refuse);
+    }
+}
+
 /// The arguments of `ocx package verify`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PackageVerifyArgs {
@@ -2369,6 +2395,35 @@ impl UpgradeArgs {
     }
 }
 
+/// The arguments of `ocx vendor`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct VendorArgs {
+    /// Target platform to resolve packages against
+    pub platform: Option<String>,
+    /// Restrict to the named group(s)
+    pub groups: Vec<String>,
+    /// Directory to write; absent or empty
+    pub output: PathBuf,
+    /// Write `manifest.json` only: no package content and no launcher
+    pub manifest_only: bool,
+    /// Create no symlink under the directory
+    pub omit_links: bool,
+    /// Tool names to vendor; every tool of the selected groups when omitted
+    pub names: Vec<String>,
+}
+
+impl VendorArgs {
+    /// Appends the arguments to `argv`.
+    pub fn push(&self, argv: &mut Argv) {
+        argv.flag("platform", &self.platform, Presence::Optional, &[]);
+        argv.flag("group", &self.groups, Presence::Optional, &[]);
+        argv.flag("output", [&self.output], Presence::Required, &[]);
+        argv.switch("manifest-only", self.manifest_only);
+        argv.switch("omit-links", self.omit_links);
+        argv.positional("names", &self.names, Presence::Optional, Hyphen::Refuse);
+    }
+}
+
 /// The arguments of `ocx version`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct VersionArgs {
@@ -2858,6 +2913,15 @@ impl Ocx {
         self.call("package uninstall", "Removed", argv)
     }
 
+    /// Write packages, launchers and a manifest to a relocatable directory
+    ///
+    /// Runs `ocx package vendor`.
+    pub fn package_vendor(&self, args: &PackageVendorArgs) -> Result<VendorReport, Error> {
+        let mut argv = self.argv(&["package", "vendor"]);
+        args.push(&mut argv);
+        self.call("package vendor", "VendorReport", argv)
+    }
+
     /// Verify a published package's Sigstore signature (keyless, via OCI Referrers)
     ///
     /// Runs `ocx package verify`.
@@ -3041,6 +3105,15 @@ impl Ocx {
         let mut argv = self.argv(&["upgrade"]);
         args.push(&mut argv);
         self.call_raw("upgrade", &["UpgradeReport", "VerboseUpgradeReport"], argv)
+    }
+
+    /// Write the project's tools, entry points and a manifest to a relocatable directory
+    ///
+    /// Runs `ocx vendor`.
+    pub fn vendor(&self, args: &VendorArgs) -> Result<VendorReport, Error> {
+        let mut argv = self.argv(&["vendor"]);
+        args.push(&mut argv);
+        self.call("vendor", "VendorReport", argv)
     }
 
     /// Print the version of OCX

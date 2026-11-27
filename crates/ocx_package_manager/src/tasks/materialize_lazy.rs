@@ -4,8 +4,6 @@
 //! First-invocation materialization of a deferred tool, the library half of `ocx launcher shim`.
 
 use std::collections::BTreeSet;
-use std::ffi::OsStr;
-use std::path::Path;
 
 use crate::concurrency::Concurrency;
 use crate::error::{Error, PackageError, PackageErrorKind};
@@ -14,71 +12,34 @@ use ocx_package::metadata::BinaryName;
 use ocx_project::lazy::LazyReport;
 
 use super::super::PackageManager;
-
-/// Extensions a Windows producer appends beside an extensionless launcher (`ocx_shim`'s `SIDECAR_PROBE_ORDER`).
-const GENERATED_SIBLING_EXTENSIONS: [&str; 2] = ["exe", "shimref"];
-
-/// Whether `file_name` is a generated sibling of another launcher in `listing`, not a claimed name.
-fn is_generated_sibling(file_name: &str, listing: &BTreeSet<&str>) -> bool {
-    let Some(extension) = Path::new(file_name).extension().and_then(OsStr::to_str) else {
-        return false;
-    };
-    if !GENERATED_SIBLING_EXTENSIONS.contains(&extension) {
-        return false;
-    }
-    // Only with its extensionless twin present, or a claimed `mytool.exe` is refused as unclaimed.
-    // `- 1` strips the dot; a file stem would misreport `python3.12` as `python3`.
-    listing.contains(&file_name[..file_name.len() - extension.len() - 1])
-}
+use super::common;
+use super::toolchain_names::{NotEnumerablePolicy, exposed_names};
 
 impl PackageManager {
-    /// The interface names a deferred tool's shim directory claims, one launcher per name under `bin/`.
+    /// The interface names the package's metadata declares: the exposed-name algebra [`PackageManager::prepare_lazy`]
+    /// writes a tree from, so a launcher any release or generation published is judged by one answer.
+    ///
+    /// Read offline through a read-only view, from the manifests and config blobs the home already holds; nothing
+    /// is fetched, so an unclaimed name never downloads and nothing is written under `index/`, `shims/` or any
+    /// launcher directory.
     ///
     /// # Errors
     ///
-    /// Propagates an I/O failure reading `bin/`; a non-UTF-8 or non-[`BinaryName`] file name is skipped.
-    pub async fn claimed_shim_names(&self, package: &ocx_oci::PinnedPackageRef) -> crate::Result<BTreeSet<BinaryName>> {
-        let bin = self.file_structure().shims.shim_dir(package).bin();
-        let mut entries = match tokio::fs::read_dir(&bin).await {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                // Empty fails closed: every name is refused, so nothing downloads for a collected shim.
-                log::debug!(
-                    "No shim launchers for '{package}' at {}; the claim set is empty.",
-                    bin.display()
-                );
-                return Ok(BTreeSet::new());
-            }
-            Err(error) => return Err(crate::error::file_error(&bin, error)),
-        };
-
-        // Whole listing first: sibling classification needs the other entries.
-        let mut listing: Vec<String> = Vec::new();
-        while let Some(entry) = entries
-            .next_entry()
+    /// [`Error::FindFailed`] when the metadata is not readable locally (a blob removed by hand): the refusal
+    /// names the pinned digest instead of guessing a claim set. `ocx clean` keeps every blob this read needs
+    /// while the deferred tree stands.
+    pub async fn claimed_shim_names(
+        &self,
+        package: &ocx_oci::PinnedPackageRef,
+        platform: ocx_oci::Platform,
+    ) -> crate::Result<BTreeSet<BinaryName>> {
+        let local = ocx_index::LocalIndex::new(ocx_index::LocalConfig {
+            index_store: self.effective_index_store(),
+        });
+        let view = self.offline_view(local).read_only_view();
+        declared_names(&view, package, platform)
             .await
-            .map_err(|error| crate::error::file_error(&bin, error))?
-        {
-            match entry.file_name().to_str() {
-                Some(file_name) => listing.push(file_name.to_owned()),
-                None => log::debug!("Ignoring non-UTF-8 shim launcher in {}", bin.display()),
-            }
-        }
-
-        let names: BTreeSet<&str> = listing.iter().map(String::as_str).collect();
-        let mut claimed = BTreeSet::new();
-        for file_name in &names {
-            if is_generated_sibling(file_name, &names) {
-                continue;
-            }
-            match BinaryName::try_from(*file_name) {
-                Ok(name) => {
-                    claimed.insert(name);
-                }
-                Err(error) => log::debug!("Ignoring '{file_name}' in {}: {error}", bin.display()),
-            }
-        }
-        Ok(claimed)
+            .map_err(|kind| Error::FindFailed(vec![PackageError::new(package.as_identifier().clone(), kind)]))
     }
 
     /// Materializes a deferred tool by digest, writing nothing under `index/`.
@@ -124,6 +85,31 @@ impl PackageManager {
             Error::FindFailed(vec![PackageError::new(identifier, PackageErrorKind::NotFound)])
         })
     }
+}
+
+/// `exposed_names` over the closure `view` can read, the same walk `prepare_lazy` runs.
+async fn declared_names(
+    view: &PackageManager,
+    package: &ocx_oci::PinnedPackageRef,
+    platform: ocx_oci::Platform,
+) -> Result<BTreeSet<BinaryName>, PackageErrorKind> {
+    let resolved = view.resolve(package.as_identifier(), platform.clone()).await?;
+    let metadata = common::load_config_metadata(view.index(), &resolved.pinned, &resolved.final_manifest).await?;
+    let config_digest = common::config_blob_digest(&resolved.final_manifest)?;
+    let nodes = common::walk_closure_nodes(
+        view.file_structure(),
+        view.index(),
+        true,
+        &resolved.pinned,
+        &metadata,
+        config_digest,
+        &platform,
+    )
+    .await?;
+    // `Refuse`, as `prepare_lazy` writes: a node that cannot be enumerated claims nothing.
+    Ok(exposed_names(&nodes, NotEnumerablePolicy::Refuse)?
+        .into_keys()
+        .collect())
 }
 
 #[cfg(test)]
@@ -215,91 +201,112 @@ mod tests {
         );
     }
 
-    /// The claim set is the `bin/` listing: one entry per generated launcher,
-    /// with the Windows `.exe`/`.shimref` siblings folded onto the same name
-    /// rather than reported as three.
-    ///
-    /// The fixture names the sidecar `.shimref`, which is the extension a shim
-    /// tree's `bin/` can actually hold — `.shim` belongs to `entrypoints/` and
-    /// never lands here. Reds on a skip list that names `.shim`: `cmake.shimref`
-    /// is then admitted as a fourth claimed name, and a Windows shim invoked as
-    /// `cmake` would be refused for a name the store does list.
-    #[tokio::test]
-    async fn claimed_shim_names_reads_the_bin_listing() {
-        let tmp = TempDir::new().unwrap();
-        let file_structure = FileStructure::with_root(tmp.path().to_path_buf());
-        let manager = manager_for(&file_structure);
-        let package = pinned(&ocx_oci::Algorithm::Sha256.hash(b"content"));
+    const HOST: &str = "linux/amd64";
 
-        let bin = file_structure.shims.shim_dir(&package).bin();
-        tokio::fs::create_dir_all(&bin).await.unwrap();
-        for launcher in ["cmake", "cmake.exe", "cmake.shimref", "python3.12", "ctest"] {
-            tokio::fs::write(bin.join(launcher), b"#!/bin/sh\n").await.unwrap();
-        }
-
-        let claimed = manager
-            .claimed_shim_names(&package)
-            .await
-            .expect("the listing is readable");
-        let names: Vec<&str> = claimed.iter().map(BinaryName::as_str).collect();
-        assert_eq!(
-            names,
-            ["cmake", "ctest", "python3.12"],
-            "a dotted name keeps its suffix; only the `.exe`/`.shimref` siblings are folded away"
+    /// Stages a single-platform package the way a pull leaves it in the blob store: an image index naming one
+    /// leaf, the leaf manifest and its metadata config blob. Returns the leaf's pinned identifier.
+    async fn stage_package(file_structure: &FileStructure, metadata: &str) -> ocx_oci::PinnedPackageRef {
+        let registry = "ocx.sh";
+        let config_bytes = metadata.as_bytes();
+        let config_digest = ocx_oci::Algorithm::Sha256.hash(config_bytes);
+        let leaf = format!(
+            r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{{"mediaType":"{}","digest":"{config_digest}","size":{}}},"layers":[]}}"#,
+            ocx_oci::media_type::MEDIA_TYPE_PACKAGE_METADATA_V1,
+            config_bytes.len(),
         );
-    }
-
-    /// A publisher may claim `mytool.exe` outright — `BinaryName` permits
-    /// interior dots and imposes no suffix rule — and `prepare_lazy` then writes
-    /// exactly one launcher, with no extensionless partner.
-    ///
-    /// Reds on a fold that keys on the extension alone: `mytool.exe` drops out
-    /// of the claim set while its launcher stays on `PATH`, so every invocation
-    /// is refused as unclaimed — which names the wrong defect, since the
-    /// publisher did claim it.
-    #[tokio::test]
-    async fn a_claimed_dot_exe_name_without_a_partner_is_not_a_generated_sibling() {
-        let tmp = TempDir::new().unwrap();
-        let file_structure = FileStructure::with_root(tmp.path().to_path_buf());
-        let manager = manager_for(&file_structure);
-        let package = pinned(&ocx_oci::Algorithm::Sha256.hash(b"content"));
-
-        let bin = file_structure.shims.shim_dir(&package).bin();
-        tokio::fs::create_dir_all(&bin).await.unwrap();
-        // `mytool.exe` stands alone; `cmake` + `cmake.exe` are a real pair.
-        for launcher in ["mytool.exe", "cmake", "cmake.exe"] {
-            tokio::fs::write(bin.join(launcher), b"#!/bin/sh\n").await.unwrap();
-        }
-
-        let claimed = manager
-            .claimed_shim_names(&package)
-            .await
-            .expect("the listing is readable");
-        let names: Vec<&str> = claimed.iter().map(BinaryName::as_str).collect();
-        assert_eq!(
-            names,
-            ["cmake", "mytool.exe"],
-            "a `.exe` is folded away only when the extensionless launcher it belongs to is present"
+        let leaf_digest = ocx_oci::Algorithm::Sha256.hash(leaf.as_bytes());
+        let image_index = format!(
+            r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"{leaf_digest}","size":{},"platform":{{"os":"linux","architecture":"amd64"}}}}]}}"#,
+            leaf.len(),
         );
-    }
-
-    /// An absent shim directory claims nothing, so every name is refused — the
-    /// fail-closed direction. Reds on a reader that treats "cannot enumerate"
-    /// as "admit everything".
-    #[tokio::test]
-    async fn an_absent_shim_directory_claims_no_names() {
-        let tmp = TempDir::new().unwrap();
-        let file_structure = FileStructure::with_root(tmp.path().to_path_buf());
-        let manager = manager_for(&file_structure);
-        let package = pinned(&ocx_oci::Algorithm::Sha256.hash(b"content"));
-
-        assert!(
-            manager
-                .claimed_shim_names(&package)
+        let top_digest = ocx_oci::Algorithm::Sha256.hash(image_index.as_bytes());
+        for (digest, bytes) in [
+            (&config_digest, config_bytes),
+            (&leaf_digest, leaf.as_bytes()),
+            (&top_digest, image_index.as_bytes()),
+        ] {
+            file_structure
+                .blobs
+                .write_blob(registry, digest, bytes)
                 .await
-                .expect("an absent directory is not an error")
-                .is_empty(),
-            "no shim directory means no claimed names"
+                .expect("stage a blob");
+        }
+        pinned(&top_digest)
+    }
+
+    /// The claim set is what the package metadata declares, whether or not any `deferred/` tree exists. Reds on a
+    /// reader that lists a launcher directory: a package whose trees are gone, or were never written by this
+    /// release, would claim nothing.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn claims_come_from_the_metadata_when_no_deferred_tree_exists() {
+        let tmp = TempDir::new().unwrap();
+        let file_structure = FileStructure::with_root(tmp.path().to_path_buf());
+        let manager = manager_for(&file_structure);
+        let package = stage_package(
+            &file_structure,
+            r#"{"type":"bundle","version":1,"binaries":["cmake","ctest"]}"#,
+        )
+        .await;
+
+        let claimed = manager
+            .claimed_shim_names(&package, HOST.parse().expect("platform"))
+            .await
+            .expect("the metadata blobs are in the store");
+        let names: Vec<&str> = claimed.iter().map(BinaryName::as_str).collect();
+        assert_eq!(names, ["cmake", "ctest"]);
+        assert!(
+            !file_structure.root().join("deferred").exists(),
+            "reading writes no tree"
         );
+        assert!(
+            !file_structure.root().join("index").exists(),
+            "reading writes nothing under index/"
+        );
+    }
+
+    /// Trees of an older release (`shims/`) and of another generation, carrying other names, change nothing.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn launcher_trees_with_other_names_do_not_change_the_claim_set() {
+        let tmp = TempDir::new().unwrap();
+        let file_structure = FileStructure::with_root(tmp.path().to_path_buf());
+        let manager = manager_for(&file_structure);
+        let package = stage_package(
+            &file_structure,
+            r#"{"type":"bundle","version":1,"binaries":["cmake","ctest"]}"#,
+        )
+        .await;
+
+        let older = file_structure.shims.shim_dir(&package).bin();
+        let other = ocx_store::launcher_generation::LauncherGeneration::from_hex("0123456789abcdef").expect("hex");
+        let other_bin = file_structure.deferred(&other).shim_dir(&package).bin();
+        for dir in [&older, &other_bin] {
+            std::fs::create_dir_all(dir).unwrap();
+            for file in ["ghost", "ghost.exe", "ghost.shimref", "ghost.launch"] {
+                std::fs::write(dir.join(file), b"x").unwrap();
+            }
+        }
+
+        let claimed = manager
+            .claimed_shim_names(&package, HOST.parse().expect("platform"))
+            .await
+            .expect("the metadata blobs are in the store");
+        let names: Vec<&str> = claimed.iter().map(BinaryName::as_str).collect();
+        assert_eq!(names, ["cmake", "ctest"], "no directory listing decides membership");
+    }
+
+    /// Metadata that is not in the store claims nothing and refuses with the manifest digest, never an empty set
+    /// that reads as "refuse" by accident nor an admit-everything one.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unreadable_metadata_is_an_error_and_downloads_nothing() {
+        let tmp = TempDir::new().unwrap();
+        let file_structure = FileStructure::with_root(tmp.path().to_path_buf());
+        let manager = manager_for(&file_structure);
+        let package = pinned(&ocx_oci::Algorithm::Sha256.hash(b"content"));
+
+        let error = manager
+            .claimed_shim_names(&package, HOST.parse().expect("platform"))
+            .await
+            .expect_err("nothing is staged for this digest");
+        assert!(matches!(error, Error::FindFailed(_)), "{error:?}");
     }
 }

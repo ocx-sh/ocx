@@ -59,10 +59,21 @@ BAZEL = ["ocx", "exec", "bazel", "--", "bazel"]
 NO_TEST_TOOLCHAIN = (
     "--@bazel_tools//tools/test:incompatible_use_default_test_toolchain=false"
 )
-# label -> triple fragment of the one platform where the target runs cases. On any
-# other platform its `#![cfg]` leaves it empty by design; there, and only there,
-# a 0-case summary is not an under-run.
-CFG_GATED = {"//crates/ocx_cli:macos_self_contained": "-apple-darwin"}
+# label -> triple fragment of the platform where the target runs cases, or `!fragment`
+# for every platform but that one. Elsewhere its `#![cfg]` leaves it empty by design;
+# there, and only there, a 0-case summary is not an under-run.
+CFG_GATED = {
+    "//crates/ocx_cli:macos_self_contained": "-apple-darwin",
+    "//crates/ocx_shim:batch_spawn": "-windows-",
+    "//crates/ocx_shim:direct_launch": "!-windows-",
+}
+
+
+def runs_cases_on(gate: str, target: str) -> bool:
+    """Whether a `CFG_GATED` gate compiles cases in on `target`."""
+    if gate.startswith("!"):
+        return gate[1:] not in target
+    return gate in target
 SKIP = "--skip="
 # Skipped testcases that shell out to `cargo metadata`/`cargo tree`. They read
 # the workspace, not the platform, and need its submodules, which a native
@@ -370,7 +381,7 @@ def cmd_run(a: argparse.Namespace) -> None:
             r = run_one(t, root, a.timeout)
             # A libtest summary with 0 cases is a target that ran nothing.
             gate = CFG_GATED.get(t["label"])
-            empty_ok = gate is not None and gate not in manifest["target"]
+            empty_ok = gate is not None and not runs_cases_on(gate, manifest["target"])
             if r["ok"] and r["passed"] + r["failed"] == 0 and not empty_ok:
                 r["ok"], r["log"] = False, r["log"] + "\nthe target ran 0 cases"
             results.append(r)

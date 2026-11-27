@@ -46,6 +46,11 @@ macro_rules! execution_record_version {
         "1"
     };
 }
+macro_rules! vendor_manifest_version {
+    () => {
+        2
+    };
+}
 
 pub mod cli;
 pub mod docs;
@@ -58,6 +63,9 @@ const PROJECT_LOCK_ID: &str = schema_id!("project-lock", project_lock_version!()
 /// `$id` of the execution-record schema; the version is the record's in-band `schemaVersion`.
 const EXECUTION_RECORD_ID: &str = schema_id!("execution-record", execution_record_version!());
 
+/// `$id` of the vendor-manifest schema; the version is `ocx_package::vendor::SCHEMA_VERSION`.
+const VENDOR_MANIFEST_ID: &str = schema_id!("vendor-manifest", vendor_manifest_version!());
+
 /// Top-level `$comment` of the project-lock schema, telling editors not to hand-author `ocx.lock`.
 const PROJECT_LOCK_COMMENT: &str = "machine-generated; format may evolve across OCX versions — do not hand-edit";
 
@@ -67,7 +75,7 @@ const EXECUTION_RECORD_COMMENT: &str =
 
 /// Generate the JSON Schema for `kind`, or `None` for an unknown kind.
 ///
-/// Kinds: `metadata`, `config`, `project`, `project-lock`, `patch`, `reports`, `execution-record`, `errors`,
+/// Kinds: `metadata`, `config`, `project`, `project-lock`, `patch`, `reports`, `execution-record`, `vendor-manifest`, `errors`,
 /// `cli` (the grammar document itself) and `cli-schema` (the JSON Schema of `cli`).
 /// `$id` is `https://ocx.sh/schemas/<kind>/<version>.json`: `v1`, except `project-lock` at `v4`; `cli` has none.
 pub fn schema_for(kind: &str) -> Option<String> {
@@ -104,6 +112,11 @@ pub fn schema_for(kind: &str) -> Option<String> {
             Some(EXECUTION_RECORD_COMMENT),
             Shape::Serialized,
         )),
+        "vendor-manifest" => Some(pin_const(
+            generate_schema::<ocx_package::vendor::VendorManifest>(VENDOR_MANIFEST_ID, None, Shape::Serialized),
+            "/properties/schema_version",
+            vendor_manifest_version!(),
+        )),
         "reports" => Some(reports::reports_schema()),
         "errors" => Some(errors::errors_schema()),
         "cli" => Some(cli::cli_json()),
@@ -118,6 +131,16 @@ enum Shape {
     Deserialized,
     /// Written by ocx; `Option` fields are corrected to what serde emits.
     Serialized,
+}
+
+/// Adds `const: version` at `pointer` — the version is a plain integer field in Rust, so schemars cannot express it.
+fn pin_const(schema: String, pointer: &str, version: u32) -> String {
+    // SAFETY: `schema` is the generator's own JSON output.
+    let mut value: serde_json::Value = serde_json::from_str(&schema).expect("generated schema is JSON");
+    if let Some(node) = value.pointer_mut(pointer).and_then(|n| n.as_object_mut()) {
+        node.insert("const".to_owned(), version.into());
+    }
+    serde_json::to_string_pretty(&value).expect("serde_json::Value is always serializable to a JSON string")
 }
 
 fn generate_schema<T: schemars::JsonSchema>(id: &str, comment: Option<&str>, shape: Shape) -> String {
@@ -164,6 +187,29 @@ mod tests {
             "bump `execution_record_version!` with the record's `SCHEMA_VERSION`"
         );
         assert_eq!(errors_version!(), ocx::error_document::ERRORS_SCHEMA_VERSION);
+        assert_eq!(vendor_manifest_version!(), ocx_package::vendor::SCHEMA_VERSION);
+    }
+
+    /// The published `schema_version` const is the manifest's own number, so a consumer can pin it.
+    #[test]
+    fn vendor_manifest_schema_pins_schema_version_const() {
+        let schema = schema_for("vendor-manifest").expect("vendor-manifest schema exists");
+        let value: serde_json::Value = serde_json::from_str(&schema).expect("schema parses");
+        assert_eq!(
+            value.pointer("/properties/schema_version/const"),
+            Some(&serde_json::json!(2))
+        );
+        assert_eq!(
+            value.get("$id").and_then(|v| v.as_str()),
+            Some("https://ocx.sh/schemas/vendor-manifest/v2.json")
+        );
+    }
+
+    /// The manifest omits an unset optional (IC-04), so no field may admit `null`.
+    #[test]
+    fn vendor_manifest_schema_admits_no_null() {
+        let schema = schema_for("vendor-manifest").expect("vendor-manifest schema exists");
+        assert!(!schema.contains("\"null\""), "an optional field is absent, never null");
     }
 
     /// The metadata schema is the published wire form plus exactly one

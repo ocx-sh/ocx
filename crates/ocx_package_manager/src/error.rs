@@ -129,7 +129,7 @@ pub enum Error {
     #[exit(delegate = 0)]
     Archive(#[from] ocx_util::archive::Error),
 
-    /// A string baked into a generated launcher contains a launcher-unsafe character.
+    /// A string baked into a launch record contains a character the writer refuses.
     #[error("launcher-unsafe character {character:?} in {value:?}; {}", launcher_unsafe_hint(*character))]
     #[exit(
         DataError,
@@ -138,7 +138,7 @@ pub enum Error {
     )]
     LauncherUnsafeCharacter { value: String, character: char },
 
-    /// A path baked verbatim into a generated launcher or sidecar is not valid UTF-8; `path` is its lossy rendering.
+    /// A path baked verbatim into a launch record is not valid UTF-8; `path` is its lossy rendering.
     #[error("path baked into a generated launcher is not valid UTF-8: {path:?}")]
     #[exit(
         DataError,
@@ -147,7 +147,23 @@ pub enum Error {
     )]
     LauncherPathNotUtf8 { path: String },
 
-    /// A toolchain root baked into a rendered launcher or its `.exec` sidecar is not absolute.
+    /// A launch record breaks a rule the launcher enforces when it reads the record, so no launcher is written with it.
+    ///
+    /// `path` is the file the record was meant for; the broken rule is the [`RecordError`](ocx_env_apply::launch::RecordError) cause, which the chain walk
+    /// prints, so the message does not repeat it.
+    #[error("the launcher would refuse the launch record for {}", path.display())]
+    #[exit(
+        DataError,
+        slug = "launcher_record_refused",
+        summary = "A launch record breaks a rule the launcher enforces when it reads it"
+    )]
+    LauncherRecordRefused {
+        path: std::path::PathBuf,
+        #[source]
+        source: ocx_env_apply::launch::RecordError,
+    },
+
+    /// A toolchain root baked into a launch record is not absolute.
     #[error("toolchain home is not an absolute path: {value:?}")]
     #[exit(
         DataError,
@@ -178,9 +194,19 @@ pub enum Error {
     /// `#[source]` alone leaves every `to_string()` naming only the path.
     #[error("internal file error for '{path}': {cause}", path = .0.display(), cause = .1)]
     #[exit(
-        IoError,
-        slug = "package_manager_internal_file",
-        summary = "Reading or writing an internal package file failed"
+        with = internal_file_row,
+        rows(
+            (
+                PermissionDenied,
+                slug = "permission_denied",
+                summary = "The operating system refused access to a file or directory"
+            ),
+            (
+                IoError,
+                slug = "package_manager_internal_file",
+                summary = "Reading or writing an internal package file failed"
+            ),
+        )
     )]
     InternalFile(std::path::PathBuf, std::io::Error),
 
@@ -276,6 +302,14 @@ pub enum Error {
     #[error(transparent)]
     #[exit(delegate = 0)]
     ProjectRegistry(#[from] ocx_project::registry::error::Error),
+}
+
+/// An internal file refused for permission answers 77, the caller obtains it; any other kind keeps 74.
+fn internal_file_row(error: &Error, [denied, other]: [Row; 2]) -> Pick<'_> {
+    match error {
+        Error::InternalFile(_, cause) if cause.kind() == std::io::ErrorKind::PermissionDenied => Pick::row(denied),
+        _ => Pick::row(other),
+    }
 }
 
 /// A batch answers as its first member when that member decides the exit code, else defers to the walker.
@@ -601,6 +635,26 @@ pub enum DependencyError {
 
 #[cfg(test)]
 mod tests {
+    /// An internal file refused for permission answers 77 (obtain it); any other I/O kind stays 74.
+    #[test]
+    fn internal_file_answers_by_io_kind() {
+        use ocx_exit::{ClassifyErrorKind, Detail, ExitCode};
+        let verdict = |kind: std::io::ErrorKind| {
+            let error = Error::InternalFile("/home/launchers".into(), std::io::Error::from(kind));
+            let Detail::Fixed(entry) = error.kind_detail() else {
+                panic!("InternalFile names its slug directly");
+            };
+            (error.classify().expect("InternalFile always has a code"), entry.slug)
+        };
+        assert_eq!(
+            verdict(std::io::ErrorKind::PermissionDenied),
+            (ExitCode::PermissionDenied, "permission_denied")
+        );
+        for kind in [std::io::ErrorKind::Other, std::io::ErrorKind::ReadOnlyFilesystem] {
+            assert_eq!(verdict(kind), (ExitCode::IoError, "package_manager_internal_file"));
+        }
+    }
+
     #[test]
     fn not_installed_names_the_digest_and_the_install_command() {
         let identifier = ocx_oci::PackageRef::new_registry("cmake", "example.com");
@@ -848,12 +902,11 @@ impl From<ocx_oci::media_type::UnsupportedMediaType> for Error {
 
 fn launcher_unsafe_hint(c: char) -> &'static str {
     match c {
-        '\'' => {
-            "single quotes cannot appear in installation paths — relocate $OCX_HOME to a directory whose absolute path has no apostrophe"
+        '\'' => "a launch record does not take an apostrophe in a path; use a directory whose path has none",
+        '"' => "a launch record does not take a double quote in a path; use a directory whose path has none",
+        '\n' | '\r' | '\0' => {
+            "a launch record cannot hold a line break or NUL byte in a path; use a directory whose path has none"
         }
-        '"' => "double quotes break Windows launcher quoting — relocate the path to a directory without `\"`",
-        '%' => "percent triggers cmd.exe variable expansion — relocate the path to a directory without `%`",
-        '\n' | '\r' | '\0' => "control characters cannot be embedded in launcher scripts",
         _ => "remove the offending character from the path",
     }
 }

@@ -16,7 +16,7 @@ on: # zizmor: ignore[dangerous-triggers] workflow_run reports other runs and che
       - "verify-deep"
       - "License Compliance"
       - "Deploy Docs"
-      - "Build Windows Shims"
+      - "Launcher Build"
       - "Backfill"
       - "Release"
       - "Canary"

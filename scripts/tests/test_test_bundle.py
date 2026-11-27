@@ -103,6 +103,17 @@ def test_a_cfg_gated_target_may_be_empty_only_off_its_platform(tmp_path: Path) -
     assert label in failed
 
 
+def test_a_negated_cfg_gate_may_be_empty_only_on_the_excluded_platform(tmp_path: Path) -> None:
+    label = "//crates/ocx_shim:direct_launch"
+    empty = [{"label": "//a:a"}, {"label": label, "main": 0}]
+    on_windows = make_bundle(tmp_path, empty, target="x86_64-pc-windows-gnullvm")
+    assert run(tmp_path, on_windows) is None
+    on_mac = make_bundle(tmp_path, empty, target="aarch64-apple-darwin")
+    failed = run(tmp_path, on_mac)
+    assert failed is not None
+    assert label in failed
+
+
 def test_a_manifest_short_of_its_candidates_is_red(tmp_path: Path) -> None:
     bundle = make_bundle(tmp_path, [{"label": "//a:a"}], candidates=2)
     failed = run(tmp_path, bundle)

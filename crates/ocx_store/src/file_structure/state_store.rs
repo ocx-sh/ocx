@@ -18,6 +18,11 @@ const RENDER_STAMP_FILE: &str = "render_stamp.json";
 /// Any other `v` reads as absent, never an error, or a prompt fails over pure derived state.
 const RENDER_STAMP_VERSION: u8 = 1;
 
+/// A second file beside the v1 stamp, so an older ocx never reads a stamp it does not understand.
+const RENDER_STAMP_V2_FILE: &str = "render_stamp.v2.json";
+
+const RENDER_STAMP_V2_VERSION: u8 = 2;
+
 // Project keys canonicalize the FILE, then take its parent, never the directory, or a symlinked `ocx.toml` is keyed at the link.
 // Reuse `register_project_dir_best_effort` (`dunce`, not `tokio::fs::canonicalize`); a second derivation re-opens that hole.
 
@@ -64,10 +69,15 @@ impl BinEntryStamp {
     }
 }
 
+/// A zero id is what a volume without a usable file index reports; it would equal itself on every file, so it is no identity.
+fn no_zero_identity(id: u64) -> Option<u64> {
+    (id != 0).then_some(id)
+}
+
 #[cfg(unix)]
 fn file_id_of(_path: &Path, metadata: &std::fs::Metadata) -> Option<u64> {
     use std::os::unix::fs::MetadataExt as _;
-    Some(metadata.ino())
+    no_zero_identity(metadata.ino())
 }
 
 /// Opens a handle because `MetadataExt::file_index()` is unstable (rust-lang/rust#63010).
@@ -102,7 +112,7 @@ fn file_id_of(path: &Path, _metadata: &std::fs::Metadata) -> Option<u64> {
         );
         return None;
     }
-    Some((u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow))
+    no_zero_identity((u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow))
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -148,6 +158,78 @@ impl RenderStamp {
             v: RENDER_STAMP_VERSION,
             home,
             scope,
+            names: bin_fingerprint.keys().cloned().collect(),
+            bin_fingerprint,
+            link_fingerprint,
+        }
+    }
+
+    #[must_use]
+    pub fn version(&self) -> u8 {
+        self.v
+    }
+}
+
+/// What a render left on disk under the unified launcher model; `render_stamp.v2.json`, written last.
+///
+/// `shell_dir` and `previous_shell_dir` are the two render directories `ocx clean` keeps. No field is `Option`-shaped,
+/// for the reason [`RenderStamp`] gives.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RenderStampV2 {
+    // Private so [`Self::new`] is the only writer of the wire version.
+    v: u8,
+
+    pub home: PathBuf,
+
+    pub scope: RenderStampScope,
+
+    /// Name of the directory under `shells/` that `active` named at the commit point, e.g. `default-8d41c2e07a95b3f6`.
+    pub shell_dir: String,
+
+    /// The name `active` named before; `default` when an older ocx rendered last, empty on a first render.
+    pub previous_shell_dir: String,
+
+    /// `render_fingerprint` of the desired state, 64 hex.
+    pub fingerprint: String,
+
+    /// The `LauncherGeneration` of the writer.
+    pub generation: String,
+
+    /// Always [`Self::bin_fingerprint`]'s key set, derived by [`Self::new`].
+    pub names: BTreeSet<String>,
+
+    /// Over `shells/<shell_dir>/bin`, records included.
+    pub bin_fingerprint: BTreeMap<String, BinEntryStamp>,
+
+    pub link_fingerprint: BTreeMap<String, String>,
+}
+
+impl RenderStampV2 {
+    /// A stamp at the version this binary writes, with `names` derived from `bin_fingerprint`.
+    #[must_use]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one parameter per stamp field; a wrapper type would only restate them"
+    )]
+    pub fn new(
+        home: PathBuf,
+        scope: RenderStampScope,
+        shell_dir: String,
+        previous_shell_dir: String,
+        fingerprint: String,
+        generation: String,
+        bin_fingerprint: BTreeMap<String, BinEntryStamp>,
+        link_fingerprint: BTreeMap<String, String>,
+    ) -> Self {
+        Self {
+            v: RENDER_STAMP_V2_VERSION,
+            home,
+            scope,
+            shell_dir,
+            previous_shell_dir,
+            fingerprint,
+            generation,
             names: bin_fingerprint.keys().cloned().collect(),
             bin_fingerprint,
             link_fingerprint,
@@ -257,6 +339,74 @@ impl StateStore {
     /// Never under `projects/<key>/`: `ocx clean` removes the `$OCX_HOME` key's directory, so every clean would delete it.
     pub fn global_render_stamp_file(&self) -> PathBuf {
         self.root.join(RENDER_STAMP_FILE)
+    }
+
+    /// The v2 stamp's path for a project; ungated like [`Self::render_stamp_file`].
+    pub fn render_stamp_v2_file(&self, key: &str) -> PathBuf {
+        self.project_state_dir(key).join(RENDER_STAMP_V2_FILE)
+    }
+
+    /// Directly under `state/` for the reason [`Self::global_render_stamp_file`] gives.
+    pub fn global_render_stamp_v2_file(&self) -> PathBuf {
+        self.root.join(RENDER_STAMP_V2_FILE)
+    }
+
+    /// `target`'s v2 stamp, or `None` on every failure, an unknown `v` included; blocking.
+    #[must_use]
+    pub fn render_stamp_v2(&self, target: RenderStampTarget<'_>) -> Option<RenderStampV2> {
+        let path = self.render_stamp_v2_path(target);
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                log::debug!("No usable v2 render stamp at '{}': {e}", path.display());
+                return None;
+            }
+        };
+        let stamp: RenderStampV2 = match serde_json::from_slice(&bytes) {
+            Ok(stamp) => stamp,
+            Err(e) => {
+                log::debug!(
+                    "Render stamp '{}' did not parse, treating as absent: {e}",
+                    path.display()
+                );
+                return None;
+            }
+        };
+        if stamp.v != RENDER_STAMP_V2_VERSION {
+            log::debug!(
+                "Render stamp '{}' is version {}, which this ocx does not recognise; treating as absent",
+                path.display(),
+                stamp.v
+            );
+            return None;
+        }
+        Some(stamp)
+    }
+
+    /// Atomically replaces `target`'s v2 stamp; blocking.
+    ///
+    /// # Errors
+    ///
+    /// Serialization or the write fails.
+    pub fn set_render_stamp_v2(&self, target: RenderStampTarget<'_>, stamp: &RenderStampV2) -> Result<()> {
+        let path = self.render_stamp_v2_path(target);
+        let bytes = serde_json::to_vec_pretty(stamp)
+            .map_err(|e| ocx_util::error::FileError::new(&path, std::io::Error::other(e)))?;
+        let parent = path.parent().ok_or_else(|| {
+            ocx_util::error::FileError::new(
+                &path,
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, "render stamp path has no parent"),
+            )
+        })?;
+        std::fs::create_dir_all(parent).map_err(|e| ocx_util::error::FileError::new(parent, e))?;
+        ocx_util::fs::write_private_file_atomic(&path, &bytes).map_err(|e| ocx_util::error::FileError::new(&path, e))
+    }
+
+    fn render_stamp_v2_path(&self, target: RenderStampTarget<'_>) -> PathBuf {
+        match target {
+            RenderStampTarget::Project(key) => self.render_stamp_v2_file(key),
+            RenderStampTarget::Global => self.global_render_stamp_v2_file(),
+        }
     }
 
     /// `target`'s stamp, or `None` on every failure, which callers answer by re-rendering; blocking.
@@ -1129,6 +1279,22 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_zero_file_identity_is_no_identity() {
+        assert_eq!(super::no_zero_identity(0), None);
+        assert_eq!(super::no_zero_identity(7), Some(7));
+        // A stamp read back with `Some(0)` never equals a freshly taken one (always `None` or non-zero),
+        // so the gate's `file_id.is_some() && identity == stamped` falls through to size plus hash.
+        let tmp = tempfile::tempdir().unwrap();
+        let entry = tmp.path().join("cmake");
+        std::fs::write(&entry, b"x").unwrap();
+        let metadata = std::fs::metadata(&entry).unwrap();
+        let mut stamped = BinEntryStamp::from_metadata(&entry, &metadata, "1".repeat(64));
+        stamped.file_id = Some(0);
+        let fresh = BinEntryStamp::from_metadata(&entry, &metadata, "1".repeat(64));
+        assert_ne!(fresh, stamped);
+    }
+
     /// C-003, C-061 — [`BinEntryStamp::from_metadata`] is the one derivation
     /// of the stat pair, so WP-7's producer and WP-9's comparator cannot
     /// disagree about what a "file id" is.
@@ -1186,7 +1352,7 @@ mod tests {
         let linked = BinEntryStamp::from_metadata(&link, &std::fs::metadata(&link).unwrap(), "1".repeat(64));
         assert_eq!(
             linked.file_id, stamp.file_id,
-            "C-003 — a hardlink IS the same file, and proving a trampoline `.exe` against the ShimBinStore \
+            "C-003 — a hardlink IS the same file, and proving a trampoline `.exe` against the launcher \
              blob is exactly that comparison"
         );
 
@@ -1239,5 +1405,90 @@ mod tests {
             None,
             "C-003 — an unrecognised `v` must read as absent, never as an error"
         );
+    }
+
+    // ── Render stamp v2 ──────────────────────────────────────────────────────
+
+    fn sample_render_stamp_v2() -> super::RenderStampV2 {
+        super::RenderStampV2::new(
+            PathBuf::from("/w/proj/.ocx/toolchain"),
+            RenderStampScope::Project(PathBuf::from("/w/proj")),
+            "default-8d41c2e07a95b3f6".to_string(),
+            "default".to_string(),
+            "a".repeat(64),
+            "d7c9115eb03568da".to_string(),
+            [("cmake".to_string(), sample_bin_entry(120, "1".repeat(64).as_str()))]
+                .into_iter()
+                .collect(),
+            [(
+                "default/cmake".to_string(),
+                "/ocx/packages/sha256/aa/bbccdd".to_string(),
+            )]
+            .into_iter()
+            .collect(),
+        )
+    }
+
+    #[test]
+    fn v2_stamp_files_sit_beside_the_v1_files_under_their_own_names() {
+        let store = StateStore::new("/ocx/state");
+
+        assert_eq!(
+            store.render_stamp_v2_file(SAMPLE_PROJECT_KEY),
+            PathBuf::from("/ocx/state/projects/0123456789abcdef/render_stamp.v2.json")
+        );
+        assert_eq!(
+            store.global_render_stamp_v2_file(),
+            PathBuf::from("/ocx/state/render_stamp.v2.json")
+        );
+        assert_ne!(
+            store.render_stamp_v2_file(SAMPLE_PROJECT_KEY),
+            store.render_stamp_file(SAMPLE_PROJECT_KEY)
+        );
+    }
+
+    #[test]
+    fn a_v2_stamp_round_trips_through_the_store_for_both_tiers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = StateStore::new(tmp.path().join("state"));
+        let stamp = sample_render_stamp_v2();
+        assert_eq!(stamp.version(), 2);
+        assert_eq!(stamp.names, ["cmake".to_string()].into_iter().collect::<BTreeSet<_>>());
+
+        for target in [
+            RenderStampTarget::Project(SAMPLE_PROJECT_KEY),
+            RenderStampTarget::Global,
+        ] {
+            assert_eq!(store.render_stamp_v2(target), None, "absent before the write");
+            store.set_render_stamp_v2(target, &stamp).unwrap();
+            assert_eq!(store.render_stamp_v2(target), Some(stamp.clone()));
+        }
+        assert_eq!(
+            store.render_stamp(RenderStampTarget::Global),
+            None,
+            "a v2 write leaves the v1 file alone"
+        );
+    }
+
+    #[test]
+    fn a_v2_stamp_with_an_unknown_version_reads_as_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = StateStore::new(tmp.path().join("state"));
+        let path = store.global_render_stamp_v2_file();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+        let mut value = serde_json::to_value(sample_render_stamp_v2()).unwrap();
+        std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(
+            store.render_stamp_v2(RenderStampTarget::Global).is_some(),
+            "the recognised version must read back, or the refusal below proves nothing"
+        );
+
+        value
+            .as_object_mut()
+            .unwrap()
+            .insert("v".to_string(), serde_json::json!(3));
+        std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        assert_eq!(store.render_stamp_v2(RenderStampTarget::Global), None);
     }
 }

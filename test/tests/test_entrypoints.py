@@ -1,14 +1,16 @@
 """Acceptance tests — Entry points happy path + error cases.
 
-Post-flatten layout: per-repo `current` symlink targets the package root, and
-`<current>/entrypoints` exposes the generated launchers (no separate
-`entrypoints-current` symlink).
+Layout: per-repo `current` symlink targets the package root, and
+`<current>/launchers/<G>` exposes the generated launchers (`NAME[.exe]` +
+`NAME.launch`); `entrypoints/` is only ever written by an older release.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -16,6 +18,7 @@ from pathlib import Path
 
 import pytest
 
+from src import previous_release
 from src.helpers import make_package, make_package_with_entrypoints
 from src.registry import fetch_platform_manifest_digest
 from src.runner import OcxRunner, PackageInfo, current_platform
@@ -45,9 +48,17 @@ def ocx_home_symlinks(ocx: OcxRunner, pkg: PackageInfo) -> Path:
     return Path(str(ocx.ocx_home)) / "symlinks" / reg / pkg.repo
 
 
+def current_launchers_root(ocx: OcxRunner, pkg: PackageInfo) -> Path:
+    """`current/launchers`: the parent of the single `<G>` launcher directory."""
+    return ocx_home_symlinks(ocx, pkg) / "current" / "launchers"
+
+
 def current_entrypoints(ocx: OcxRunner, pkg: PackageInfo) -> Path:
-    """Path to the launcher directory reached via the per-repo `current` anchor."""
-    return ocx_home_symlinks(ocx, pkg) / "current" / "entrypoints"
+    """The single `<G>` launcher directory reached via the per-repo `current` anchor."""
+    root = current_launchers_root(ocx, pkg)
+    generations = sorted(root.iterdir()) if root.is_dir() else []
+    assert len(generations) == 1, f"expected exactly one launchers/<G> under {root}; found {generations}"
+    return generations[0]
 
 
 # ---------------------------------------------------------------------------
@@ -58,7 +69,7 @@ def current_entrypoints(ocx: OcxRunner, pkg: PackageInfo) -> Path:
 def test_entrypoint_launcher_files_created_after_select(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    """install --select wires `current` so launchers are reachable at `current/entrypoints/`."""
+    """install --select wires `current` so launchers are reachable at `current/launchers/<G>/`."""
     pkg = make_package_with_entrypoints(
         ocx,
         unique_repo,
@@ -70,18 +81,21 @@ def test_entrypoint_launcher_files_created_after_select(
 
     entrypoints_dir = current_entrypoints(ocx, pkg)
     assert entrypoints_dir.is_dir(), (
-        f"current/entrypoints/ must exist after install --select: {entrypoints_dir}"
+        f"current/launchers/<G>/ must exist after install --select: {entrypoints_dir}"
     )
-    assert (entrypoints_dir / "hello").exists(), (
-        f"unix launcher must be reachable at current/entrypoints/hello: {entrypoints_dir / 'hello'}"
+    launcher = entrypoints_dir / ("hello.exe" if sys.platform == "win32" else "hello")
+    assert launcher.exists(), (
+        f"launcher must be reachable at current/launchers/<G>/{launcher.name}: {launcher}"
     )
+    assert (entrypoints_dir / "hello.launch").is_file(), "the record NAME.launch must sit beside the launcher"
+    assert not (entrypoints_dir.parents[1] / "entrypoints").exists(), "entrypoints/ is never written"
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="Unix launcher test")
 def test_entrypoint_unix_launcher_is_executable(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    """Unix launcher file must exist (via current/entrypoints) and be executable (+x)."""
+    """Unix launcher file must exist (via current/launchers/<G>) and be executable (+x)."""
     pkg = make_package_with_entrypoints(
         ocx,
         unique_repo,
@@ -120,12 +134,12 @@ def test_deselect_removes_current_symlink(
 def test_install_without_entrypoints_leaves_current_entrypoints_absent(
     ocx: OcxRunner, published_package: PackageInfo
 ) -> None:
-    """A package without entrypoints must not produce a current/entrypoints dir."""
+    """A package without entrypoints must not produce a current/launchers dir."""
     pkg = published_package
     ocx.plain("package", "install", "--select", pkg.short)
-    entrypoints_dir = current_entrypoints(ocx, pkg)
-    assert not entrypoints_dir.exists(), (
-        f"current/entrypoints/ must not exist for pkg without entrypoints: {entrypoints_dir}"
+    launchers_root = current_launchers_root(ocx, pkg)
+    assert not launchers_root.exists(), (
+        f"current/launchers/ must not exist for pkg without entrypoints: {launchers_root}"
     )
 
 
@@ -204,10 +218,10 @@ def test_install_without_select_does_not_trigger_collision_check(
 def test_reselect_to_package_without_entrypoints_drops_entrypoints_dir(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    """Re-selecting to a package without entrypoints must leave `current/entrypoints` absent.
+    """Re-selecting to a package without entrypoints must leave `current/launchers` absent.
 
     The flat layout achieves this via a single `current` flip: pointing it at a
-    package root that has no `entrypoints/` child is enough — the launchers
+    package root that has no `launchers/` child is enough — the launchers
     from the previous package are no longer reachable through `current`.
     """
     pkg_with = make_package_with_entrypoints(
@@ -220,14 +234,15 @@ def test_reselect_to_package_without_entrypoints_drops_entrypoints_dir(
 
     ocx.plain("package", "install", "--select", pkg_with.short)
     entrypoints_dir = current_entrypoints(ocx, pkg_with)
+    launchers_root = current_launchers_root(ocx, pkg_with)
     assert entrypoints_dir.is_dir(), (
-        f"precondition: pkg_with must materialize current/entrypoints/: {entrypoints_dir}"
+        f"precondition: pkg_with must materialize current/launchers/<G>/: {entrypoints_dir}"
     )
 
     ocx.plain("package", "install", "--select", pkg_without.short)
-    assert not entrypoints_dir.exists(), (
-        f"re-selecting to a package without entrypoints must leave current/entrypoints/ unreachable; "
-        f"still present at {entrypoints_dir}"
+    assert not launchers_root.exists(), (
+        f"re-selecting to a package without entrypoints must leave current/launchers/ unreachable; "
+        f"still present at {launchers_root}"
     )
 
 
@@ -410,16 +425,16 @@ def test_launcher_dispatches_divergent_command(
 
 
 # ---------------------------------------------------------------------------
-# Synthetic PATH entry: entrypoints/ added to env
+# Synthetic PATH entry: launchers/<G> added to env
 # ---------------------------------------------------------------------------
 
 
 def test_root_package_entrypoints_appear_in_self_env(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    """A root package with entrypoints must have its own entrypoints/ dir in PATH via ocx env.
+    """A root package with entrypoints must have its own launchers/<G> dir in PATH via ocx env.
 
-    The visible-package pipeline emits a synthetic `PATH ⊳ <pkg_root>/entrypoints`
+    The visible-package pipeline emits a synthetic `PATH ⊳ <pkg_root>/launchers/<G>`
     entry so that the installed launchers are reachable after `eval $(ocx shell env ...)`.
     """
     pkg = make_package_with_entrypoints(
@@ -434,16 +449,16 @@ def test_root_package_entrypoints_appear_in_self_env(
     env_result = ocx.json("package", "env", pkg.short)
     path_entries = [e["value"] for e in env_result["items"] if e["key"] == "PATH"]
 
-    # At least one PATH entry must contain the entrypoints/ subdirectory.
-    assert any("entrypoints" in v for v in path_entries), (
-        f"expected an entrypoints/ PATH entry in env output; PATH values: {path_entries}"
+    assert any(_LAUNCHERS_PATH_ENTRY.search(v) for v in path_entries), (
+        f"expected a launchers/<G> PATH entry in env output; PATH values: {path_entries}"
     )
+    assert not any(v.endswith(("/entrypoints", "\\entrypoints")) for v in path_entries), path_entries
 
 
 def test_synthetic_entrypoints_path_emitted_after_declared_bin(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    """The synthetic `entrypoints/` PATH entry must be emitted AFTER the
+    """The synthetic `launchers/<G>` PATH entry must be emitted AFTER the
     declared `${installPath}/bin` PATH entry in `ocx env` output.
 
     `ocx env` lists PATH-typed entries in apply order. Consumers process them
@@ -485,11 +500,10 @@ def test_synthetic_entrypoints_path_emitted_after_declared_bin(
     assert path_entries, f"expected PATH entries in env output: {env_result}"
 
     # On Windows the bin segment uses backslashes; match either separator.
-    # Anchor on the path tail — the pytest tmp_path dir name contains
-    # "entrypoints" because the test name does, so a loose substring check
-    # would also match the bin/ entry.
+    # Anchor on the path tail: the pytest tmp_path dir name contains
+    # "entrypoints" because the test name does.
     syn_idx = next(
-        (i for i, v in path_entries if v.endswith(("/entrypoints", "\\entrypoints"))),
+        (i for i, v in path_entries if _LAUNCHERS_PATH_ENTRY.search(v)),
         None,
     )
     bin_idx = next(
@@ -498,7 +512,7 @@ def test_synthetic_entrypoints_path_emitted_after_declared_bin(
     )
 
     assert syn_idx is not None, (
-        f"synthetic entrypoints PATH entry missing; PATH values: {[v for _, v in path_entries]}"
+        f"synthetic launchers/<G> PATH entry missing; PATH values: {[v for _, v in path_entries]}"
     )
     assert bin_idx is not None, (
         f"declared bin/ PATH entry missing; PATH values: {[v for _, v in path_entries]}"
@@ -516,7 +530,7 @@ def test_exec_dep_launcher_via_path(
     """exec A -- cmake executes B's cmake binary when A declares B as a public dep.
 
     B's cmake entrypoint must be reachable through the synthetic PATH entry that
-    the visible-package pipeline emits for B's entrypoints/ directory. The
+    the visible-package pipeline emits for B's launchers/<G> directory. The
     synth-PATH entry is added LAST in the env list (and so ends up FIRST in the
     resolved PATH), so exec finds B's launcher first; the launcher re-enters via
     `ocx launcher exec` and execs B's `bin/cmake` by absolute path — the real
@@ -573,7 +587,7 @@ def test_exec_resolves_native_exe_shim_on_windows(
     """ocx exec resolves the native `<name>.exe` shim — no PATHEXT inject.
 
     Post-cutover (`adr_windows_exe_shim.md` Axis C → C2) the Windows launcher
-    is `<name>.exe` + `<name>.shim` only; no `.cmd` is emitted and OCX no
+    is `<name>.exe` + `<name>.launch` only; no `.cmd` is emitted and OCX no
     longer injects `.CMD` into the child PATHEXT. `.EXE` is unconditionally in
     the default Windows PATHEXT, so even an env whose PATHEXT lacks `.CMD`
     entirely resolves the shim and runs the entrypoint.
@@ -593,6 +607,12 @@ def test_exec_resolves_native_exe_shim_on_windows(
     # `.EXE` is always in the default Windows PATHEXT.
     stripped_env = copy.copy(ocx.env)
     stripped_env["PATHEXT"] = ".EXE;.BAT;.COM"
+
+    launchers = sorted((_package_dir(ocx, pkg) / "launchers").iterdir())
+    assert len(launchers) == 1 and sorted(p.name for p in launchers[0].iterdir()) == [
+        "hello.exe",
+        "hello.launch",
+    ], f"the Windows launcher directory holds NAME.exe and NAME.launch only: {launchers}"
 
     cmd = [str(ocx.binary), "package", "exec", pkg.short, "--", "hello"]
     result = subprocess.run(
@@ -1103,3 +1123,187 @@ def test_self_env_token_in_baked_args_is_refused_at_runtime(
         f"an UndefinedSelfEnvRef here would mean args were resolved against an empty env "
         f"scope instead of gated on the capability set; stderr:\n{result.stderr}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Entry points through launcher generations (adr_unified_launcher.md 3.4, 6.2)
+# ---------------------------------------------------------------------------
+
+_LAUNCHERS_PATH_ENTRY = re.compile(r"[/\\]launchers[/\\][0-9a-f]{16}$")
+_GENERATION = re.compile(r"[0-9a-f]{16}")
+
+
+def _launcher_dir(ocx: OcxRunner, pkg: PackageInfo) -> Path:
+    """The `<package dir>/launchers/<G>` PATH entry of `pkg`'s composed environment."""
+    values = [e["value"] for e in ocx.json("package", "env", pkg.short)["items"] if e["key"] == "PATH"]
+    dirs = [Path(v) for v in values if _LAUNCHERS_PATH_ENTRY.search(v)]
+    assert len(dirs) == 1, f"expected exactly one launchers/<G> PATH entry; PATH values: {values}"
+    assert dirs[0].is_dir(), f"the launchers/<G> PATH entry must exist after first use: {dirs[0]}"
+    return dirs[0]
+
+
+def _package_dir(ocx: OcxRunner, pkg: PackageInfo) -> Path:
+    return Path(ocx.json("package", "which", pkg.short)["paths"][pkg.short]["path"])
+
+
+def _tree_hash(root: Path) -> str:
+    """Names, modes, bytes and symlink targets of every entry under `root`."""
+    digest = hashlib.sha256()
+    for path in sorted(root.rglob("*")):
+        st = path.lstat()
+        digest.update(f"{path.relative_to(root).as_posix()}\0{oct(st.st_mode)}\0".encode())
+        if path.is_symlink():
+            digest.update(os.readlink(path).encode())
+        elif path.is_file():
+            digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+def _install_with_previous_release(ocx: OcxRunner, pkg: PackageInfo) -> Path:
+    """Install `pkg` with the `ocx-previous` binary; return the package directory."""
+    old = previous_release.resolve()
+    result = subprocess.run(
+        [str(old), "package", "install", "-p", pkg.platform, pkg.fq],
+        capture_output=True, text=True, env=dict(ocx.env), stdin=subprocess.DEVNULL,
+        timeout=120, check=False,
+    )
+    assert result.returncode == 0, f"previous release install failed: {result.stderr}"
+    package_dir = _package_dir(ocx, pkg)
+    assert (package_dir / "entrypoints").is_dir(), "precondition: the previous release writes entrypoints/"
+    assert not (package_dir / "launchers").exists(), "precondition: the previous release writes no launchers/"
+    return package_dir
+
+
+def _bare_path_env(ocx: OcxRunner, *launcher_dirs: Path) -> dict[str, str]:
+    """An environment whose PATH is the launcher directories, then the ocx under test."""
+    env = dict(ocx.env)
+    env["PATH"] = os.pathsep.join([*map(str, launcher_dirs), str(ocx.binary.parent), env.get("PATH", "")])
+    return env
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Unix bare-name start")
+def test_entry_point_named_ocx_starts_the_real_ocx_without_a_loop(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """an entry point named `ocx`, started by bare name, skips itself and runs to the end."""
+    pkg = make_package_with_entrypoints(ocx, unique_repo, tmp_path, entrypoints=["ocx"], bins=["ocx"])
+    ocx.plain("package", "install", pkg.short)
+    launchers = _launcher_dir(ocx, pkg)
+
+    result = subprocess.run(
+        ["ocx", "extra"], capture_output=True, text=True, env=_bare_path_env(ocx, launchers),
+        stdin=subprocess.DEVNULL, timeout=30, check=False,
+    )
+    assert result.returncode == 0, f"rc={result.returncode} stderr={result.stderr.strip()!r}"
+    assert f"entry-point-ocx {pkg.marker} extra" in result.stdout, result.stdout
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Unix bare-name start")
+def test_two_packages_with_an_ocx_entry_point_on_path_start_the_real_ocx(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """with two `ocx` launchers on PATH the first runs; the other counts as a launcher, not the real ocx."""
+    pkg_a = make_package_with_entrypoints(
+        ocx, f"{unique_repo}_a", tmp_path, entrypoints=["ocx"], bins=["ocx"], file_prefix="a"
+    )
+    pkg_b = make_package_with_entrypoints(
+        ocx, f"{unique_repo}_b", tmp_path, entrypoints=["ocx"], bins=["ocx"], file_prefix="b"
+    )
+    ocx.plain("package", "install", pkg_a.short)
+    ocx.plain("package", "install", pkg_b.short)
+    dir_a, dir_b = _launcher_dir(ocx, pkg_a), _launcher_dir(ocx, pkg_b)
+
+    result = subprocess.run(
+        ["ocx"], capture_output=True, text=True, env=_bare_path_env(ocx, dir_b, dir_a),
+        stdin=subprocess.DEVNULL, timeout=30, check=False,
+    )
+    assert result.returncode == 0, f"rc={result.returncode} stderr={result.stderr.strip()!r}"
+    assert pkg_b.marker in result.stdout, f"the first launcher on PATH must run; stdout={result.stdout!r}"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Unix entry point scripts")
+def test_previous_release_install_gains_launchers_dir_at_next_exec_and_keeps_entrypoints(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """first use publishes launchers/<G> whole; entrypoints/ is byte-identical."""
+    pkg = make_package_with_entrypoints(ocx, unique_repo, tmp_path, entrypoints=["hello"], bins=["hello"])
+    package_dir = _install_with_previous_release(ocx, pkg)
+    before = _tree_hash(package_dir / "entrypoints")
+
+    result = ocx.plain("package", "exec", pkg.short, "--", "hello", "arg")
+    assert f"entry-point-hello {pkg.marker} arg" in result.stdout, result.stdout
+
+    generations = sorted((package_dir / "launchers").iterdir()) if (package_dir / "launchers").is_dir() else []
+    assert len(generations) == 1 and _GENERATION.fullmatch(generations[0].name), (
+        f"first use must publish exactly one launchers/<G>; found {generations}"
+    )
+    gen = generations[0]
+    assert sorted(p.name for p in gen.iterdir()) == ["hello", "hello.launch"]
+    assert (gen / "hello").stat().st_nlink == 1, "a home launcher is a byte copy, link count 1"
+    record = json.loads((gen / "hello.launch").read_text(encoding="utf-8"))
+    assert record["kind"] == "package", record
+    assert _tree_hash(package_dir / "entrypoints") == before, "entrypoints/ must never be written"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Unix entry point scripts")
+def test_concurrent_first_use_publishes_one_launchers_dir_and_both_succeed(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """two `ocx exec` at once on a package without launchers/<G> both exit 0, one complete <G>, no debris."""
+    pkg = make_package_with_entrypoints(ocx, unique_repo, tmp_path, entrypoints=["hello"], bins=["hello"])
+    package_dir = _install_with_previous_release(ocx, pkg)
+
+    cmd = [str(ocx.binary), "package", "exec", pkg.short, "--", "hello"]
+    procs = [
+        subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                         env=dict(ocx.env), stdin=subprocess.DEVNULL)
+        for _ in range(2)
+    ]
+    outputs = [p.communicate(timeout=60) for p in procs]
+    for proc, (out, err) in zip(procs, outputs, strict=True):
+        assert proc.returncode == 0, f"rc={proc.returncode} stderr={err.strip()!r}"
+        assert pkg.marker in out, out
+
+    entries = sorted(p.name for p in (package_dir / "launchers").iterdir()) if (package_dir / "launchers").is_dir() else []
+    assert len(entries) == 1 and _GENERATION.fullmatch(entries[0]), (
+        f"exactly one <G> and no .staging-*/temp debris under launchers/; found {entries}"
+    )
+    assert sorted(p.name for p in (package_dir / "launchers" / entries[0]).iterdir()) == ["hello", "hello.launch"]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Unix entry point scripts")
+def test_private_dependency_binary_is_reachable_from_the_program_an_entry_point_starts(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """Case (a): an entry point whose target calls a private dependency's binary succeeds via launchers/<G> on PATH."""
+    pkg_b = make_package(ocx, f"{unique_repo}_b", "1.0.0", tmp_path, bins=["bsecret"])
+    pkg_a = make_package_with_entrypoints(
+        ocx, f"{unique_repo}_a", tmp_path, entrypoints=["tool"], bins=["tool"], file_prefix="a",
+        dependencies=[_dep_entry_ep(ocx, pkg_b, visibility="private")],
+        extra_files={"bin/tool": '#!/bin/sh\nexec bsecret "$@"\n'},
+    )
+    ocx.plain("package", "install", pkg_a.short)
+    launchers = _launcher_dir(ocx, pkg_a)
+
+    result = subprocess.run(
+        ["tool"], capture_output=True, text=True, env=_bare_path_env(ocx, launchers),
+        stdin=subprocess.DEVNULL, timeout=30, check=False,
+    )
+    assert result.returncode == 0, f"rc={result.returncode} stderr={result.stderr.strip()!r}"
+    assert pkg_b.marker in result.stdout, f"the private dependency's binary must run; stdout={result.stdout!r}"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Unix PATH lookup")
+def test_entry_point_is_started_by_bare_name_through_the_composed_path(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """Case (b): a bare `hello` resolves to <pkg dir>/launchers/<G>/hello, not entrypoints/."""
+    pkg = make_package_with_entrypoints(ocx, unique_repo, tmp_path, entrypoints=["hello"], bins=["hello"])
+    ocx.plain("package", "install", pkg.short)
+    launchers = _launcher_dir(ocx, pkg)
+    assert launchers.parent == _package_dir(ocx, pkg) / "launchers", launchers
+
+    resolved = ocx.plain("package", "exec", pkg.short, "--", "sh", "-c", "command -v hello")
+    assert resolved.stdout.strip() == str(launchers / "hello"), resolved.stdout
+    ran = ocx.plain("package", "exec", pkg.short, "--", "sh", "-c", "hello bare-arg")
+    assert f"entry-point-hello {pkg.marker} bare-arg" in ran.stdout, ran.stdout

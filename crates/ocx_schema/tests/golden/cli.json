@@ -3309,6 +3309,183 @@
       },
       {
         "path": [
+          "vendor"
+        ],
+        "version": 1,
+        "summary": "Write the project's tools, entry points and a manifest to a relocatable directory",
+        "hidden": false,
+        "external_subcommands": false,
+        "output": [
+          {
+            "type": "report",
+            "root": "VendorReport"
+          }
+        ],
+        "args": [
+          {
+            "id": "platform",
+            "long": "platform",
+            "short": "p",
+            "value": {
+              "type": "platform"
+            },
+            "required": false,
+            "required_unless": [],
+            "num_args": {
+              "min": 1,
+              "max": 1
+            },
+            "global": false,
+            "hidden": false,
+            "default": [],
+            "requires": [],
+            "conflicts": [],
+            "overrides": [],
+            "require_equals": false,
+            "allow_hyphen_values": false,
+            "last": false,
+            "trailing_var_arg": false,
+            "stdin_secret": false,
+            "help": "Target platform to resolve packages against"
+          },
+          {
+            "id": "groups",
+            "long": "group",
+            "short": "g",
+            "value": {
+              "type": "string"
+            },
+            "required": false,
+            "required_unless": [],
+            "num_args": {
+              "min": 1,
+              "max": 1
+            },
+            "repeatable": true,
+            "global": false,
+            "hidden": false,
+            "default": [],
+            "requires": [],
+            "conflicts": [],
+            "overrides": [],
+            "require_equals": false,
+            "allow_hyphen_values": false,
+            "last": false,
+            "trailing_var_arg": false,
+            "stdin_secret": false,
+            "help": "Restrict to the named group(s)"
+          },
+          {
+            "id": "output",
+            "long": "output",
+            "short": "o",
+            "value": {
+              "type": "path"
+            },
+            "required": true,
+            "required_unless": [],
+            "num_args": {
+              "min": 1,
+              "max": 1
+            },
+            "global": false,
+            "hidden": false,
+            "default": [],
+            "requires": [],
+            "conflicts": [],
+            "overrides": [],
+            "require_equals": false,
+            "allow_hyphen_values": false,
+            "last": false,
+            "trailing_var_arg": false,
+            "stdin_secret": false,
+            "help": "Directory to write; absent or empty"
+          },
+          {
+            "id": "manifest_only",
+            "long": "manifest-only",
+            "value": {
+              "type": "switch"
+            },
+            "required": false,
+            "required_unless": [],
+            "num_args": {
+              "min": 0,
+              "max": 0
+            },
+            "global": false,
+            "hidden": false,
+            "default": [
+              "false"
+            ],
+            "requires": [],
+            "conflicts": [],
+            "overrides": [],
+            "require_equals": false,
+            "allow_hyphen_values": false,
+            "last": false,
+            "trailing_var_arg": false,
+            "stdin_secret": false,
+            "help": "Write `manifest.json` only: no package content and no launcher"
+          },
+          {
+            "id": "omit_links",
+            "long": "omit-links",
+            "value": {
+              "type": "switch"
+            },
+            "required": false,
+            "required_unless": [],
+            "num_args": {
+              "min": 0,
+              "max": 0
+            },
+            "global": false,
+            "hidden": false,
+            "default": [
+              "false"
+            ],
+            "requires": [],
+            "conflicts": [],
+            "overrides": [],
+            "require_equals": false,
+            "allow_hyphen_values": false,
+            "last": false,
+            "trailing_var_arg": false,
+            "stdin_secret": false,
+            "help": "Create no symlink under the directory"
+          },
+          {
+            "id": "names",
+            "position": 1,
+            "value": {
+              "type": "string"
+            },
+            "required": false,
+            "required_unless": [],
+            "num_args": {
+              "min": 1
+            },
+            "repeatable": true,
+            "global": false,
+            "hidden": false,
+            "default": [],
+            "requires": [],
+            "conflicts": [],
+            "overrides": [],
+            "require_equals": false,
+            "allow_hyphen_values": false,
+            "last": false,
+            "trailing_var_arg": false,
+            "stdin_secret": false,
+            "help": "Tool names to vendor; every tool of the selected groups when omitted"
+          }
+        ],
+        "groups": [],
+        "commands": []
+      },
+      {
+        "path": [
           "launcher"
         ],
         "version": 0,
@@ -10177,6 +10354,157 @@
           {
             "path": [
               "package",
+              "vendor"
+            ],
+            "version": 1,
+            "summary": "Write packages, launchers and a manifest to a relocatable directory",
+            "hidden": false,
+            "external_subcommands": false,
+            "output": [
+              {
+                "type": "report",
+                "root": "VendorReport"
+              }
+            ],
+            "args": [
+              {
+                "id": "platform",
+                "long": "platform",
+                "short": "p",
+                "value": {
+                  "type": "platform"
+                },
+                "required": false,
+                "required_unless": [],
+                "num_args": {
+                  "min": 1,
+                  "max": 1
+                },
+                "global": false,
+                "hidden": false,
+                "default": [],
+                "requires": [],
+                "conflicts": [],
+                "overrides": [],
+                "require_equals": false,
+                "allow_hyphen_values": false,
+                "last": false,
+                "trailing_var_arg": false,
+                "stdin_secret": false,
+                "help": "Target platform to resolve packages against"
+              },
+              {
+                "id": "output",
+                "long": "output",
+                "short": "o",
+                "value": {
+                  "type": "path"
+                },
+                "required": true,
+                "required_unless": [],
+                "num_args": {
+                  "min": 1,
+                  "max": 1
+                },
+                "global": false,
+                "hidden": false,
+                "default": [],
+                "requires": [],
+                "conflicts": [],
+                "overrides": [],
+                "require_equals": false,
+                "allow_hyphen_values": false,
+                "last": false,
+                "trailing_var_arg": false,
+                "stdin_secret": false,
+                "help": "Directory to write; absent or empty"
+              },
+              {
+                "id": "manifest_only",
+                "long": "manifest-only",
+                "value": {
+                  "type": "switch"
+                },
+                "required": false,
+                "required_unless": [],
+                "num_args": {
+                  "min": 0,
+                  "max": 0
+                },
+                "global": false,
+                "hidden": false,
+                "default": [
+                  "false"
+                ],
+                "requires": [],
+                "conflicts": [],
+                "overrides": [],
+                "require_equals": false,
+                "allow_hyphen_values": false,
+                "last": false,
+                "trailing_var_arg": false,
+                "stdin_secret": false,
+                "help": "Write `manifest.json` only: no package content and no launcher"
+              },
+              {
+                "id": "omit_links",
+                "long": "omit-links",
+                "value": {
+                  "type": "switch"
+                },
+                "required": false,
+                "required_unless": [],
+                "num_args": {
+                  "min": 0,
+                  "max": 0
+                },
+                "global": false,
+                "hidden": false,
+                "default": [
+                  "false"
+                ],
+                "requires": [],
+                "conflicts": [],
+                "overrides": [],
+                "require_equals": false,
+                "allow_hyphen_values": false,
+                "last": false,
+                "trailing_var_arg": false,
+                "stdin_secret": false,
+                "help": "Create no symlink under the directory"
+              },
+              {
+                "id": "packages",
+                "position": 1,
+                "value": {
+                  "type": "identifier"
+                },
+                "required": true,
+                "required_unless": [],
+                "num_args": {
+                  "min": 1
+                },
+                "repeatable": true,
+                "global": false,
+                "hidden": false,
+                "default": [],
+                "requires": [],
+                "conflicts": [],
+                "overrides": [],
+                "require_equals": false,
+                "allow_hyphen_values": false,
+                "last": false,
+                "trailing_var_arg": false,
+                "stdin_secret": false,
+                "help": "Packages to vendor, as `registry/repository:tag` or `registry/repository@sha256:<hex>`"
+              }
+            ],
+            "groups": [],
+            "commands": []
+          },
+          {
+            "path": [
+              "package",
               "verify"
             ],
             "version": 2,
@@ -14959,7 +15287,7 @@
       "name": "OCX_BINARY_PIN",
       "value": "path",
       "visibility": "public",
-      "summary": " Absolute path to the running `ocx`, set on every spawn so a child OCX runs the",
+      "summary": " Absolute path to the running `ocx`, set on every spawn so a child OCX runs the same",
       "secret": false,
       "accepts_reference": false,
       "propagation": "binary_pin",
@@ -15613,6 +15941,16 @@
       "secret": false,
       "accepts_reference": false,
       "propagation": "hook_local",
+      "on_invalid": "default"
+    },
+    {
+      "name": "__OCX_LAUNCHER_DEPTH",
+      "value": "integer",
+      "visibility": "plumbing",
+      "summary": " How many launchers have started one another in this process chain; a launcher refuses past the limit.",
+      "secret": false,
+      "accepts_reference": false,
+      "propagation": "user_input",
       "on_invalid": "default"
     },
     {

@@ -895,7 +895,7 @@ fn relative_to(executable: &Path, root: &Path) -> Option<PathBuf> {
     executable.strip_prefix(root).ok().map(Path::to_path_buf)
 }
 
-/// `launcher` under a package's `entrypoints/`, `binary` under its `content/`.
+/// `launcher` under a package's `launchers/<generation>/` (or an older `entrypoints/`), `binary` under its `content/`.
 ///
 /// Scans forward, so a package's own `content/entrypoints/` still reports `binary`.
 /// Takes the store-relative path from [`relative_to`], so containment and kind read one spelling.
@@ -903,7 +903,8 @@ fn executable_kind(store_relative: &Path) -> Option<&'static str> {
     store_relative
         .components()
         .find_map(|component| match component.as_os_str().to_str()? {
-            "entrypoints" => Some("launcher"),
+            // `entrypoints/` stays for a package an older `ocx` installed.
+            "entrypoints" | "launchers" => Some("launcher"),
             "content" => Some("binary"),
             _ => None,
         })
@@ -1782,6 +1783,18 @@ mod tests {
                 .get("sh.ocx.package")
                 .is_some_and(|purl| purl.starts_with("pkg:oci/cmake@")),
             "{block:?}",
+        );
+    }
+
+    #[test]
+    fn kind_is_launcher_when_the_resolved_path_is_under_a_launcher_generation() {
+        let mut frame = Frame::project();
+        frame.executable = PathBuf::from("/home/ci/.ocx/packages/cmake/launchers/d7c9115eb03568da/cmake");
+        let block = executable_block(&frame.inputs(project_scope()));
+        assert_eq!(
+            block.get("sh.ocx.kind").map(String::as_str),
+            Some("launcher"),
+            "{block:?}"
         );
     }
 

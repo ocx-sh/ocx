@@ -16,8 +16,8 @@ from pathlib import Path
 import pytest
 
 from src import exec_state
-from src.helpers import make_package_with_entrypoints
-from src.runner import OcxRunner, registry_dir
+from src.launcher_fixtures import install_entrypoint_package
+from src.runner import OcxRunner
 
 pytestmark = [
     pytest.mark.command("exec"),
@@ -26,8 +26,8 @@ pytestmark = [
 
 CARRIER = "__OCX_ENV_STATE"
 TIMEOUT = 60
-# POSIX sh reports a failed exec of a missing program with 127.
-EXIT_COMMAND_NOT_FOUND = 127
+EXIT_CONFIG = 78  # ocx_exit::ExitCode::ConfigError
+EXIT_IO_ERROR = 74  # the launcher's exec of a missing pin; ocx_exit::ExitCode::IoError
 
 
 def _sh() -> str:
@@ -397,16 +397,7 @@ def test_an_empty_ambient_path_still_composes_the_project_path(
 
 
 def _install_launcher(ocx: OcxRunner, unique_repo: str, tmp_path: Path) -> Path:
-    pkg = make_package_with_entrypoints(
-        ocx, unique_repo, tmp_path, entrypoints=["hello"], bins=["hello"]
-    )
-    ocx.plain("package", "install", "--select", pkg.short)
-    launcher = (
-        Path(str(ocx.ocx_home)) / "symlinks" / registry_dir(ocx.registry) / pkg.repo
-        / "current" / "entrypoints" / "hello"
-    )  # fmt: skip
-    assert launcher.exists(), launcher
-    return launcher
+    return install_entrypoint_package(ocx, unique_repo, tmp_path).launcher
 
 
 def _launcher_env(ocx: OcxRunner, **extra: str) -> dict[str, str]:
@@ -431,7 +422,7 @@ def test_a_launcher_with_the_pin_runs_although_no_ocx_is_on_path(
         "the host has an ocx on the minimal PATH"
     )
     result = subprocess.run(
-        [_sh(), str(launcher)], env=_launcher_env(ocx, OCX_BINARY_PIN=str(ocx.binary)),
+        [str(launcher)], env=_launcher_env(ocx, OCX_BINARY_PIN=str(ocx.binary)),
         capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=TIMEOUT, check=False,
     )  # fmt: skip
     assert result.returncode == 0, result.stderr
@@ -444,11 +435,11 @@ def test_a_launcher_with_neither_pin_nor_ocx_on_path_fails_fast_and_names_ocx(
     """No pin and no ocx on ``PATH``: a prompt non-zero exit that names the missing program."""
     launcher = _install_launcher(ocx, unique_repo, tmp_path)
     result = subprocess.run(
-        [_sh(), str(launcher)], env=_launcher_env(ocx),
+        [str(launcher)], env=_launcher_env(ocx),
         capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=TIMEOUT, check=False,
     )  # fmt: skip
-    assert result.returncode == EXIT_COMMAND_NOT_FOUND, result.stderr
-    assert "exec: ocx: not found" in result.stderr, (
+    assert result.returncode == EXIT_CONFIG, result.stderr
+    assert "no ocx found on PATH" in result.stderr, (
         f"the failure must name the missing ocx: {result.stderr!r}"
     )
 
@@ -460,18 +451,10 @@ def test_a_launcher_whose_pin_names_a_deleted_build_fails_fast_and_names_the_pat
     launcher = _install_launcher(ocx, unique_repo, tmp_path)
     gone = tmp_path / "deleted-build" / "ocx"
     result = subprocess.run(
-        [_sh(), str(launcher)], env=_launcher_env(ocx, OCX_BINARY_PIN=str(gone)),
+        [str(launcher)], env=_launcher_env(ocx, OCX_BINARY_PIN=str(gone)),
         capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=TIMEOUT, check=False,
     )  # fmt: skip
-    # How `sh` reports an exec of a missing absolute path is the shell's own:
-    # dash exits 127 "not found", macOS /bin/sh (bash in POSIX mode) exits 126
-    # "cannot execute". The launcher must fail exactly as the host `sh` does.
-    reference = subprocess.run(
-        [_sh(), "-c", 'exec "$1"', "sh", str(gone)],
-        capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=TIMEOUT, check=False,
-    )  # fmt: skip
-    assert reference.returncode in (EXIT_COMMAND_NOT_FOUND, 126), reference.stderr
-    assert result.returncode == reference.returncode, result.stderr
+    assert result.returncode == EXIT_IO_ERROR, result.stderr
     assert str(gone) in result.stderr, f"the failure must name the pin: {result.stderr!r}"
 
 

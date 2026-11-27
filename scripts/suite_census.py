@@ -128,7 +128,19 @@ SUITE = REPO_ROOT / "test"
 #: -> 3800 / 147 / 2 / 268 with the telemetry acceptance modules: `tests` +274, `parametrized` +44,
 #: `skipped` +1 (the read-only `state` dir case in `test_telemetry_export.py` needs POSIX and a non-root
 #: user); `xfailed` is the live count, which was already below the pin.
-PINNED = {"tests": 3800, "skipped": 147, "xfailed": 2, "parametrized": 268}
+#: skipped 147 -> 155: the launcher acceptance cases skip on the platform that has no such launcher
+#: (`test_entrypoints.py` Unix-only entry point scripts, `test_entrypoints_crossplat.py` one more
+#: per-platform launcher case, `test_exec_env_compat.py` the `.exec` trampoline on non-Windows,
+#: `test_lazy_loading.py` the `/bin/sh` stub ocx on `win32`); two skips were renamed, none hide a red.
+#: This pin counts static skip markers on every platform; `test/SKIP_CEILING` counts runtime skips on Linux, so the
+#: pin moved by 8 where the ceiling moved by 3.
+#: -> 3803 / 157 with three `test_lazy_loading.py` cases for deferred-tool launchers of an older release or another
+#: launcher generation: `tests` +3, `skipped` +2 (the older release's launcher is a POSIX shell script, so two of the
+#: three skip on `win32`).
+#: -> 3806 / 158 with three more `test_lazy_loading.py` cases (a deferred tool surviving `ocx clean`, the refusal of a
+#: hand-removed manifest, the re-exec loop guard through an older tree): `tests` +3, `skipped` +1 (the last skips on
+#: `win32`).
+PINNED = {"tests": 3806, "skipped": 158, "xfailed": 2, "parametrized": 268}
 
 #: Which way each number may move on its own. DEC-38 pinned all four to
 #: equality for the duration of the crate split, so that a refactor could not

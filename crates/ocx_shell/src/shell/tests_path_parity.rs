@@ -4,8 +4,8 @@
 //! A-19 / C-021 — the one PATH-element comparison rule, pinned across the two
 //! halves that implement it.
 //!
-//! The in-process appliers ([`ocx_util::path::move_to_front`] /
-//! [`remove_segment`](ocx_util::path::remove_segment)) and the emitted
+//! The in-process appliers ([`ocx_env_apply::move_to_front`] /
+//! [`remove_segment`](ocx_env_apply::remove_segment)) and the emitted
 //! shell snippets ([`Shell::export_path`](crate::shell::Shell::export_path) /
 //! [`remove_list_element`](crate::shell::Shell::remove_list_element)) must
 //! decide "same element?" identically, because the reconciler's
@@ -22,8 +22,8 @@
 
 use std::ffi::{OsStr, OsString};
 
-use ocx_util::path::PATH_SEPARATOR as SEP;
-use ocx_util::path::{move_to_front, remove_segment};
+use ocx_env_apply::PATH_SEPARATOR as SEP;
+use ocx_env_apply::{move_to_front, remove_segment};
 
 /// Build a separator-joined path string for the host platform so the
 /// assertions read naturally on both Unix (`:`) and Windows (`;`).

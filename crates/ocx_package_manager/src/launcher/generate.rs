@@ -1,81 +1,409 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Launcher generator: the Unix `.sh` launcher and the Windows `.exe` shim plus its `.shim` sidecar.
+//! Launcher writers: every launcher is a byte copy of the embedded launcher image beside a `.launch` record.
 
 use std::path::{Path, PathBuf};
 
-use tokio::task::JoinSet;
-
 use ocx_package::metadata::entrypoint::Entrypoints;
-use ocx_store::file_structure::{FileStructure, ShimBinStore};
+use ocx_store::file_structure::{FileStructure, PackageDir};
+use ocx_store::launcher_generation::LauncherGeneration;
+use ocx_util::fs::{Published, Retired, publish_dir, retire_dir, symlink};
 
-#[cfg(windows)]
-use super::body::shim_sidecar_body;
-use super::body::{unix_launcher_body, utf8_baked_path};
+use super::body::utf8_baked_path;
+use super::direct::write_direct_launcher_for;
 use super::safety::LauncherSafeString;
+use crate::tasks::toolchain_names::is_record_name;
+use crate::tasks::vendor::VendorError;
+use ocx_env_apply::launch::{
+    DirectRecord, LaunchKind, LaunchRecord, PackageRecord, RECORD_EXTENSION, SCHEMA_VERSION, is_fully_qualified,
+};
 
-/// Generates the launchers baking `pkg_root` for every entrypoint into `dest`; empty `entries`
-/// does not create `dest`. `shim_bin` is used on Windows only.
+/// Writes the launchers of a package's entry points into `dest`, each recording `pkg_root`; empty `entries` does not
+/// create `dest`. `pkg_root` is the package's final directory, not the temp one it is written beside.
 ///
 /// # Errors
 ///
-/// A failed write, a `pkg_root` that is not UTF-8 or holds a [`LauncherSafeString`]-unsafe
-/// character, or a failed shim publish/hardlink (a cross-device `shim_bin` is not copied).
-#[cfg_attr(not(windows), allow(unused_variables))]
-pub async fn generate(
+/// A failed write, a host without a launcher blob, or a `pkg_root` that is not UTF-8 or holds a
+/// [`LauncherSafeString`]-unsafe character. A root the target's launcher would refuse to read (a Windows target needs
+/// a drive or UNC root) is [`crate::Error::LauncherRecordRefused`].
+pub async fn generate(pkg_root: &Path, entries: &Entrypoints, dest: &Path) -> Result<(), crate::Error> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+    generate_for(pkg_root, entries, dest, host_launcher_blob(dest)?, cfg!(windows)).await
+}
+
+/// [`generate`] for a target: `windows` is the target's, `blob` its launcher image.
+pub(super) async fn generate_for(
     pkg_root: &Path,
     entries: &Entrypoints,
     dest: &Path,
-    shim_bin: &ShimBinStore,
+    blob: &[u8],
+    windows: bool,
 ) -> Result<(), crate::Error> {
     if entries.is_empty() {
         return Ok(());
     }
 
-    // Not `to_string_lossy`: its U+FFFD passes `LauncherSafeString` and bakes a root that names nothing.
-    let pkg_root_str = LauncherSafeString::new(utf8_baked_path(pkg_root)?)?;
+    // Not `to_string_lossy`: its U+FFFD passes `LauncherSafeString` and records a root that names nothing.
+    let package_root = LauncherSafeString::new(utf8_baked_path(pkg_root)?)?;
+    // The launcher exits 78 on a root without a drive letter on Windows; a record it cannot read is never written.
+    if !is_fully_qualified(package_root.as_str(), windows) {
+        return Err(crate::error::file_error(
+            dest,
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "package root '{}' is not fully qualified for the launcher target",
+                    package_root.as_str()
+                ),
+            ),
+        ));
+    }
+    let record = LaunchRecord::Package(PackageRecord {
+        kind: LaunchKind::Package,
+        schema_version: SCHEMA_VERSION,
+        package_root: package_root.as_str().to_owned(),
+    });
+    super::validate_for_write(&record, windows, dest)?;
 
     tokio::fs::create_dir_all(dest)
         .await
         .map_err(|e| crate::error::file_error(dest, e))?;
+    for (index, (name, _entry)) in entries.iter().enumerate() {
+        if fault_before(index) {
+            return Err(crate::error::file_error(dest, std::io::Error::other("injected fault")));
+        }
+        write_launcher(dest, name.as_str(), blob, &record, windows).await?;
+    }
+    Ok(())
+}
 
-    let mut tasks: JoinSet<Result<(), crate::Error>> = JoinSet::new();
+#[cfg(test)]
+tokio::task_local! {
+    /// Fails [`generate_for`] before the launcher at this index, so a test sees a fault part-way through a directory.
+    static FAULT_AFTER: usize;
+}
 
-    for (name, _entry) in entries.iter() {
-        let name = name.as_str();
+/// Test seam: whether a fault is injected before the launcher at `index`; never true outside tests.
+fn fault_before(index: usize) -> bool {
+    #[cfg(test)]
+    return FAULT_AFTER.try_with(|after| *after == index).unwrap_or(false);
+    #[cfg(not(test))]
+    {
+        let _ = index;
+        false
+    }
+}
 
-        let unix_body = unix_launcher_body(&pkg_root_str);
-        let unix_path = dest.join(name);
-        tasks.spawn(write_unix_launcher(unix_path, unix_body));
+/// Whether `dir` is a complete launcher directory for `entries`: a real directory (`lstat`, no link) holding, per
+/// name that gets a launcher, `NAME[.exe]` and `NAME.launch` as regular files.
+pub(crate) async fn launchers_complete(dir: &Path, entries: &Entrypoints) -> bool {
+    names_complete(dir, entries.iter().map(|(name, _entry)| name.as_str())).await
+}
 
-        // No `.cmd` launcher: its `%*` re-parse is the injection vector this shim closes.
-        #[cfg(windows)]
-        {
-            let exe_path = dest.join(format!("{name}.exe"));
-            let sidecar_body = shim_sidecar_body(&pkg_root_str);
-            let sidecar_path = dest.join(format!("{name}.shim"));
-            tasks.spawn(write_shim_exe_then_sidecar(
-                shim_bin.clone(),
-                exe_path,
-                sidecar_path,
-                sidecar_body,
-            ));
+/// [`launchers_complete`] for any set of claimed names.
+pub(crate) async fn names_complete<'a>(dir: &Path, names: impl IntoIterator<Item = &'a str>) -> bool {
+    async fn is_file(path: PathBuf) -> bool {
+        tokio::fs::symlink_metadata(path).await.is_ok_and(|m| m.is_file())
+    }
+    if !tokio::fs::symlink_metadata(dir).await.is_ok_and(|m| m.is_dir()) {
+        return false;
+    }
+    for name in names.into_iter().filter(|name| !is_record_name(name)) {
+        let launcher = if cfg!(windows) {
+            format!("{name}.exe")
+        } else {
+            name.to_owned()
+        };
+        if !is_file(dir.join(launcher)).await || !is_file(dir.join(format!("{name}.{RECORD_EXTENSION}"))).await {
+            return false;
         }
     }
+    true
+}
 
-    while let Some(join_result) = tasks.join_next().await {
-        match join_result.expect(
-            "BUG: write_unix_launcher / write_launcher_file are panic-free — only the JoinSet host task can fault here",
-        ) {
-            Ok(()) => {}
-            Err(err) => {
-                tasks.abort_all();
-                return Err(err);
+/// The launcher generation of this host, hashed once; `None` on a host with no launcher blob.
+pub(crate) fn host_generation() -> Option<&'static LauncherGeneration> {
+    static HOST: std::sync::OnceLock<Option<LauncherGeneration>> = std::sync::OnceLock::new();
+    HOST.get_or_init(LauncherGeneration::host).as_ref()
+}
+
+/// The directory of a package's entry-point launchers that a composition puts on `PATH`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EntryPointDir {
+    /// `launchers/<G>`, this build's.
+    Launchers,
+    /// `entrypoints/`, written by an older release; never written by this one.
+    Legacy,
+}
+
+impl EntryPointDir {
+    /// The directory under `package`.
+    pub(crate) fn of(self, package: &PackageDir) -> PathBuf {
+        match (self, host_generation()) {
+            (Self::Launchers, Some(generation)) => package.launchers(generation),
+            _ => package.entrypoints(),
+        }
+    }
+}
+
+/// Which directory of `package` to compose, read-only: a complete `launchers/<G>`, else a complete older
+/// `entrypoints/`, else `launchers/<G>` (which [`first_use`] was meant to publish).
+pub(crate) async fn entry_point_dir(package: &PackageDir, entries: &Entrypoints) -> EntryPointDir {
+    let Some(generation) = host_generation() else {
+        return EntryPointDir::Legacy;
+    };
+    if launchers_complete(&package.launchers(generation), entries).await {
+        EntryPointDir::Launchers
+    } else if legacy_complete(&package.entrypoints(), entries).await {
+        EntryPointDir::Legacy
+    } else {
+        EntryPointDir::Launchers
+    }
+}
+
+/// Whether an older release's `dir` holds a launcher for every name that gets one.
+async fn legacy_complete(dir: &Path, entries: &Entrypoints) -> bool {
+    for (name, _entry) in entries.iter().filter(|(name, _)| !is_record_name(name.as_str())) {
+        let launcher = if cfg!(windows) {
+            format!("{}.exe", name.as_str())
+        } else {
+            name.as_str().to_owned()
+        };
+        if !tokio::fs::symlink_metadata(dir.join(launcher))
+            .await
+            .is_ok_and(|m| m.is_file())
+        {
+            return false;
+        }
+    }
+    true
+}
+
+/// First use of a package whose entry points go on `PATH`: leaves `launchers/<G>` complete and says what to
+/// compose. A read-only or foreign-owned home composes a complete older `entrypoints/` instead, with one warning.
+///
+/// # Errors
+///
+/// A failed write, or a refusal with no complete `entrypoints/` to fall back to. A missing package directory is
+/// [`crate::Error::InternalFile`] naming `<package>/launchers` with `NotFound`.
+pub(crate) async fn first_use(
+    fs: &FileStructure,
+    package: &PackageDir,
+    entries: &Entrypoints,
+) -> Result<EntryPointDir, crate::Error> {
+    let generation = host_generation().ok_or_else(|| {
+        crate::error::file_error(package.root(), std::io::Error::other("no launcher blob for this host"))
+    })?;
+    let target = package.launchers(generation);
+    if launchers_complete(&target, entries).await {
+        return Ok(EntryPointDir::Launchers);
+    }
+    match publish_after_retiring(fs, package, generation, &target, entries).await {
+        Ok(()) => Ok(EntryPointDir::Launchers),
+        Err(crate::Error::InternalFile(path, error)) if refused(&error) => {
+            if legacy_complete(&package.entrypoints(), entries).await {
+                log::warn!(
+                    "Cannot write launchers under '{}' ({error}); using the entry points an older ocx wrote",
+                    package.root().display()
+                );
+                Ok(EntryPointDir::Legacy)
+            } else {
+                Err(crate::Error::InternalFile(path, error))
             }
         }
+        Err(error) => Err(error),
     }
+}
 
+/// Whether an I/O error is a refusal the older `entrypoints/` can stand in for.
+fn refused(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem
+    )
+}
+
+/// Moves an incomplete or linked `target` away, then publishes a fresh one.
+async fn publish_after_retiring(
+    fs: &FileStructure,
+    package: &PackageDir,
+    generation: &LauncherGeneration,
+    target: &Path,
+    entries: &Entrypoints,
+) -> Result<(), crate::Error> {
+    match tokio::fs::symlink_metadata(target).await {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(crate::error::file_error(target, error)),
+        Ok(_) => {
+            // Another process may have published a complete directory since the caller's check: never retire that.
+            if launchers_complete(target, entries).await {
+                return Ok(());
+            }
+            log::warn!("Replacing the incomplete launcher directory '{}'", target.display());
+            remove_entry(target).await?;
+        }
+    }
+    publish_package_launchers(fs, package.root(), generation, entries).await?;
+    Ok(())
+}
+
+/// Retires a real directory; removes a link or file (never following it) that `retire_dir` leaves alone.
+async fn remove_entry(target: &Path) -> Result<(), crate::Error> {
+    let owned = target.to_path_buf();
+    let removed = tokio::task::spawn_blocking(move || -> std::io::Result<bool> {
+        if symlink::is_link(&owned) {
+            symlink::remove(&owned).map_err(|error| error.cause)?;
+            return Ok(true);
+        }
+        if std::fs::symlink_metadata(&owned)?.is_dir() {
+            return Ok(false);
+        }
+        std::fs::remove_file(&owned)?;
+        Ok(true)
+    })
+    .await
+    .map_err(|error| crate::error::file_error(target, std::io::Error::other(error)))?
+    .map_err(|error| crate::error::file_error(target, error))?;
+    if removed {
+        return Ok(());
+    }
+    match retire_dir(target).await {
+        Ok(Retired::Removed) => Ok(()),
+        Ok(Retired::LeftForLater) => Err(crate::error::file_error(
+            target,
+            std::io::Error::new(std::io::ErrorKind::PermissionDenied, "in use or protected, not retired"),
+        )),
+        Err(error) => Err(crate::error::file_error(target, error)),
+    }
+}
+
+/// Publishes `<package_dir>/launchers/<generation>` for `entries`, built complete in a locked scratch directory and
+/// moved in with one rename; a published directory is never edited. `package_dir` is the final package directory and
+/// is never created here.
+///
+/// # Errors
+///
+/// A failed write, a host without a launcher blob, a missing `package_dir`, or a directory that won the race and is
+/// not complete.
+pub(crate) async fn publish_package_launchers(
+    fs: &FileStructure,
+    package_dir: &Path,
+    generation: &LauncherGeneration,
+    entries: &Entrypoints,
+) -> Result<Published, crate::Error> {
+    let blob = host_launcher_blob(package_dir)?;
+    let target = package_dir.join("launchers").join(generation.as_str());
+    let scratch = fs
+        .temp
+        .scratch("launchers")
+        .await
+        .map_err(|e| crate::error::file_error(&target, std::io::Error::other(e)))?;
+    generate_for(package_dir, entries, scratch.path(), blob, cfg!(windows)).await?;
+
+    // No `create_dir_all`: a package directory removed meanwhile must not come back as a husk holding only launchers.
+    let parent = package_dir.join("launchers");
+    match tokio::fs::create_dir(&parent).await {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(crate::error::file_error(&parent, e)),
+    }
+    let published = publish_dir(scratch.path(), &target)
+        .await
+        .map_err(|e| crate::error::file_error(&target, e))?;
+    if published == Published::AlreadyThere && !launchers_complete(&target, entries).await {
+        return Err(crate::error::file_error(
+            &target,
+            std::io::Error::other("another process published an incomplete launcher directory"),
+        ));
+    }
+    Ok(published)
+}
+
+/// The embedded launcher image of this host.
+///
+/// # Errors
+///
+/// The host has no launcher blob; the error names `dir`, where the launchers would go.
+pub(crate) fn host_launcher_blob(dir: &Path) -> Result<&'static [u8], crate::Error> {
+    ocx_store::shim::host_blob()
+        .ok_or_else(|| crate::error::file_error(dir, std::io::Error::other("no launcher blob for this host")))
+}
+
+/// Writes the launcher of `name` into `dir`: `name` (`name.exe` for a Windows target) as a byte copy of `blob`, mode
+/// 0755, then `name.launch` holding `record`; both synced.
+///
+/// A name ending in `.launch` gets neither, with one warning: its launcher would sit where another name's record goes.
+///
+/// # Errors
+///
+/// A failed write.
+pub(crate) async fn write_launcher(
+    dir: &Path,
+    name: &str,
+    blob: &[u8],
+    record: &LaunchRecord,
+    windows: bool,
+) -> Result<(), crate::Error> {
+    if is_record_name(name) {
+        log::warn!(
+            "Skipping the launcher '{name}': a name ending in '.{RECORD_EXTENSION}' collides with a launcher record"
+        );
+        return Ok(());
+    }
+    let launcher = dir.join(if windows {
+        format!("{name}.exe")
+    } else {
+        name.to_owned()
+    });
+    write_synced(&launcher, blob).await?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        tokio::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755))
+            .await
+            .map_err(|e| crate::error::file_error(&launcher, e))?;
+    }
+    write_synced(&dir.join(format!("{name}.{RECORD_EXTENSION}")), &record.encode()).await
+}
+
+/// Writes `bytes` to `path` and `sync_data`s it, so a publish rename never exposes a file the disk lacks.
+async fn write_synced(path: &Path, bytes: &[u8]) -> Result<(), crate::Error> {
+    use tokio::io::AsyncWriteExt as _;
+    let written = async {
+        let mut file = tokio::fs::File::create(path).await?;
+        file.write_all(bytes).await?;
+        file.sync_data().await
+    };
+    written.await.map_err(|e| crate::error::file_error(path, e))
+}
+
+/// Writes one direct launcher per entry point of a vendored package into `dest` (see [`write_direct_launcher_for`]);
+/// `windows` is the target's. `sidecar_for` yields the sidecar of a name, its private environment already composed.
+/// Empty `entries` creates nothing.
+///
+/// # Errors
+///
+/// As [`write_direct_launcher_for`], a failed `dest` creation as [`VendorError::Package`], or whatever `sidecar_for`
+/// returns.
+pub async fn generate_direct(
+    entries: &Entrypoints,
+    dest: &Path,
+    blob: &[u8],
+    windows: bool,
+    sidecar_for: &dyn Fn(&str) -> Result<DirectRecord, VendorError>,
+) -> Result<(), VendorError> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+    tokio::fs::create_dir_all(dest)
+        .await
+        .map_err(|e| crate::error::file_error(dest, e))?;
+    for (name, _entry) in entries.iter() {
+        write_direct_launcher_for(dest, name.as_str(), blob, &sidecar_for(name.as_str())?, windows).await?;
+    }
     Ok(())
 }
 
@@ -199,40 +527,6 @@ async fn first_bakeable_ocx(installed: PathBuf, running: Option<PathBuf>) -> Opt
     None
 }
 
-async fn write_launcher_file(path: PathBuf, body: String) -> Result<(), crate::Error> {
-    tokio::fs::write(&path, body.as_bytes())
-        .await
-        .map_err(|e| crate::error::file_error(&path, e))
-}
-
-/// Writes the Unix launcher and sets its executable bit (no-op off Unix).
-async fn write_unix_launcher(path: PathBuf, body: String) -> Result<(), crate::Error> {
-    write_launcher_file(path.clone(), body).await?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
-            .await
-            .map_err(|e| crate::error::file_error(&path, e))?;
-    }
-    Ok(())
-}
-
-/// Hardlinks the shared shim blob to `exe_path`, then writes the sidecar.
-///
-/// One task, not two: a split lets a fault leave a `.shim` without its `.exe`.
-#[cfg(windows)]
-async fn write_shim_exe_then_sidecar(
-    shim_bin: ShimBinStore,
-    exe_path: PathBuf,
-    sidecar_path: PathBuf,
-    sidecar_body: String,
-) -> Result<(), crate::Error> {
-    let shim_bin_path = shim_bin.ensure().await?;
-    ocx_store::hardlink::create(&shim_bin_path, &exe_path)?;
-    write_launcher_file(sidecar_path, sidecar_body).await
-}
-
 #[cfg(test)]
 mod tests {
     use tempfile::tempdir;
@@ -240,7 +534,61 @@ mod tests {
     use std::collections::BTreeMap;
 
     use ocx_package::metadata::entrypoint::{Entrypoint, EntrypointName, Entrypoints};
-    use ocx_store::file_structure::ShimBinStore;
+
+    use super::generate_direct;
+    use super::{FileStructure, LauncherGeneration, Published};
+    use ocx_env_apply::launch::{DirectRecord, LaunchKind, LaunchRecord, PackageRecord, SCHEMA_VERSION};
+
+    /// A direct entry-point render writes `<name>` and `<name>.launch` carrying the entry's own sidecar.
+    #[tokio::test]
+    async fn generate_direct_writes_launcher_and_sidecar_per_entry_point() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dest = tmp.path().join("entrypoints");
+        let entries = Entrypoints::from_names(["alpha", "beta"]);
+        let sidecar_for = |name: &str| -> Result<DirectRecord, super::VendorError> {
+            Ok(serde_json::from_value(serde_json::json!({
+                "kind": "direct",
+                "schema_version": 1,
+                "vendor_id": "sha256:0b5f2a4e9c7d3b1a0b5f2a4e9c7d3b1a0b5f2a4e9c7d3b1a0b5f2a4e9c7d3b1a",
+                "self": format!("packages/p/entrypoints/{name}"),
+                "program": format!("@VENDOR_DIR@/packages/p/content/bin/{name}"),
+                "args": [],
+                "unset": [],
+                "env": [],
+            }))
+            .expect("fixture decodes"))
+        };
+
+        generate_direct(&entries, &dest, b"blob", cfg!(windows), &sidecar_for)
+            .await
+            .expect("generate succeeds");
+
+        for name in ["alpha", "beta"] {
+            let launcher = dest.join(if cfg!(windows) {
+                format!("{name}.exe")
+            } else {
+                name.to_owned()
+            });
+            assert_eq!(std::fs::read(launcher).expect("launcher"), b"blob");
+            let sidecar: DirectRecord =
+                serde_json::from_slice(&std::fs::read(dest.join(format!("{name}.launch"))).expect("sidecar"))
+                    .expect("json");
+            assert_eq!(sidecar.program, format!("@VENDOR_DIR@/packages/p/content/bin/{name}"));
+            assert_eq!(sidecar.self_path, format!("packages/p/entrypoints/{name}"));
+        }
+
+        let empty = tmp.path().join("none");
+        generate_direct(
+            &Entrypoints::from_names::<[&str; 0], &str>([]),
+            &empty,
+            b"blob",
+            cfg!(windows),
+            &sidecar_for,
+        )
+        .await
+        .expect("empty succeeds");
+        assert!(!empty.exists());
+    }
 
     fn entries_for(names: &[&str]) -> Entrypoints {
         let map: BTreeMap<EntrypointName, Entrypoint> = names
@@ -250,499 +598,542 @@ mod tests {
         Entrypoints::new(map)
     }
 
-    /// A scratch `ShimBinStore` rooted under the test's own tempdir — never
-    /// shared with a real `FileStructure`. `generate()` only reaches into it
-    /// on Windows (`#[cfg(windows)]`), so on other platforms this is unused
-    /// beyond satisfying the signature.
-    fn shim_bin_store(tmp: &tempfile::TempDir) -> ShimBinStore {
-        ShimBinStore::new(tmp.path().join("shim_bin"))
+    fn host_blob() -> &'static [u8] {
+        ocx_store::shim::host_blob().expect("the test host has a launcher blob")
     }
 
-    // ── Empty Entrypoints — no files generated ────────────────────────────
+    /// Every file name in `dir`, sorted.
+    fn listing(dir: &std::path::Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .expect("read dest")
+            .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
 
     #[tokio::test]
     async fn generate_empty_entrypoints_creates_nothing() {
         let tmp = tempdir().unwrap();
         let pkg_root = tmp.path().join("pkg");
-        let dest = pkg_root.join("entrypoints");
-        let entrypoints = entries_for(&[]);
-        let shim_bin = shim_bin_store(&tmp);
+        let dest = pkg_root.join("launchers");
 
-        super::generate(&pkg_root, &entrypoints, &dest, &shim_bin)
-            .await
-            .unwrap();
-        assert!(
-            !dest.exists(),
-            "entrypoints/ dir must not be created for empty entrypoints"
-        );
+        super::generate(&pkg_root, &entries_for(&[]), &dest).await.unwrap();
+        assert!(!dest.exists(), "dest must not be created for empty entrypoints");
     }
 
-    // ── Generator writes files for non-empty entrypoints ──────────────────
-
-    #[tokio::test]
-    async fn generate_writes_unix_and_windows_launchers() {
-        let tmp = tempdir().unwrap();
-        let pkg_root = tmp.path().join("pkg");
-        tokio::fs::create_dir_all(pkg_root.join("content")).await.unwrap();
-        let dest = pkg_root.join("entrypoints");
-        let entrypoints = entries_for(&["cmake"]);
-        let shim_bin = shim_bin_store(&tmp);
-
-        super::generate(&pkg_root, &entrypoints, &dest, &shim_bin)
-            .await
-            .unwrap();
-        assert!(dest.join("cmake").exists(), "unix launcher must be created");
-        // Cutover: no `.cmd` is ever emitted on any platform. On Windows the
-        // launcher is `<name>.exe` + `<name>.shim` (asserted by the
-        // Windows-gated tests below); on non-Windows only `<name>` exists.
-        assert!(
-            !dest.join("cmake.cmd").exists(),
-            "`.cmd` launcher must NOT be created (cutover to `.exe`-only)"
-        );
-    }
-
-    // ── Unix file mode 0755 ───────────────────────────────────────────────
-
+    /// Every launcher is a byte copy of the embedded host blob with a link count of 1, mode 0755;
+    /// rewriting one leaves the others unchanged (no shared inode).
     #[cfg(unix)]
     #[tokio::test]
-    async fn generate_sets_unix_mode_0755() {
-        use std::os::unix::fs::PermissionsExt;
+    async fn every_launcher_is_a_byte_copy_of_the_host_blob_with_link_count_one() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
         let tmp = tempdir().unwrap();
-        let pkg_root = tmp.path().join("pkg");
-        tokio::fs::create_dir_all(pkg_root.join("content")).await.unwrap();
-        let dest = pkg_root.join("entrypoints");
-        let entrypoints = entries_for(&["cmake"]);
-        let shim_bin = shim_bin_store(&tmp);
+        let dest = tmp.path().join("pkg").join("launchers");
+        let names = ["cmake", "ctest", "cpack"];
 
-        super::generate(&pkg_root, &entrypoints, &dest, &shim_bin)
+        super::generate(&tmp.path().join("pkg"), &entries_for(&names), &dest)
             .await
             .unwrap();
-        let mode = std::fs::metadata(dest.join("cmake")).unwrap().permissions().mode();
-        assert_eq!(mode & 0o777, 0o755, "unix launcher must be mode 0755");
+
+        let mut inodes = std::collections::BTreeSet::new();
+        for name in names {
+            let path = dest.join(name);
+            let meta = std::fs::metadata(&path).unwrap();
+            // `assert!` rather than `assert_eq!`: a failing byte-slice comparison would print the whole blob.
+            assert!(
+                std::fs::read(&path).unwrap() == host_blob(),
+                "{name}: bytes equal the host blob"
+            );
+            assert_eq!(meta.nlink(), 1, "{name}: link count");
+            assert_eq!(meta.permissions().mode() & 0o777, 0o755, "{name}: mode");
+            inodes.insert(meta.ino());
+        }
+        assert_eq!(inodes.len(), names.len(), "each launcher has an inode of its own");
+
+        std::fs::write(dest.join("cmake"), b"changed").unwrap();
+        for name in ["ctest", "cpack"] {
+            assert!(
+                std::fs::read(dest.join(name)).unwrap() == host_blob(),
+                "{name}: unchanged by a write to cmake"
+            );
+        }
     }
 
-    // ── Path traversal defense-in-depth (EntrypointName) ─────────────────
+    /// Writer half: a Windows target lists exactly `NAME.exe` and `NAME.launch` per name, on any host.
+    #[tokio::test]
+    async fn a_windows_target_lists_only_exe_and_launch_per_name() {
+        let tmp = tempdir().unwrap();
+        let dest = tmp.path().join("pkg").join("launchers");
+
+        super::generate_for(
+            std::path::Path::new("C:/ocx/pkg"),
+            &entries_for(&["cmake", "ctest"]),
+            &dest,
+            host_blob(),
+            true,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            listing(&dest),
+            ["cmake.exe", "cmake.launch", "ctest.exe", "ctest.launch"],
+            "no extensionless script, no `.shim`, no `.cmd`"
+        );
+    }
+
+    /// A Windows target refuses a package root without a drive letter, which the launcher would exit 78 on, and
+    /// writes nothing.
+    #[tokio::test]
+    async fn a_windows_target_refuses_a_package_root_without_a_drive() {
+        let tmp = tempdir().unwrap();
+        let dest = tmp.path().join("pkg").join("launchers");
+
+        let result = super::generate_for(
+            std::path::Path::new("/no/drive"),
+            &entries_for(&["cmake"]),
+            &dest,
+            host_blob(),
+            true,
+        )
+        .await;
+
+        assert!(result.is_err(), "a driveless root on a Windows target is refused");
+        assert!(!dest.exists(), "no directory, no file");
+    }
+
+    /// A root holding the `@VENDOR_DIR@` token passes the unsafe-character gate but not the record's own rule, so
+    /// nothing is written.
+    #[tokio::test]
+    async fn a_package_root_holding_the_vendor_token_is_refused_before_anything_is_written() {
+        let tmp = tempdir().unwrap();
+        let dest = tmp.path().join("pkg").join("launchers");
+
+        let result = super::generate_for(
+            &tmp.path().join("@VENDOR_DIR@").join("pkg"),
+            &entries_for(&["cmake"]),
+            &dest,
+            host_blob(),
+            cfg!(windows),
+        )
+        .await;
+
+        assert!(result.is_err(), "the launcher would refuse this record");
+        assert!(!dest.exists(), "no directory, no file");
+    }
+
+    /// A non-Windows target lists exactly `NAME` and `NAME.launch` per name.
+    #[tokio::test]
+    async fn a_unix_target_lists_only_the_launcher_and_its_record_per_name() {
+        let tmp = tempdir().unwrap();
+        let dest = tmp.path().join("pkg").join("launchers");
+
+        super::generate_for(
+            std::path::Path::new("/ocx/pkg"),
+            &entries_for(&["cmake"]),
+            &dest,
+            host_blob(),
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(listing(&dest), ["cmake", "cmake.launch"]);
+    }
+
+    /// The record is the compact package record with the final package root, then one LF.
+    #[tokio::test]
+    async fn the_record_is_the_compact_package_record_with_the_package_root() {
+        let tmp = tempdir().unwrap();
+        let pkg_root = tmp.path().join("pkg");
+        let dest = pkg_root.join("launchers");
+
+        super::generate(&pkg_root, &entries_for(&["cmake"]), &dest)
+            .await
+            .unwrap();
+
+        let bytes = std::fs::read(dest.join("cmake.launch")).unwrap();
+        let expected = format!(
+            "{{\"kind\":\"package\",\"schema_version\":1,\"package_root\":{}}}\n",
+            serde_json::to_string(pkg_root.to_str().unwrap()).unwrap()
+        );
+        assert_eq!(String::from_utf8(bytes.clone()).unwrap(), expected);
+        let record: PackageRecord = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(record.kind, LaunchKind::Package);
+        assert_eq!(record.package_root, pkg_root.to_str().unwrap());
+    }
+
+    /// A name ending in `.launch` gets no launcher and no record, and does not stop its siblings.
+    #[tokio::test]
+    async fn a_launch_suffixed_name_is_skipped() {
+        let tmp = tempdir().unwrap();
+        let record = LaunchRecord::Package(PackageRecord {
+            kind: LaunchKind::Package,
+            schema_version: SCHEMA_VERSION,
+            package_root: "/p".into(),
+        });
+        for name in ["foo.launch", "foo.LAUNCH"] {
+            super::write_launcher(tmp.path(), name, host_blob(), &record, false)
+                .await
+                .unwrap();
+        }
+        super::write_launcher(tmp.path(), "bar", host_blob(), &record, false)
+            .await
+            .unwrap();
+
+        assert_eq!(listing(tmp.path()), ["bar", "bar.launch"]);
+    }
+
+    /// A second publication over a complete `launchers/<G>` is `AlreadyThere` and rewrites nothing.
+    #[tokio::test]
+    async fn generate_is_idempotent() {
+        let tmp = tempdir().unwrap();
+        let fs = FileStructure::with_root(tmp.path().join("home"));
+        let pkg_dir = tmp.path().join("pkg");
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        let generation = LauncherGeneration::host().expect("the test host has a launcher blob");
+        let entries = entries_for(&["cmake", "ctest"]);
+
+        let first = super::publish_package_launchers(&fs, &pkg_dir, &generation, &entries)
+            .await
+            .unwrap();
+        assert_eq!(first, Published::New);
+        let dir = pkg_dir.join("launchers").join(generation.as_str());
+        let before = snapshot(&dir);
+
+        let second = super::publish_package_launchers(&fs, &pkg_dir, &generation, &entries)
+            .await
+            .unwrap();
+
+        assert_eq!(second, Published::AlreadyThere);
+        assert_eq!(snapshot(&dir), before, "names, bytes and inodes are unchanged");
+        assert_eq!(listing(&dir).len(), 4);
+        assert_eq!(listing(&pkg_dir.join("launchers")), [generation.as_str()]);
+    }
+
+    /// Helper half: a removed package directory is neither recreated nor given a `launchers/`.
+    #[tokio::test]
+    async fn publish_does_not_recreate_a_removed_package_directory() {
+        let tmp = tempdir().unwrap();
+        let fs = FileStructure::with_root(tmp.path().join("home"));
+        let pkg_dir = tmp.path().join("gone");
+        let generation = LauncherGeneration::host().expect("the test host has a launcher blob");
+
+        let result = super::publish_package_launchers(&fs, &pkg_dir, &generation, &entries_for(&["cmake"])).await;
+
+        assert!(result.is_err());
+        assert!(!pkg_dir.exists());
+    }
+
+    fn host_generation() -> LauncherGeneration {
+        LauncherGeneration::host().expect("the test host has a launcher blob")
+    }
+
+    /// A home with an installed package directory, plus the entries of its package.
+    fn home_with_package(tmp: &std::path::Path) -> (FileStructure, ocx_store::file_structure::PackageDir) {
+        let package = tmp.join("pkg");
+        std::fs::create_dir_all(&package).unwrap();
+        (
+            FileStructure::with_root(tmp.join("home")),
+            ocx_store::file_structure::PackageDir::with_root(package),
+        )
+    }
+
+    /// A fault after the first launcher is written leaves no `launchers/<G>`; a retry yields a complete one.
+    #[tokio::test]
+    async fn a_fault_after_the_first_launcher_leaves_no_directory_and_a_retry_completes_it() {
+        let tmp = tempdir().unwrap();
+        let (fs, package) = home_with_package(tmp.path());
+        let generation = host_generation();
+        let entries = entries_for(&["alpha", "beta"]);
+
+        let faulted = super::FAULT_AFTER
+            .scope(
+                1,
+                super::publish_package_launchers(&fs, package.root(), &generation, &entries),
+            )
+            .await;
+
+        assert!(faulted.is_err());
+        assert!(
+            !package.launchers(&generation).exists(),
+            "no half-written directory is published"
+        );
+        let retried = super::publish_package_launchers(&fs, package.root(), &generation, &entries)
+            .await
+            .unwrap();
+        assert_eq!(retried, Published::New);
+        assert!(super::launchers_complete(&package.launchers(&generation), &entries).await);
+    }
+
+    /// Two concurrent first uses both succeed, one publishing and one finding the winner, on one complete directory.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn two_concurrent_first_uses_converge_on_one_complete_directory() {
+        let tmp = tempdir().unwrap();
+        let (fs, package) = home_with_package(tmp.path());
+        let generation = host_generation();
+        let entries = entries_for(&["alpha", "beta"]);
+
+        let (first, second) = tokio::join!(
+            super::publish_package_launchers(&fs, package.root(), &generation, &entries),
+            super::publish_package_launchers(&fs, package.root(), &generation, &entries),
+        );
+
+        let mut outcomes = vec![first.unwrap(), second.unwrap()];
+        outcomes.sort_by_key(|published| *published == Published::AlreadyThere);
+        assert_eq!(outcomes, [Published::New, Published::AlreadyThere]);
+        assert!(super::launchers_complete(&package.launchers(&generation), &entries).await);
+        assert_eq!(listing(&package.launchers_root()), [generation.as_str()]);
+
+        let (a, b) = tokio::join!(
+            super::first_use(&fs, &package, &entries),
+            super::first_use(&fs, &package, &entries)
+        );
+        assert_eq!(
+            (a.unwrap(), b.unwrap()),
+            (super::EntryPointDir::Launchers, super::EntryPointDir::Launchers)
+        );
+    }
+
+    /// A directory missing one record is retired and republished whole.
+    #[tokio::test]
+    async fn first_use_republishes_a_directory_missing_a_record() {
+        let tmp = tempdir().unwrap();
+        let (fs, package) = home_with_package(tmp.path());
+        let generation = host_generation();
+        let entries = entries_for(&["alpha", "beta"]);
+        let dir = package.launchers(&generation);
+        super::generate(package.root(), &entries, &dir).await.unwrap();
+        std::fs::remove_file(dir.join("beta.launch")).unwrap();
+
+        let chosen = super::first_use(&fs, &package, &entries).await.unwrap();
+
+        assert_eq!(chosen, super::EntryPointDir::Launchers);
+        assert!(super::launchers_complete(&dir, &entries).await);
+    }
+
+    /// A directory another process completed after the caller's completeness check is used, not retired.
+    #[tokio::test]
+    async fn publish_after_retiring_keeps_a_directory_completed_in_the_meantime() {
+        let tmp = tempdir().unwrap();
+        let (fs, package) = home_with_package(tmp.path());
+        let generation = host_generation();
+        let entries = entries_for(&["alpha", "beta"]);
+        let dir = package.launchers(&generation);
+        super::generate(package.root(), &entries, &dir).await.unwrap();
+        std::fs::write(dir.join("witness"), b"published by the other process").unwrap();
+
+        super::publish_after_retiring(&fs, &package, &generation, &dir, &entries)
+            .await
+            .unwrap();
+
+        assert!(dir.join("witness").exists(), "the complete directory was retired");
+        assert!(super::launchers_complete(&dir, &entries).await);
+    }
+
+    /// A symlink at `launchers/<G>` is removed, never followed, and a real directory published in its place.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn first_use_replaces_a_symlinked_directory_and_leaves_its_target_alone() {
+        let tmp = tempdir().unwrap();
+        let (fs, package) = home_with_package(tmp.path());
+        let generation = host_generation();
+        let entries = entries_for(&["alpha"]);
+        let elsewhere = tmp.path().join("elsewhere");
+        super::generate(package.root(), &entries, &elsewhere).await.unwrap();
+        let before = snapshot(&elsewhere);
+        std::fs::create_dir_all(package.launchers_root()).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, package.launchers(&generation)).unwrap();
+
+        let chosen = super::first_use(&fs, &package, &entries).await.unwrap();
+
+        assert_eq!(chosen, super::EntryPointDir::Launchers);
+        let dir = package.launchers(&generation);
+        assert!(!std::fs::symlink_metadata(&dir).unwrap().file_type().is_symlink());
+        assert!(super::launchers_complete(&dir, &entries).await);
+        assert_eq!(snapshot(&elsewhere), before, "the link target is untouched");
+    }
+
+    /// A package directory removed before first use is not recreated by `launchers/`.
+    #[tokio::test]
+    async fn first_use_of_a_removed_package_fails_and_creates_nothing() {
+        let tmp = tempdir().unwrap();
+        let fs = FileStructure::with_root(tmp.path().join("home"));
+        let package = ocx_store::file_structure::PackageDir::with_root(tmp.path().join("gone"));
+
+        let error = super::first_use(&fs, &package, &entries_for(&["alpha"]))
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(&error, crate::Error::InternalFile(path, cause)
+                if *path == package.launchers_root() && cause.kind() == std::io::ErrorKind::NotFound),
+            "{error:?}"
+        );
+        assert!(!package.root().exists());
+    }
+
+    /// Whether the test runs as root, which no permission bit refuses.
+    #[cfg(unix)]
+    fn running_as_root() -> bool {
+        // SAFETY: `geteuid` takes no arguments, touches no memory, and always succeeds.
+        unsafe { libc::geteuid() == 0 }
+    }
+
+    #[cfg(unix)]
+    fn set_mode(path: &std::path::Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    /// A read-only package directory composes a complete older `entrypoints/`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_read_only_package_directory_falls_back_to_a_complete_older_entrypoints() {
+        if running_as_root() {
+            return;
+        }
+        let tmp = tempdir().unwrap();
+        let (fs, package) = home_with_package(tmp.path());
+        let entries = entries_for(&["alpha", "beta"]);
+        std::fs::create_dir_all(package.entrypoints()).unwrap();
+        for name in ["alpha", "beta"] {
+            std::fs::write(package.entrypoints().join(name), b"#!/bin/sh\n").unwrap();
+        }
+        set_mode(package.root(), 0o555);
+
+        let chosen = super::first_use(&fs, &package, &entries).await;
+        let read_back = super::entry_point_dir(&package, &entries).await;
+        set_mode(package.root(), 0o755);
+
+        assert_eq!(chosen.unwrap(), super::EntryPointDir::Legacy);
+        assert_eq!(read_back, super::EntryPointDir::Legacy);
+        assert!(!package.launchers_root().exists());
+        assert_eq!(
+            listing(&package.entrypoints()),
+            ["alpha", "beta"],
+            "entrypoints/ is never written"
+        );
+    }
+
+    /// With no complete older `entrypoints/`, the refusal names the path with a permission cause.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_read_only_package_directory_without_entrypoints_fails_naming_the_path() {
+        if running_as_root() {
+            return;
+        }
+        let tmp = tempdir().unwrap();
+        let (fs, package) = home_with_package(tmp.path());
+        let entries = entries_for(&["alpha", "beta"]);
+        std::fs::create_dir_all(package.entrypoints()).unwrap();
+        std::fs::write(package.entrypoints().join("alpha"), b"#!/bin/sh\n").unwrap();
+        set_mode(package.root(), 0o555);
+
+        let error = super::first_use(&fs, &package, &entries).await.unwrap_err();
+        set_mode(package.root(), 0o755);
+
+        assert!(
+            matches!(&error, crate::Error::InternalFile(path, cause)
+                if *path == package.launchers_root() && cause.kind() == std::io::ErrorKind::PermissionDenied),
+            "{error:?}"
+        );
+        assert_eq!(
+            ocx_exit::ClassifyExitCode::classify(&error),
+            Some(ocx_exit::ExitCode::PermissionDenied),
+            "C-127: a permission refusal on first use exits 77"
+        );
+    }
+
+    /// An incomplete directory is not complete; neither is a link, nor a directory short one record.
+    #[tokio::test]
+    async fn completeness_needs_a_real_directory_with_every_file() {
+        let tmp = tempdir().unwrap();
+        let entries = entries_for(&["cmake"]);
+        let dir = tmp.path().join("d");
+        super::generate(&tmp.path().join("pkg"), &entries, &dir).await.unwrap();
+        assert!(super::launchers_complete(&dir, &entries).await);
+
+        std::fs::remove_file(dir.join("cmake.launch")).unwrap();
+        assert!(!super::launchers_complete(&dir, &entries).await);
+        assert!(!super::launchers_complete(&tmp.path().join("absent"), &entries).await);
+        #[cfg(unix)]
+        {
+            let link = tmp.path().join("link");
+            let full = tmp.path().join("full");
+            super::generate(&tmp.path().join("pkg"), &entries, &full).await.unwrap();
+            std::os::unix::fs::symlink(&full, &link).unwrap();
+            assert!(!super::launchers_complete(&link, &entries).await);
+        }
+    }
+
+    /// Every file of `dir` as (name, bytes, inode on Unix), sorted.
+    fn snapshot(dir: &std::path::Path) -> Vec<(String, Vec<u8>, u64)> {
+        listing(dir)
+            .into_iter()
+            .map(|name| {
+                let path = dir.join(&name);
+                #[cfg(unix)]
+                let inode = std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(&path).unwrap());
+                #[cfg(not(unix))]
+                let inode = 0;
+                (name, std::fs::read(&path).unwrap(), inode)
+            })
+            .collect()
+    }
 
     #[test]
     fn entrypoint_name_rejects_path_traversal_bytes() {
-        // EntrypointName construction must reject names with / or \ or ..
-        // (slug regex already excludes / and \; .. is caught by the regex too)
         assert!(EntrypointName::try_from("../evil").is_err());
         assert!(EntrypointName::try_from("sub/path").is_err());
         assert!(EntrypointName::try_from("back\\slash").is_err());
     }
 
-    // ── Idempotent re-run (generating same entrypoints twice) ─────────────
-
-    #[tokio::test]
-    async fn generate_is_idempotent() {
-        let tmp = tempdir().unwrap();
-        let pkg_root = tmp.path().join("pkg");
-        tokio::fs::create_dir_all(pkg_root.join("content")).await.unwrap();
-        let dest = pkg_root.join("entrypoints");
-        let entrypoints = entries_for(&["cmake"]);
-        let shim_bin = shim_bin_store(&tmp);
-
-        // First call
-        let _ = super::generate(&pkg_root, &entrypoints, &dest, &shim_bin).await;
-        // Second call — must not error due to already-existing files
-        let _ = super::generate(&pkg_root, &entrypoints, &dest, &shim_bin).await;
-        // Both calls should return Ok(()).
-    }
-
-    // ── W1: pkg_root rejection on launcher-unsafe characters ──────────────
-    //
-    // `generate()` validates `pkg_root`'s text against
-    // `LauncherSafeString::new` before any file is written. A path containing
-    // any character in `LAUNCHER_UNSAFE_CHARS` (e.g. `'`, `%`, `"`, `\n`,
-    // `\r`, `\0`) must surface the rejection and never produce a launcher with
-    // an unsafe pkg_root baked in. This pins the contract that the unsafe-char
-    // check fires once at the entry boundary in `generate()` rather than per
-    // platform body.
+    /// `generate()` validates `pkg_root`'s text before any file is written: a launcher-unsafe character
+    /// (`'`, `%`, `"`, `\n`, `\r`, `\0`) is refused at the boundary, and nothing is created.
     #[tokio::test]
     async fn generate_rejects_pkg_root_with_unsafe_character() {
         let tmp = tempdir().unwrap();
-        // Single-quote `'` is in LAUNCHER_UNSAFE_CHARS — would break Unix
-        // single-quoted shell literals if it slipped through.
         let pkg_root = tmp.path().join("pkg'with'quote");
-        tokio::fs::create_dir_all(pkg_root.join("content")).await.unwrap();
-        let dest = pkg_root.join("entrypoints");
-        let entrypoints = entries_for(&["cmake"]);
-        let shim_bin = shim_bin_store(&tmp);
+        let dest = pkg_root.join("launchers");
 
-        let err = super::generate(&pkg_root, &entrypoints, &dest, &shim_bin)
+        let err = super::generate(&pkg_root, &entries_for(&["cmake"]), &dest)
             .await
             .expect_err("pkg_root with unsafe character must be rejected");
         match err {
-            crate::Error::LauncherUnsafeCharacter { character, .. } => {
-                assert_eq!(character, '\'', "must report the offending single quote");
-            }
+            crate::Error::LauncherUnsafeCharacter { character, .. } => assert_eq!(character, '\''),
             other => panic!("expected LauncherUnsafeCharacter, got {other:?}"),
         }
-        // No launcher files must have been written when validation fails at
-        // the entry boundary.
-        assert!(
-            !dest.join("cmake").exists(),
-            "no unix launcher must be written when pkg_root rejected"
-        );
-        assert!(
-            !dest.join("cmake.cmd").exists(),
-            "no `.cmd` is ever emitted (cutover); also absent on rejection"
-        );
-        // The unsafe-char rejection at the `LauncherSafeString` boundary
-        // (`generate()` entry) fires BEFORE any of the Windows writes are
-        // spawned — so `.exe` and `.shim` must also be absent (the sidecar
-        // reuses the same `LauncherSafeString`, no second validator; ADR
-        // Contract 2 §Edge cases).
-        assert!(
-            !dest.join("cmake.exe").exists(),
-            "no `.exe` shim must be written when pkg_root rejected at the entry boundary"
-        );
-        assert!(
-            !dest.join("cmake.shim").exists(),
-            "no `.shim` sidecar must be written when pkg_root rejected at the entry boundary"
-        );
+        assert!(!dest.exists(), "nothing is written when the root is refused");
     }
 
-    /// The **third door** onto a baked path: the package root every ordinary launcher bakes.
+    /// The package root every launcher record carries must be UTF-8: `to_string_lossy` would substitute
+    /// U+FFFD, pass `LauncherSafeString` and record a root that names nothing.
     ///
-    /// The trampoline's two doors are guarded in `body.rs`; this is the one an
-    /// `ocx package install` reaches. `to_string_lossy` here would substitute
-    /// U+FFFD, sail through `LauncherSafeString` (U+FFFD is not in its
-    /// rejection set) and bake a package root naming nothing — into the `.sh`
-    /// launcher **and** the `.shim` sidecar, which share the one value.
-    ///
-    /// Unix-only because only there can a path be arbitrary bytes; on Windows
-    /// the equivalent input is an unpaired surrogate, which no `PathBuf`
-    /// constructor in safe Rust will build from a `&str`.
+    /// Unix only: only there can a path be arbitrary bytes.
     #[cfg(unix)]
     #[tokio::test]
     async fn generate_rejects_a_pkg_root_that_is_not_utf8() {
         use std::os::unix::ffi::OsStrExt as _;
 
         let tmp = tempdir().unwrap();
-        // 0x80 is a bare continuation byte — a valid path component, not valid
-        // UTF-8, and lossily rendered as U+FFFD.
         let pkg_root = tmp.path().join(std::ffi::OsStr::from_bytes(b"pkg-\x80-not-utf8"));
-        assert!(
-            pkg_root.to_str().is_none(),
-            "precondition: the fixture root really is un-decodable"
-        );
+        assert!(pkg_root.to_str().is_none(), "precondition: the root is not UTF-8");
         assert!(
             super::LauncherSafeString::new(pkg_root.to_string_lossy().into_owned()).is_ok(),
-            "precondition: the lossy rendering passes the unsafe-character gate, which is why \
-             the UTF-8 refusal has to exist at all"
+            "precondition: the lossy rendering passes the unsafe-character gate, which is why the UTF-8 refusal exists"
         );
-        if let Err(refused) = tokio::fs::create_dir_all(pkg_root.join("content")).await {
-            // APFS validates filenames as UTF-8 and rejects these bytes
-            // outright, so the input under test cannot exist on a macOS volume.
-            // Observed, not assumed via `target_os`: the row still runs on any
-            // filesystem that accepts the name, and a refusal for any other
-            // reason (a vanished tempdir) reds here rather than passing as this
-            // carve-out. Same shape as `index_store`'s two non-UTF-8 rows.
-            assert!(
-                tmp.path().exists(),
-                "only the non-UTF-8 component may be refused; the tempdir must exist: {refused}"
-            );
-            eprintln!("skipped: this filesystem refuses a non-UTF-8 filename: {refused}");
-            return;
-        }
-        let dest = pkg_root.join("entrypoints");
-        let entrypoints = entries_for(&["cmake"]);
-        let shim_bin = shim_bin_store(&tmp);
+        let dest = pkg_root.join("launchers");
 
-        let err = super::generate(&pkg_root, &entrypoints, &dest, &shim_bin)
+        let err = super::generate(&pkg_root, &entries_for(&["cmake"]), &dest)
             .await
-            .expect_err("a non-UTF-8 pkg_root must be refused, not lossily baked");
+            .expect_err("a non-UTF-8 pkg_root must be refused, not lossily recorded");
         match err {
-            crate::Error::LauncherPathNotUtf8 { path } => {
-                assert!(
-                    path.contains('\u{FFFD}'),
-                    "the refusal carries the lossy rendering, the only printable form the \
-                     value has: {path:?}"
-                );
-            }
+            crate::Error::LauncherPathNotUtf8 { path } => assert!(path.contains('\u{FFFD}'), "{path:?}"),
             other => panic!("expected LauncherPathNotUtf8, got {other:?}"),
         }
-        assert!(
-            !dest.join("cmake").exists(),
-            "and no launcher is written: the refusal fires at the entry boundary, before any \
-             file is created"
-        );
-    }
-
-    // ── Windows native shim emission (`.exe` + `.shim`, NO `.cmd`) ─────────
-    //
-    // Contract 2 postcondition (post-cutover): on Windows, each entry yields
-    // THREE files — `<name>`, `<name>.exe`, `<name>.shim` — and explicitly
-    // NO `<name>.cmd`. The `.exe` bytes must be BYTE-EQUAL to
-    // `ocx_store::shim::SHIM_BYTES` (the Authenticode verbatim-copy property —
-    // not mere existence; a transformed copy would invalidate the signature).
-    // Gated `#[cfg(windows)]` because the `.exe` and `.shim` writes are
-    // themselves cfg-gated and `SHIM_BYTES` is only non-empty on a Windows
-    // target.
-
-    #[cfg(windows)]
-    #[tokio::test]
-    async fn generate_emits_three_windows_files_no_cmd() {
-        let tmp = tempdir().unwrap();
-        let pkg_root = tmp.path().join("pkg");
-        tokio::fs::create_dir_all(pkg_root.join("content")).await.unwrap();
-        let dest = pkg_root.join("entrypoints");
-        let entrypoints = entries_for(&["cmake"]);
-        let shim_bin = shim_bin_store(&tmp);
-
-        super::generate(&pkg_root, &entrypoints, &dest, &shim_bin)
-            .await
-            .unwrap();
-
-        assert!(dest.join("cmake").exists(), "unix launcher must be created");
-        assert!(
-            dest.join("cmake.exe").exists(),
-            "`.exe` shim must be created on Windows"
-        );
-        assert!(
-            dest.join("cmake.shim").exists(),
-            "`.shim` sidecar must be created on Windows"
-        );
-        assert!(
-            !dest.join("cmake.cmd").exists(),
-            "`.cmd` launcher must NOT be created (cutover to `.exe`-only — the \
-             residual `%*` orphan is gone)"
-        );
-    }
-
-    #[cfg(windows)]
-    #[tokio::test]
-    async fn generate_exe_is_byte_equal_to_shim_bytes() {
-        let tmp = tempdir().unwrap();
-        let pkg_root = tmp.path().join("pkg");
-        tokio::fs::create_dir_all(pkg_root.join("content")).await.unwrap();
-        let dest = pkg_root.join("entrypoints");
-        let entrypoints = entries_for(&["cmake"]);
-        let shim_bin = shim_bin_store(&tmp);
-
-        super::generate(&pkg_root, &entrypoints, &dest, &shim_bin)
-            .await
-            .unwrap();
-
-        let written = tokio::fs::read(dest.join("cmake.exe")).await.unwrap();
-        assert_eq!(
-            written.as_slice(),
-            ocx_store::shim::SHIM_BYTES,
-            "`.exe` must be a verbatim copy of `ocx_store::shim::SHIM_BYTES` — the \
-             Authenticode verbatim-copy property (any transform invalidates the \
-             signature). This is byte-equality, NOT mere existence."
-        );
-    }
-
-    #[cfg(windows)]
-    #[tokio::test]
-    async fn generate_shim_sidecar_is_pkg_root_plus_lf() {
-        let tmp = tempdir().unwrap();
-        let pkg_root = tmp.path().join("pkg");
-        tokio::fs::create_dir_all(pkg_root.join("content")).await.unwrap();
-        let dest = pkg_root.join("entrypoints");
-        let entrypoints = entries_for(&["cmake"]);
-        let shim_bin = shim_bin_store(&tmp);
-
-        super::generate(&pkg_root, &entrypoints, &dest, &shim_bin)
-            .await
-            .unwrap();
-
-        let sidecar = tokio::fs::read(dest.join("cmake.shim")).await.unwrap();
-        let expected = format!("{}\n", pkg_root.to_string_lossy());
-        assert_eq!(
-            sidecar,
-            expected.as_bytes(),
-            "`.shim` must be exactly `format!(\"{{pkg_root}}\\n\")` (UTF-8, no BOM, single LF)"
-        );
-        assert!(
-            !sidecar.starts_with(&[0xEF, 0xBB, 0xBF]),
-            "`.shim` must not carry a UTF-8 BOM"
-        );
-    }
-
-    /// The `.exe`/`.shim` JoinSet spawn order is NOT
-    /// the write order — Contract 2's write-ordering postcondition requires
-    /// the implementation to SEQUENCE the writes so `.exe` lands before
-    /// `.shim`. The recoverable partial state is therefore
-    /// `.exe` present / `.shim` ABSENT (recoverable by re-running
-    /// `generate()`), never the reverse (a `.shim` without its `.exe` is the
-    /// worse state). This test injects a failure on the SECOND shim write
-    /// (the `.shim`) by pre-creating `cmake.shim` as a directory so the file
-    /// write fails, then asserts the surviving state is `.exe` present,
-    /// `.shim`-as-file absent — pinning the ordering as a real guarantee, not
-    /// an accident of spawn order.
-    #[cfg(windows)]
-    #[tokio::test]
-    async fn generate_half_state_is_exe_present_shim_absent() {
-        let tmp = tempdir().unwrap();
-        let pkg_root = tmp.path().join("pkg");
-        tokio::fs::create_dir_all(pkg_root.join("content")).await.unwrap();
-        let dest = pkg_root.join("entrypoints");
-        tokio::fs::create_dir_all(&dest).await.unwrap();
-        // Pre-create `cmake.shim` as a DIRECTORY: the sidecar file write must
-        // then fail, simulating a mid-generate fault on the 2nd shim write.
-        tokio::fs::create_dir_all(dest.join("cmake.shim")).await.unwrap();
-        let entrypoints = entries_for(&["cmake"]);
-        let shim_bin = shim_bin_store(&tmp);
-
-        let result = super::generate(&pkg_root, &entrypoints, &dest, &shim_bin).await;
-        assert!(
-            result.is_err(),
-            "generate() must surface the failed `.shim` write as an error"
-        );
-
-        // The recoverable half-state: the `.exe` shim is present (written
-        // first), the `.shim` was NOT successfully written as a file (the
-        // directory we pre-created is not a valid sidecar). This pins
-        // `.exe`-before-`.shim` as a guarantee — never `.shim` without `.exe`.
-        assert!(
-            dest.join("cmake.exe").exists(),
-            "`.exe` must be present after a failed `.shim` write (.exe written first)"
-        );
-        assert!(
-            !dest.join("cmake.shim").is_file(),
-            "the `.shim` must NOT exist as a valid file — recoverable state is \
-             `.exe` present / `.shim` absent (E1), never the reverse"
-        );
-    }
-
-    // ── non-Windows emits only the Unix `<name>` launcher ─────────────────
-    //
-    // On non-Windows the `.exe`/`.shim` emission is skipped via `cfg`, and
-    // `ocx_store::shim::SHIM_BYTES` is empty. Post-cutover, no `.cmd` is emitted
-    // on any platform either — this pins that only `<name>` exists off
-    // Windows, and `.cmd`/`.exe`/`.shim` are all absent.
-
-    #[cfg(not(windows))]
-    #[tokio::test]
-    async fn generate_emits_only_unix_launcher_off_windows() {
-        let tmp = tempdir().unwrap();
-        let pkg_root = tmp.path().join("pkg");
-        tokio::fs::create_dir_all(pkg_root.join("content")).await.unwrap();
-        let dest = pkg_root.join("entrypoints");
-        let entrypoints = entries_for(&["cmake"]);
-        let shim_bin = shim_bin_store(&tmp);
-
-        super::generate(&pkg_root, &entrypoints, &dest, &shim_bin)
-            .await
-            .unwrap();
-
-        assert!(dest.join("cmake").exists(), "unix launcher must still be created");
-        assert!(
-            !dest.join("cmake.cmd").exists(),
-            "no `.cmd` launcher on any platform (cutover to `.exe`-only)"
-        );
-        assert!(
-            !dest.join("cmake.exe").exists(),
-            "no `.exe` shim off Windows (emission cfg-gated)"
-        );
-        assert!(
-            !dest.join("cmake.shim").exists(),
-            "no `.shim` sidecar off Windows (emission cfg-gated)"
-        );
-    }
-
-    /// Off Windows no `.exe` is emitted, so [`ShimBinStore::ensure`]
-    /// must never be reached — the store root stays absent. Without this, an
-    /// implementation that publishes the blob unconditionally (before the
-    /// `cfg`-gated per-entry work) would litter `$OCX_HOME/.bin/ocx-shim/`
-    /// with a zero-byte `.exe` on every Linux/macOS install, and nothing else
-    /// in this file would notice.
-    #[cfg(not(windows))]
-    #[tokio::test]
-    async fn generate_does_not_touch_the_shim_bin_store_off_windows() {
-        let tmp = tempdir().unwrap();
-        let pkg_root = tmp.path().join("pkg");
-        tokio::fs::create_dir_all(pkg_root.join("content")).await.unwrap();
-        let dest = pkg_root.join("entrypoints");
-        let entrypoints = entries_for(&["cmake"]);
-        let shim_bin = shim_bin_store(&tmp);
-
-        super::generate(&pkg_root, &entrypoints, &dest, &shim_bin)
-            .await
-            .unwrap();
-
-        assert!(
-            !shim_bin.root().exists(),
-            "the shared shim blob store must not be created off Windows — no \
-             `.exe` is emitted there, so nothing may publish into it"
-        );
-    }
-
-    /// Each `<name>.exe` is a **hardlink** to the one blob in the
-    /// shared store, not an independent copy — one inode, one Authenticode
-    /// signature, one Defender scan regardless of how many names a package
-    /// declares.
-    ///
-    /// Link identity is observed by mutating the store's blob in place
-    /// (`fs::write` truncates the existing inode rather than replacing it) and
-    /// reading the change back through every emitted `.exe`. Byte-equality
-    /// alone cannot distinguish a hardlink from a copy — which is the whole
-    /// point of #301 — and the Windows metadata APIs that expose a file index
-    /// (`windows_by_handle`) are unstable, so this is the portable identity
-    /// probe.
-    #[cfg(windows)]
-    #[tokio::test]
-    async fn generate_hardlinks_every_exe_to_the_one_shared_store_blob() {
-        const MUTATED: &[u8] = b"mutated-through-the-shared-inode";
-
-        let tmp = tempdir().unwrap();
-        let pkg_root = tmp.path().join("pkg");
-        tokio::fs::create_dir_all(pkg_root.join("content")).await.unwrap();
-        let dest = pkg_root.join("entrypoints");
-        let names = ["cmake", "ctest", "cpack"];
-        let entrypoints = entries_for(&names);
-        let shim_bin = shim_bin_store(&tmp);
-
-        super::generate(&pkg_root, &entrypoints, &dest, &shim_bin)
-            .await
-            .unwrap();
-
-        // The store is flat and holds exactly one blob for the running arch,
-        // however many names were generated.
-        let mut blobs: Vec<std::path::PathBuf> = std::fs::read_dir(shim_bin.root())
-            .expect("the shim blob store root must exist after generate()")
-            .map(|entry| entry.expect("readable directory entry").path())
-            .collect();
-        blobs.sort();
-        assert_eq!(
-            blobs.len(),
-            1,
-            "one shared blob backs all {} names, never one per entry",
-            names.len()
-        );
-
-        std::fs::write(&blobs[0], MUTATED).expect("the store blob must be writable in place");
-
-        for name in names {
-            let exe = dest.join(format!("{name}.exe"));
-            let bytes = tokio::fs::read(&exe).await.unwrap();
-            // `assert!` on the same equality rather than `assert_eq!`: a failing
-            // `assert_eq!` renders the whole file as a byte array, and the file
-            // is the megabyte-scale shim PE — enough output to truncate the CI
-            // log at the point the diagnosis is needed. The length is the datum
-            // that tells the two outcomes apart.
-            assert!(
-                bytes == MUTATED,
-                "`{name}.exe` must share the store blob's inode — an in-place \
-                 mutation of the blob is visible through a hardlink and \
-                 invisible through a copy; read {} bytes, expected {}",
-                bytes.len(),
-                MUTATED.len()
-            );
-        }
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn shim_bytes_empty_off_windows() {
-        assert!(
-            ocx_store::shim::SHIM_BYTES.is_empty(),
-            "`ocx` must carry zero shim weight off Windows (SHIM_BYTES empty)"
-        );
+        assert!(!dest.exists(), "the refusal fires before any file is created");
     }
 
     // ── The absolute `ocx` a trampoline re-enters through ──────────

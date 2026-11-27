@@ -211,6 +211,33 @@ fn clean_starts_empty_and_keeps_only_what_was_composed() {
 }
 
 #[test]
+fn the_launcher_depth_counter_reaches_the_child_unchanged_in_every_mode() {
+    for mode in [ExecMode::Layer, ExecMode::Isolate, ExecMode::Clean] {
+        let lock = hermetic();
+        lock.set(&ocx_env::__OCX_LAUNCHER_DEPTH, "7");
+        let fixture = Fixture::new(mode);
+
+        let projected = compose(&Inherited::Absent, &fixture.spawn());
+
+        assert_eq!(
+            get(&projected.env, ocx_env::__OCX_LAUNCHER_DEPTH.name).as_deref(),
+            Some("7"),
+            "the depth counter changed under {mode:?}"
+        );
+    }
+}
+
+#[test]
+fn clean_does_not_invent_a_launcher_depth_counter() {
+    let _lock = hermetic();
+    let fixture = Fixture::new(ExecMode::Clean);
+
+    let projected = compose(&Inherited::Absent, &fixture.spawn());
+
+    assert_eq!(get(&projected.env, ocx_env::__OCX_LAUNCHER_DEPTH.name), None);
+}
+
+#[test]
 fn clean_does_not_revert_and_records_only_this_spawn() {
     let _lock = hermetic();
     let inherited = readable(vec![constant_record("JAVA_HOME", "/old", Prior::Unset)]);

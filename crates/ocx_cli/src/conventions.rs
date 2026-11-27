@@ -1179,7 +1179,7 @@ mod tests {
         // Executed on ksh, dash and pwsh: their split-based folds see `/n/a:b`
         // as two segments, match neither against the whole operand, and prepend
         // another copy on every re-source — PATH grows without bound.
-        let separator = ocx_util::path::PATH_SEPARATOR;
+        let separator = ocx_env_apply::PATH_SEPARATOR;
         let entry = path_entry("OCXP", &format!("/n/a{separator}b"));
         let note = emit_line(Shell::Bash, &entry).expect_err("must be refused, not emitted");
         assert!(note.contains("path separator"), "{note}");

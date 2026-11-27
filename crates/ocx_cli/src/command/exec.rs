@@ -68,7 +68,7 @@ pub struct Exec {
     /// `always` composes a package as a generated shim: its declared names
     /// reach the child's `PATH` immediately and its content downloads the first
     /// time one of them runs. The shim directory sits *below* the package's own
-    /// `entrypoints/` and `bin/`, so a second invocation of the same name
+    /// `launchers/` and `bin/`, so a second invocation of the same name
     /// inside the same child resolves to the materialized binary directly.
     ///
     /// Only this flag and `OCX_LAZY_MODE` apply here: the `ocx.toml` tiers
@@ -187,6 +187,7 @@ impl Exec {
         // Resolved once for record and launch, or the audit trail could misname the binary. An
         // unprovided name is 65 here, never an ambient `PATH` lookup.
         let resolved = process_env.resolve_command(command)?;
+        let deferred_root = context.file_structure().deferred_root();
         let launch = Launch::recording(
             process_env,
             RecordInputs {
@@ -194,7 +195,7 @@ impl Exec {
                 admitted: &admitted,
                 executable: &resolved,
                 store_root: context.file_structure().packages.root(),
-                shim_root: context.file_structure().shims.root(),
+                shim_root: &deferred_root,
                 argv: &self.command,
                 config: context.recorded_config(),
                 insecure_registries: context.insecure_hosts(),

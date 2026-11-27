@@ -52,6 +52,7 @@
 "@crates//:docker_credential-1.3.3" = "docker_credential"
 "@crates//:dunce-1.0.5" = "dunce"
 "@crates//:elf-0.8.0" = "elf"
+"@crates//:filetime-0.2.29" = "filetime"
 "@crates//:flate2-1.1.10" = "flate2"
 "@crates//:fs4-1.1.0" = "fs4"
 "@crates//:futures-0.3.34" = "futures"

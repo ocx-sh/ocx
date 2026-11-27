@@ -4,7 +4,7 @@
 //! Generated shim directories: a deferred tool on `PATH` without its content materialized.
 //!
 //! ```text
-//! bin/            — the generated launchers, one per claimed name
+//! bin/            — the generated launchers, one per claimed name (`l/` under `deferred/<G>/`)
 //! digest          — full digest string for recovery
 //! refs/blobs/     — forward-refs keeping the closure's config blobs reachable
 //! ```
@@ -19,6 +19,8 @@ type Result<T> = std::result::Result<T, ocx_util::error::FileError>;
 #[derive(Debug, Clone)]
 pub struct ShimDir {
     pub dir: PathBuf,
+    /// The launcher subdirectory's name: `bin` under `shims/`, `l` under `deferred/<G>/`.
+    pub marker: &'static str,
 }
 
 impl ShimDir {
@@ -29,7 +31,7 @@ impl ShimDir {
 
     /// The directory pushed onto `PATH`, not [`root`](Self::root).
     pub fn bin(&self) -> PathBuf {
-        self.dir.join(SHIM_BIN_DIRNAME)
+        self.dir.join(self.marker)
     }
 
     pub fn digest_file(&self) -> PathBuf {
@@ -44,17 +46,25 @@ impl ShimDir {
 
 // Launchers nest here, never at the root: a legal claim of `digest` or `refs` would overwrite the CAS marker and GC would collect live blobs.
 // Also the walk's shim-dir marker, so producer and walker key on one fact.
-const SHIM_BIN_DIRNAME: &str = "bin";
+pub(super) const SHIM_BIN_DIRNAME: &str = "bin";
+
+/// The launcher subdirectory of a deferred tree, `deferred/<G>/…/l/`.
+pub(super) const DEFERRED_LAUNCHER_DIRNAME: &str = "l";
 
 /// Shim directories at `{root}/{registry_slug}/{repository}/{cas_shard_path}/`.
 #[derive(Debug, Clone)]
 pub struct ShimStore {
     root: PathBuf,
+    marker: &'static str,
 }
 
 impl ShimStore {
-    pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+    /// `marker` names each directory's launcher subdirectory and its completeness marker: `bin` for `shims/`, `l` for a deferred tree.
+    pub fn new(root: impl Into<PathBuf>, marker: &'static str) -> Self {
+        Self {
+            root: root.into(),
+            marker,
+        }
     }
 
     pub fn root(&self) -> &Path {
@@ -72,6 +82,7 @@ impl ShimStore {
     pub fn shim_dir(&self, identifier: &ocx_oci::PinnedPackageRef) -> ShimDir {
         ShimDir {
             dir: self.path(identifier),
+            marker: self.marker,
         }
     }
 
@@ -85,19 +96,27 @@ impl ShimStore {
             return Ok(Vec::new());
         }
         // No `max_depth`: repositories vary in depth, and GC deletes any live shim this fails to report.
-        DirWalker::new(self.root.clone(), classify_shim_dir).walk().await
+        let marker = self.marker;
+        DirWalker::new(self.root.clone(), move |dir: &Path, depth| {
+            classify_shim_dir(dir, depth, marker)
+        })
+        .walk()
+        .await
     }
 }
 
-fn classify_shim_dir(dir: &Path, _depth: usize) -> WalkDecision<ShimDir> {
+fn classify_shim_dir(dir: &Path, _depth: usize, marker: &'static str) -> WalkDecision<ShimDir> {
     // Never prune by name: `org/bin` is a legal repository, and a pruned subtree's live shims are collected.
-    if !dir.join(SHIM_BIN_DIRNAME).is_dir() {
+    if !dir.join(marker).is_dir() {
         return WalkDecision::descend();
     }
     if super::cas_path::is_valid_cas_path(dir) {
-        return WalkDecision::leaf(ShimDir { dir: dir.to_path_buf() });
+        return WalkDecision::leaf(ShimDir {
+            dir: dir.to_path_buf(),
+            marker,
+        });
     }
-    log::debug!("Not a shim dir despite a bin/ child, descending: {}", dir.display());
+    log::debug!("Not a shim dir despite a launcher child, descending: {}", dir.display());
     WalkDecision::descend()
 }
 
@@ -162,7 +181,7 @@ mod tests {
 
     #[test]
     fn path_is_registry_slug_then_repository_then_cas_shard() {
-        let store = ShimStore::new("/ocx/shims");
+        let store = ShimStore::new("/ocx/shims", "bin");
 
         assert_eq!(
             store.path(&pinned("example.com", "cmake")),
@@ -173,7 +192,7 @@ mod tests {
 
     #[test]
     fn path_slugifies_a_port_bearing_registry() {
-        let store = ShimStore::new("/ocx/shims");
+        let store = ShimStore::new("/ocx/shims", "bin");
 
         assert_eq!(
             store.path(&pinned("localhost:5000", "cmake")),
@@ -184,7 +203,7 @@ mod tests {
 
     #[test]
     fn path_includes_the_repository_unlike_package_store() {
-        let store = ShimStore::new("/ocx/shims");
+        let store = ShimStore::new("/ocx/shims", "bin");
         let cmake = pinned("example.com", "cmake");
         let ninja = pinned("example.com", "ninja");
 
@@ -215,7 +234,7 @@ mod tests {
     #[test]
     fn path_splits_a_nested_repository_into_separate_components() {
         let root = Path::new("/ocx/shims");
-        let store = ShimStore::new(root);
+        let store = ShimStore::new(root, "bin");
         let path = store.path(&pinned("example.com", "org/project/sub/tool"));
 
         assert_eq!(
@@ -244,7 +263,7 @@ mod tests {
 
     #[test]
     fn shim_dir_is_anchored_at_the_identifier_path() {
-        let store = ShimStore::new("/ocx/shims");
+        let store = ShimStore::new("/ocx/shims", "bin");
         let identifier = pinned("example.com", "cmake");
 
         assert_eq!(
@@ -260,7 +279,10 @@ mod tests {
     #[test]
     fn shim_dir_children_are_bin_digest_and_refs_blobs() {
         let dir = PathBuf::from("/ocx/shims/example.com/cmake/sha256/43/rest");
-        let shim = ShimDir { dir: dir.clone() };
+        let shim = ShimDir {
+            dir: dir.clone(),
+            marker: "bin",
+        };
 
         assert_eq!(
             shim.root(),
@@ -288,6 +310,7 @@ mod tests {
     fn bin_subdirectory_isolates_launchers_from_the_digest_and_refs_siblings() {
         let shim = ShimDir {
             dir: PathBuf::from("/ocx/shims/example.com/cmake/sha256/43/rest"),
+            marker: "bin",
         };
 
         // `binaries = ["digest", "refs"]` passes `BinaryName::try_from`, so
@@ -333,10 +356,37 @@ mod tests {
     // variable and unbounded, so any `max_depth` bound silently loses the
     // deeper shims.
 
+    #[test]
+    fn the_marker_names_the_launcher_subdirectory() {
+        let store = ShimStore::new("/ocx/deferred/g", "l");
+        let shim = store.shim_dir(&pinned("example.com", "cmake"));
+
+        assert_eq!(shim.bin(), shim.root().join("l"));
+        assert_eq!(shim.digest_file(), shim.root().join("digest"));
+    }
+
+    #[tokio::test]
+    async fn list_all_classifies_on_the_stores_own_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = layout(tmp.path(), "example.com", &["cmake"]);
+        std::fs::create_dir_all(dir.join("l")).unwrap();
+        std::fs::write(dir.join("digest"), format!("sha256:{SHA256_HEX}")).unwrap();
+
+        assert_eq!(
+            roots_of(&ShimStore::new(tmp.path(), "l").list_all().await.unwrap()),
+            vec![dir],
+            "a store keyed on `l` finds an `l/` tree"
+        );
+        assert!(
+            ShimStore::new(tmp.path(), "bin").list_all().await.unwrap().is_empty(),
+            "and a store keyed on `bin` does not"
+        );
+    }
+
     #[tokio::test]
     async fn list_all_returns_empty_when_the_root_is_absent() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = ShimStore::new(tmp.path().join("never-created"));
+        let store = ShimStore::new(tmp.path().join("never-created"), "bin");
 
         assert!(
             store.list_all().await.unwrap().is_empty(),
@@ -348,7 +398,7 @@ mod tests {
     async fn list_all_finds_a_shim_at_a_single_segment_repository() {
         let tmp = tempfile::tempdir().unwrap();
         let published = publish(tmp.path(), "example.com", &["cmake"]);
-        let store = ShimStore::new(tmp.path());
+        let store = ShimStore::new(tmp.path(), "bin");
 
         let shims = store.list_all().await.unwrap();
 
@@ -379,7 +429,7 @@ mod tests {
     async fn list_all_finds_a_shim_at_a_deep_repository_path() {
         let tmp = tempfile::tempdir().unwrap();
         let published = publish(tmp.path(), "example.com", &["org", "project", "sub", "tool"]);
-        let store = ShimStore::new(tmp.path());
+        let store = ShimStore::new(tmp.path(), "bin");
 
         let shims = store.list_all().await.unwrap();
 
@@ -402,7 +452,7 @@ mod tests {
         let shallow = publish(tmp.path(), "example.com", &["cmake"]);
         let nested = publish(tmp.path(), "example.com", &["org", "ninja"]);
         let deep = publish(tmp.path(), "ghcr.io", &["org", "project", "sub", "tool"]);
-        let store = ShimStore::new(tmp.path());
+        let store = ShimStore::new(tmp.path(), "bin");
 
         let mut expected = vec![shallow, nested, deep];
         expected.sort();
@@ -424,7 +474,7 @@ mod tests {
     async fn list_all_finds_a_shim_under_a_repository_segment_named_refs() {
         let tmp = tempfile::tempdir().unwrap();
         let published = publish(tmp.path(), "example.com", &["org", "refs"]);
-        let store = ShimStore::new(tmp.path());
+        let store = ShimStore::new(tmp.path(), "bin");
 
         assert_eq!(
             roots_of(&store.list_all().await.unwrap()),
@@ -442,7 +492,7 @@ mod tests {
     async fn list_all_finds_a_shim_under_a_repository_segment_named_bin() {
         let tmp = tempfile::tempdir().unwrap();
         let published = publish(tmp.path(), "example.com", &["org", "bin"]);
-        let store = ShimStore::new(tmp.path());
+        let store = ShimStore::new(tmp.path(), "bin");
 
         assert_eq!(
             roots_of(&store.list_all().await.unwrap()),
@@ -461,7 +511,7 @@ mod tests {
         // these decoys as shims of their own.
         std::fs::create_dir_all(published.join("bin").join("decoy").join("bin")).unwrap();
         std::fs::create_dir_all(published.join("refs").join("blobs").join("decoy").join("bin")).unwrap();
-        let store = ShimStore::new(tmp.path());
+        let store = ShimStore::new(tmp.path(), "bin");
 
         assert_eq!(
             roots_of(&store.list_all().await.unwrap()),

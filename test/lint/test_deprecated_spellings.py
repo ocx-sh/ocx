@@ -197,9 +197,13 @@ ENV_FROZEN_BODIES: dict[str, frozenset[Path]] = {
             PROJECT_ROOT / "crates" / "ocx_package_manager" / "src" / "tasks" / "render_toolchain.rs",
             PROJECT_ROOT / "crates" / "ocx_shim" / "src" / "main.rs",
             PROJECT_ROOT / "crates" / "ocx_shim" / "src" / "core.rs",
+            PROJECT_ROOT / "crates" / "ocx_shim" / "tests" / "direct_launch.rs",
             PROJECT_ROOT / "crates" / "ocx_config" / "src" / "env.rs",
             PROJECT_ROOT / "crates" / "ocx_package" / "src" / "metadata" / "env" / "apply.rs",
             PROJECT_ROOT / "crates" / "ocx_package_manager" / "src" / "launcher" / "env_tests.rs",
+            PROJECT_ROOT / "test" / "src" / "launcher_fixtures.py",
+            PROJECT_ROOT / "test" / "tests" / "test_launcher_exec.py",
+            PROJECT_ROOT / "test" / "tests" / "test_lazy_loading.py",
             PROJECT_ROOT / "test" / "tests" / "test_toolchain_cli.py",
             PROJECT_ROOT / "test" / "tests" / "data" / "exec_env" / "v0.6.5" / "trampoline.sh.in",
             PROJECT_ROOT / "website" / "src" / "content" / "docs" / "explanation" / "toolchain-activation.mdx",
@@ -210,7 +214,8 @@ ENV_FROZEN_BODIES: dict[str, frozenset[Path]] = {
 
 Published trampoline bodies are frozen, and the Windows shim strips the withdrawn
 ``OCX_GLOBAL`` from the environment it hands a child, so both must keep naming it. The
-config, metadata and launcher tests and the acceptance fixture build those frozen
+config, metadata and launcher tests, the launcher acceptance modules that export it to see the
+launcher delete it from the child, and the acceptance fixture build those frozen
 bodies byte for byte (the v0.6.5 trampoline is a verbatim copy of the published one), and the
 toolchain-activation page prints one.
 """

@@ -943,6 +943,7 @@ pub(crate) mod tests {
             reports: golden("reports"),
             errors: golden("errors"),
             cli: golden("cli"),
+            vendor_manifest: None,
         }
     }
 
@@ -956,8 +957,8 @@ pub(crate) mod tests {
     #[test]
     fn the_goldens_lower_and_every_part_is_populated() {
         let ir = load(&documents()).expect("the goldens lower");
-        assert_eq!(ir.roots.len(), 59, "58 report roots and the error document");
-        assert_eq!(ir.commands.len(), 72, "versioned, visible commands");
+        assert_eq!(ir.roots.len(), 60, "59 report roots and the error document");
+        assert_eq!(ir.commands.len(), 74, "versioned, visible commands");
         assert!(ir.types.len() > 150, "{} types", ir.types.len());
         assert!(ir.exit_codes.len() == 13 && ir.categories.len() == 11 && ir.details.len() > 100);
         assert!(!ir.env.is_empty() && ir.env.iter().all(|var| !var.name.is_empty()));

@@ -169,6 +169,13 @@ pub enum EnvScope {
         /// The `--env` overrides, in argument order.
         env: Vec<Entry>,
     },
+    /// `ocx vendor`: install paths rooted at `token_root`, no patches, no caller entries, no toolchain tree.
+    Vendor {
+        /// The `@VENDOR_DIR@` token the paths are rooted at.
+        token_root: std::path::PathBuf,
+        /// The vendored name of every package of the run; a package it lacks fails the composition.
+        keys: std::collections::BTreeMap<ocx_oci::Digest, ocx_store::file_structure::PackageKey>,
+    },
 }
 
 impl EnvScope {
@@ -184,7 +191,7 @@ impl EnvScope {
             std::sync::LazyLock::new(std::collections::BTreeSet::new);
         match self {
             EnvScope::Project { no_patches, .. } => no_patches,
-            EnvScope::Package { .. } => &EMPTY,
+            EnvScope::Package { .. } | EnvScope::Vendor { .. } => &EMPTY,
         }
     }
 
@@ -192,6 +199,7 @@ impl EnvScope {
     fn contributed_env(&self) -> &[Entry] {
         match self {
             EnvScope::Project { env, .. } | EnvScope::Package { env } => env,
+            EnvScope::Vendor { .. } => &[],
         }
     }
 
@@ -199,7 +207,7 @@ impl EnvScope {
     fn toolchain_links(&self) -> Option<&crate::composer::ToolchainLinks> {
         match self {
             EnvScope::Project { toolchain, .. } => toolchain.as_deref(),
-            EnvScope::Package { .. } => None,
+            EnvScope::Package { .. } | EnvScope::Vendor { .. } => None,
         }
     }
 }
@@ -690,9 +698,10 @@ impl PackageManager {
     ) -> crate::Result<(Vec<Entry>, usize, Vec<PatchProvenance>, AdmittedClaims)> {
         let no_patches = scope.opt_out();
         // Every env caller composes here, so none can disagree on link-following or group-heal order.
-        let paths = match scope.toolchain_links() {
-            Some(links) => composer::ComposePaths::resolve(links, self.file_structure(), platform).await?,
-            None => composer::ComposePaths::digest_only(),
+        let paths = match (&scope, scope.toolchain_links()) {
+            (EnvScope::Vendor { token_root, keys }, _) => composer::ComposePaths::vendor(token_root, keys.clone()),
+            (_, Some(links)) => composer::ComposePaths::resolve(links, self.file_structure(), platform).await?,
+            (_, None) => composer::ComposePaths::digest_only(),
         };
         let out = composer::compose(packages, &self.file_structure().packages, self_view, &paths).await?;
         let mut attribution = AdmittedClaims {
@@ -709,10 +718,14 @@ impl PackageManager {
         let compose_count = entries.len();
         let mut provenance: Vec<PatchProvenance> = Vec::new();
 
-        if let Some(mut patch_set) = self
-            .build_site_patch_set(&out.admitted, packages, self_view, no_patches, platform)
-            .await?
-        {
+        // Vendor lane: a patch names a host path, so none reaches a vendored environment.
+        let patch_set = if paths.is_vendor() {
+            None
+        } else {
+            self.build_site_patch_set(&out.admitted, packages, self_view, no_patches, platform)
+                .await?
+        };
+        if let Some(mut patch_set) = patch_set {
             // One row per (identifier minus advisory tag, namespace) across the whole composition,
             // or a dep shared by base and companion lands twice; base rows seed first and win.
             let mut seen_integrations: HashSet<(ocx_oci::PinnedPackageRef, String)> = attribution
@@ -3288,6 +3301,28 @@ mod phase4_spec_tests {
                 }],
             },
         ));
+
+        // Vendor lane: the same rule, the same self view, and no overlay.
+        let vendored = manager
+            .resolve_env(
+                std::slice::from_ref(&root),
+                true,
+                super::EnvScope::Vendor {
+                    token_root: std::path::PathBuf::from("@VENDOR_DIR@"),
+                    keys: ocx_store::file_structure::VendorLayout::package_keys(&[
+                        root.identifier().digest(),
+                        dep_id.digest(),
+                    ])
+                    .unwrap(),
+                },
+                &super::host_platform(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            !vendored.iter().any(|e| e.key == "DEP_PATCH_VAR"),
+            "the vendor lane must pass no patch set; entries: {vendored:?}"
+        );
 
         // Consumer view: private dep NOT admitted → rule never matches → var ABSENT.
         let consumer = manager
@@ -6315,7 +6350,9 @@ mod phase4_spec_tests {
             .await
             .unwrap();
 
-        let launchers = store.package_dir(&dep).entrypoints();
+        let launchers = store
+            .package_dir(&dep)
+            .launchers(&ocx_store::launcher_generation::LauncherGeneration::host().expect("host launcher blob"));
         assert!(
             entries
                 .iter()
@@ -6547,7 +6584,9 @@ mod phase4_spec_tests {
                 usize::from(reaches),
                 "{case}: entries {entries:?}"
             );
-            let launchers = store.package_dir(&secret).entrypoints();
+            let launchers = store
+                .package_dir(&secret)
+                .launchers(&ocx_store::launcher_generation::LauncherGeneration::host().expect("host launcher blob"));
             assert_eq!(
                 entries
                     .iter()

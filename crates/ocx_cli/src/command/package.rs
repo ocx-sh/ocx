@@ -355,7 +355,7 @@ pub enum Package {
     ///
     /// The package is deselected but not uninstalled: its candidate symlink and object-store
     /// content stay. Removing the `current` symlink also makes the package's entry-point launchers
-    /// unreachable through `current/entrypoints/`.
+    /// unreachable through `current/launchers/`.
     ///
     /// Removing an already-absent link is not an error. Use `ocx package uninstall` to remove the
     /// installed files too.
@@ -417,6 +417,15 @@ pub enum Package {
         suffix (`from` is ignored here, since nothing is pushed). A digest layer is fetched on \
         demand; a missing digest blob under `--offline` or `--frozen` exits 81.")]
     Test(super::package_test::PackageTest),
+    /// Write packages, launchers and a manifest to a relocatable directory.
+    #[command(long_about = "\
+        Write packages, launchers and a manifest to a relocatable directory.\n\n\
+        Resolves each PACKAGE for `--platform` (the host by default), writes its content, one launcher per \
+        exposed name and `manifest.json` to DIR. The directory runs from wherever it is moved; nothing in it \
+        names this machine. A package is `registry/repository:tag` or `registry/repository@sha256:<hex>`.\n\n\
+        `--manifest-only` writes `manifest.json` alone. `--omit-links` creates no symlink. DIR must be absent or \
+        empty, else the command exits 64 and writes nothing. A missing `-o` or PACKAGE exits 64.")]
+    Vendor(super::package_vendor::PackageVendor),
     /// Verify a published package's Sigstore signature (keyless, via OCI Referrers).
     #[command(long_about = "\
         Verify a published package's Sigstore signature (keyless, via OCI Referrers).\n\n\
@@ -504,7 +513,7 @@ pub enum Package {
         Resolve installed packages and print their package-root (or, with \
         `--candidate`/`--current`, install-symlink) paths.\n\n\
         Operates on OCI identifiers and never consults `ocx.toml`. The package root holds \
-        `content/` (installed files), `entrypoints/` (generated launchers) and per-package files \
+        `content/` (installed files), `launchers/<generation>/` (generated launchers) and per-package files \
         such as `metadata.json`.\n\n\
         By default the content-addressed package root is printed; `--candidate`, `--current` and \
         `--link` print the stable install symlink instead, which targets the same root.\n\n\
@@ -554,6 +563,7 @@ impl Package {
             Package::Deselect(deselect) => boxed(move || deselect.execute(context)).await,
             Package::Sign(sign) => boxed(move || sign.execute(context)).await,
             Package::Test(test) => boxed(move || test.execute(context)).await,
+            Package::Vendor(vendor) => boxed(move || vendor.execute(context)).await,
             Package::Verify(verify) => boxed(move || verify.execute(context)).await,
             Package::Exec(exec) => boxed(move || exec.execute(context)).await,
             Package::Uninstall(uninstall) => boxed(move || uninstall.execute(context)).await,

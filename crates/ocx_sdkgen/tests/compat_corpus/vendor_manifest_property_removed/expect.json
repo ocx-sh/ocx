@@ -1,0 +1,14 @@
+{
+  "kind": "vendor-manifest",
+  "verdict": "break",
+  "change": "The manifest drops its optional `note` property.",
+  "findings": [
+    {
+      "code": "B02",
+      "pointer": "/properties/note",
+      "subjects": [
+        "*"
+      ]
+    }
+  ]
+}

@@ -100,6 +100,7 @@ pub fn class(leaf: Option<Leaf>, shell_flag: bool) -> Class {
         | Leaf::PackageSign
         | Leaf::PackageTest
         | Leaf::PackageUninstall
+        | Leaf::PackageVendor
         | Leaf::PackageVerify
         | Leaf::PackageWhich
         | Leaf::PatchFreeze
@@ -114,7 +115,8 @@ pub fn class(leaf: Option<Leaf>, shell_flag: bool) -> Class {
         | Leaf::ShellAllow
         | Leaf::ShellRevoke
         | Leaf::Update
-        | Leaf::Upgrade => Class::Send,
+        | Leaf::Upgrade
+        | Leaf::Vendor => Class::Send,
     }
 }
 

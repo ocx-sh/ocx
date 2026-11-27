@@ -25,6 +25,8 @@ pub enum Kind {
     Errors,
     /// The command grammar, `cli.json`.
     Cli,
+    /// The vendor manifest: one document, validated whole, with no root list.
+    VendorManifest,
     /// An input schema (`metadata`, `patch`): only the key-spelling rule applies.
     Input,
 }
@@ -98,6 +100,8 @@ impl Rule {
             Kind::Input => matches!(self, Self::L06),
             Kind::Errors => !matches!(self, Self::L09 | Self::L10 | Self::L13 | Self::L14 | Self::L18),
             Kind::Reports => !matches!(self, Self::L16),
+            // The report root rules (wrapper, top-level entries, `*Root` reach) have no root list to read.
+            Kind::VendorManifest => !matches!(self, Self::L09 | Self::L13 | Self::L14 | Self::L16),
             Kind::Cli => false,
         }
     }
@@ -222,7 +226,7 @@ impl<'a> SchemaLint<'a> {
         match self.kind {
             Kind::Reports => self.roots(),
             Kind::Errors => self.error_context(),
-            Kind::Cli | Kind::Input => {}
+            Kind::Cli | Kind::VendorManifest | Kind::Input => {}
         }
         self.report
     }
@@ -1130,6 +1134,27 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn the_vendor_manifest_keeps_the_reports_rules_that_need_no_root_list() {
+        let dropped: Vec<_> = Rule::ALL
+            .iter()
+            .filter(|rule| rule.applies(Kind::Reports) && !rule.applies(Kind::VendorManifest))
+            .collect();
+        assert_eq!(dropped, [&Rule::L09, &Rule::L13, &Rule::L14]);
+        // A manifest-shaped document is walked from its top: an off-subset keyword is found, and no root rule fires.
+        let doc = json!({
+            "description": "A manifest.",
+            "type": "object",
+            "properties": {"a": {"description": "A.", "anyOf": []}},
+        });
+        let rules: Vec<_> = run(&doc, Kind::VendorManifest)
+            .findings
+            .iter()
+            .map(|finding| finding.rule)
+            .collect();
+        assert_eq!(rules, [Rule::L01]);
+    }
 
     #[test]
     fn vocabulary_is_chosen_by_name() {

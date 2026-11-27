@@ -16,7 +16,9 @@ pub enum PackageDirError {
     PathInvalid(PathBuf),
 }
 
-/// One package directory: `content/`, `entrypoints/`, the JSON sidecars, `digest` and `refs/`.
+const LAUNCHERS_DIRNAME: &str = "launchers";
+
+/// One package directory: `content/`, `launchers/<G>/` (and the `entrypoints/` an older release wrote), the JSON sidecars, `digest` and `refs/`.
 #[derive(Debug, Clone)]
 pub struct PackageDir {
     pub dir: PathBuf,
@@ -121,6 +123,16 @@ impl PackageDir {
     pub fn entrypoints(&self) -> PathBuf {
         self.dir.join("entrypoints")
     }
+
+    /// `launchers/<G>`: the launcher directory generation `generation` publishes; a published one is never edited.
+    pub fn launchers(&self, generation: &crate::launcher_generation::LauncherGeneration) -> PathBuf {
+        self.launchers_root().join(generation.as_str())
+    }
+
+    /// Parent of every generation's launcher directory; created without `-p`, so a vanished package directory stays vanished.
+    pub fn launchers_root(&self) -> PathBuf {
+        self.dir.join(LAUNCHERS_DIRNAME)
+    }
 }
 
 /// Assembled packages at `{root}/{registry_slug}/{cas_shard_path}/`; no repository in the path, so repositories dedup.
@@ -219,6 +231,20 @@ impl PackageStore {
 
     pub fn entrypoints(&self, identifier: &ocx_oci::PinnedPackageRef) -> PathBuf {
         self.path(identifier).join("entrypoints")
+    }
+
+    /// See [`PackageDir::launchers`].
+    pub fn launchers(
+        &self,
+        identifier: &ocx_oci::PinnedPackageRef,
+        generation: &crate::launcher_generation::LauncherGeneration,
+    ) -> PathBuf {
+        self.launchers_root(identifier).join(generation.as_str())
+    }
+
+    /// See [`PackageDir::launchers_root`].
+    pub fn launchers_root(&self, identifier: &ocx_oci::PinnedPackageRef) -> PathBuf {
+        self.path(identifier).join(LAUNCHERS_DIRNAME)
     }
 
     pub fn digest_file_for_content(&self, content_path: &Path) -> std::result::Result<PathBuf, PackageDirError> {
@@ -814,6 +840,38 @@ mod tests {
             !root_str.contains(".ocx/packages"),
             "with_root must not inject an object-store prefix: {}",
             root_str
+        );
+    }
+
+    #[test]
+    fn launchers_dir_is_launchers_slash_generation_beside_entrypoints() {
+        let generation = crate::launcher_generation::LauncherGeneration::from_hex("d7c9115eb03568da").unwrap();
+        let pkg_dir = PackageDir {
+            dir: PathBuf::from("/packages/foo"),
+        };
+
+        assert_eq!(pkg_dir.launchers_root(), PathBuf::from("/packages/foo/launchers"));
+        assert_eq!(
+            pkg_dir.launchers(&generation),
+            PathBuf::from("/packages/foo/launchers/d7c9115eb03568da")
+        );
+
+        let store = PackageStore::new("/packages");
+        let id = pinned("example.com", "cmake");
+        assert_eq!(store.launchers_root(&id), store.path(&id).join("launchers"));
+        assert_eq!(
+            store.launchers(&id, &generation),
+            store.launchers_root(&id).join("d7c9115eb03568da")
+        );
+        assert_eq!(
+            store.package_dir(&id).launchers(&generation),
+            store.launchers(&id, &generation),
+            "the dir and store spellings agree"
+        );
+        assert_eq!(
+            store.package_dir(&id).entrypoints(),
+            store.path(&id).join("entrypoints"),
+            "the older launcher directory is a sibling, never written by the new one"
         );
     }
 
