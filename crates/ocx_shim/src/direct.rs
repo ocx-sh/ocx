@@ -918,6 +918,74 @@ impl LookupFs for RealFs {
     }
 }
 
+/// Why [`fill_wide`] gave up.
+#[cfg(any(windows, test))]
+#[derive(Debug, PartialEq, Eq)]
+enum WideFillFailure {
+    /// The call failed for a reason other than a short buffer; carries its Win32 error.
+    Failed(u32),
+    /// The name does not fit in the largest buffer tried.
+    TooLong,
+}
+
+/// Win32 `ERROR_INSUFFICIENT_BUFFER` and `ERROR_MORE_DATA`: a call reporting either with a zero return wants a larger
+/// buffer. The Win32 constants are not named here because the unit tests run on every host.
+#[cfg(any(windows, test))]
+const SHORT_BUFFER_ERRORS: [u32; 2] = [122, 234];
+
+/// Fills a wide-character buffer through `call`, growing it until the name fits, up to `max_units`.
+///
+/// `call` receives the buffer and returns `(written, error)`, `error` being the thread's last error when `written` is 0
+/// and ignored otherwise. A short buffer comes back in three forms and each grows it: a zero return with
+/// [`SHORT_BUFFER_ERRORS`] (`GetMappedFileNameW`, `GetModuleFileNameW` on some systems), a return equal to the
+/// capacity (a truncated name), and a return above it (`GetFinalPathNameByHandleW`: the size, NUL included, to retry
+/// with). A return below the capacity is the name's length, NUL excluded.
+#[cfg(any(windows, test))]
+fn fill_wide(max_units: usize, mut call: impl FnMut(&mut [u16]) -> (usize, u32)) -> Result<Vec<u16>, WideFillFailure> {
+    let mut capacity: usize = 512;
+    loop {
+        let mut buffer = vec![0u16; capacity];
+        let (written, error) = call(&mut buffer);
+        let wanted = if written == 0 {
+            if !SHORT_BUFFER_ERRORS.contains(&error) {
+                return Err(WideFillFailure::Failed(error));
+            }
+            capacity * 2
+        } else if written < capacity {
+            buffer.truncate(written);
+            return Ok(buffer);
+        } else {
+            (capacity * 2).max(written + 1)
+        };
+        if wanted > max_units {
+            return Err(WideFillFailure::TooLong);
+        }
+        capacity = wanted;
+    }
+}
+
+/// The thread's last error when `written` is 0, else 0: read before anything else can overwrite it.
+#[cfg(windows)]
+fn last_error_if_zero(written: usize) -> u32 {
+    if written == 0 {
+        // SAFETY: no arguments; reads thread-local last-error.
+        unsafe { windows_sys::Win32::Foundation::GetLastError() }
+    } else {
+        0
+    }
+}
+
+/// The refusal for a [`fill_wide`] failure at `step`.
+#[cfg(windows)]
+fn wide_fill_refusal(failure: WideFillFailure, step: &str) -> ShimError {
+    match failure {
+        WideFillFailure::Failed(code) => refuse(format!(
+            "cannot resolve the launcher image: {step} failed (error {code})"
+        )),
+        WideFillFailure::TooLong => refuse(format!("the launcher image path from {step} is longer than 64K units")),
+    }
+}
+
 /// A wide string from `buffer[..length]` as UTF-8, or the refusal naming `step`.
 #[cfg(windows)]
 fn wide_to_string(buffer: &[u16], step: &str) -> Result<String, ShimError> {
@@ -965,29 +1033,20 @@ fn mapped_image_path() -> Result<String, ShimError> {
         return Err(image_step_failed("GetModuleHandleW"));
     }
 
-    // The device path (`\Device\HarddiskVolumeN\…`), grown until it fits: a full buffer means a truncated name.
-    let mut capacity: usize = 512;
-    let mut device = loop {
-        let mut buffer = vec![0u16; capacity];
-        // SAFETY: `buffer` holds `capacity` u16s and `capacity` is passed as `nsize`; `module` lies inside this image.
-        let written =
-            unsafe { GetMappedFileNameW(GetCurrentProcess(), module.cast(), buffer.as_mut_ptr(), capacity as u32) };
-        if written == 0 {
-            return Err(image_step_failed(STEP_MAPPED));
-        }
-        if (written as usize) < capacity {
-            buffer.truncate(written as usize);
-            break buffer;
-        }
-        capacity = capacity
-            .checked_mul(2)
-            .filter(|&doubled| doubled <= MAX_UNITS)
-            .ok_or_else(|| {
-                refuse(format!(
-                    "the launcher image path from {STEP_MAPPED} is longer than 64K units"
-                ))
-            })?;
-    };
+    // The device path (`\Device\HarddiskVolumeN\…`).
+    let mut device = fill_wide(MAX_UNITS, |buffer| {
+        // SAFETY: `buffer` holds `buffer.len()` u16s, passed as `nsize`; `module` lies inside this image.
+        let written = unsafe {
+            GetMappedFileNameW(
+                GetCurrentProcess(),
+                module.cast(),
+                buffer.as_mut_ptr(),
+                buffer.len() as u32,
+            )
+        };
+        (written as usize, last_error_if_zero(written as usize))
+    })
+    .map_err(|failure| wide_fill_refusal(failure, STEP_MAPPED))?;
 
     // `\\?\GLOBALROOT` + the device path names the object by its NT path, which `CreateFileW` accepts.
     let mut name: Vec<u16> = r"\\?\GLOBALROOT".encode_utf16().collect();
@@ -1010,37 +1069,20 @@ fn mapped_image_path() -> Result<String, ShimError> {
         return Err(image_step_failed(STEP_OPEN));
     }
 
-    let resolved = (|| {
-        let mut capacity: usize = 512;
-        loop {
-            let mut buffer = vec![0u16; capacity];
-            // SAFETY: `handle` is open and `buffer` holds `capacity` u16s, passed as `cchfilepath`.
-            let length = unsafe {
-                GetFinalPathNameByHandleW(
-                    handle,
-                    buffer.as_mut_ptr(),
-                    capacity as u32,
-                    FILE_NAME_NORMALIZED | VOLUME_NAME_DOS,
-                )
-            } as usize;
-            if length == 0 {
-                return Err(image_step_failed(STEP_FINAL));
-            }
-            // Below the capacity the length excludes the NUL; at or above it, it is the size to retry with.
-            if length < capacity {
-                buffer.truncate(length);
-                return wide_to_string(&buffer, STEP_FINAL);
-            }
-            capacity = length
-                .checked_add(1)
-                .filter(|&needed| needed <= MAX_UNITS)
-                .ok_or_else(|| {
-                    refuse(format!(
-                        "the launcher image path from {STEP_FINAL} is longer than 64K units"
-                    ))
-                })?;
-        }
-    })();
+    let resolved = fill_wide(MAX_UNITS, |buffer| {
+        // SAFETY: `handle` is open and `buffer` holds `buffer.len()` u16s, passed as `cchfilepath`.
+        let length = unsafe {
+            GetFinalPathNameByHandleW(
+                handle,
+                buffer.as_mut_ptr(),
+                buffer.len() as u32,
+                FILE_NAME_NORMALIZED | VOLUME_NAME_DOS,
+            )
+        };
+        (length as usize, last_error_if_zero(length as usize))
+    })
+    .map_err(|failure| wide_fill_refusal(failure, STEP_FINAL))
+    .and_then(|buffer| wide_to_string(&buffer, STEP_FINAL));
     // SAFETY: `handle` is the valid handle opened above and is closed once.
     unsafe { CloseHandle(handle) };
 
@@ -2118,6 +2160,50 @@ mod tests {
     }
 
     /// A NUL in a value ends its `KEY=VALUE` entry in a Windows environment block, so the rest would be a new entry.
+    /// A fake of the three "short buffer" forms: `name` is what the API would write into a large enough buffer.
+    fn fake_call(name: &[u16], form: &str) -> impl FnMut(&mut [u16]) -> (usize, u32) {
+        let name = name.to_vec();
+        let form = form.to_string();
+        move |buffer| {
+            if name.len() < buffer.len() {
+                buffer[..name.len()].copy_from_slice(&name);
+                return (name.len(), 0);
+            }
+            match form.as_str() {
+                "more-data" => (0, 234),
+                "insufficient" => (0, 122),
+                "truncate" => {
+                    let n = buffer.len();
+                    buffer.copy_from_slice(&name[..n]);
+                    (n, 0)
+                }
+                _ => (name.len() + 1, 0),
+            }
+        }
+    }
+
+    #[test]
+    fn a_wide_name_of_any_length_up_to_the_nt_limit_fills_in_every_short_buffer_form() {
+        for form in ["more-data", "insufficient", "truncate", "required-size"] {
+            for units in [1usize, 511, 512, 513, 1024, 5000, 32767] {
+                let name: Vec<u16> = (0..units).map(|i| 0x41 + (i % 26) as u16).collect();
+                let filled = fill_wide(64 * 1024, fake_call(&name, form));
+                assert_eq!(filled.as_deref(), Ok(name.as_slice()), "{form} {units}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_wide_fill_fails_on_another_error_and_stops_at_its_limit() {
+        assert_eq!(fill_wide(64 * 1024, |_| (0, 5)), Err(WideFillFailure::Failed(5)));
+        assert_eq!(fill_wide(64 * 1024, |_| (0, 0)), Err(WideFillFailure::Failed(0)));
+        let name = vec![0x41u16; 2000];
+        assert_eq!(
+            fill_wide(1024, fake_call(&name, "more-data")),
+            Err(WideFillFailure::TooLong)
+        );
+    }
+
     #[test]
     fn a_nul_in_an_env_value_exits_78() {
         let value = r#"[{"key":"K","value":"x\u0000OCX_SIGNING_KEY=s","kind":"constant"}]"#;
