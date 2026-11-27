@@ -22,7 +22,7 @@ use ocx_package::vendor::{
     vendor_id,
 };
 use ocx_project::{LockedTool, SelectedTool, ToolSource, resolve_selected_tools};
-use ocx_store::file_structure::{StagedTree, VendorLayout, normalise_written_file};
+use ocx_store::file_structure::{PackageKey, StagedTree, VendorLayout, normalise_written_file};
 use ocx_util::fs::{DirWalker, EmptyOrAbsentError, WalkDecision, ensure_empty_or_absent};
 
 use super::common::ClosureNode;
@@ -445,7 +445,8 @@ async fn build_manifest(
     let roots = compose_roots_of(manager, closures).await?;
     check_declared_values(&roots, closures)?;
     let forbidden = host_paths(manager, &request.output);
-    let selection_items = environment_items(manager, &roots, false, platform, &forbidden).await?;
+    let keys = package_keys_of(&closures.surface)?;
+    let selection_items = environment_items(manager, &roots, false, platform, &forbidden, &keys).await?;
 
     // Every package once, keyed by digest, which is also the order the manifest lists them in.
     let mut nodes: BTreeMap<String, &ClosureNode> = BTreeMap::new();
@@ -485,7 +486,8 @@ async fn build_manifest(
         let mut entrypoints = Vec::with_capacity(names.len());
         if !names.is_empty() {
             let own = entrypoint_root(manager, &roots, node, platform).await?;
-            let items = environment_items(manager, std::slice::from_ref(&own), true, platform, &forbidden).await?;
+            let items =
+                environment_items(manager, std::slice::from_ref(&own), true, platform, &forbidden, &keys).await?;
             for name in names {
                 let launcher_path = checked_path(
                     format!("{package_dir}/entrypoints/{name}{}", exe_suffix(windows)),
@@ -754,6 +756,21 @@ fn host_paths(manager: &PackageManager, output: &Path) -> Vec<String> {
         .collect()
 }
 
+/// The vendored name of every package in `surface`.
+///
+/// # Errors
+///
+/// [`VendorError::PathUnrepresentable`] when two packages of the run share a name.
+fn package_keys_of(surface: &[ClosureNode]) -> Result<BTreeMap<Digest, PackageKey>, VendorError> {
+    let digests: Vec<Digest> = surface.iter().map(|node| node.identifier.digest()).collect();
+    VendorLayout::package_keys(&digests).map_err(|clash| VendorError::PathUnrepresentable {
+        path: format!(
+            "packages {} and {} share one vendored directory name",
+            clash.first, clash.second
+        ),
+    })
+}
+
 /// The environment `roots` compose in the vendor lane (no patches, no caller entries), as manifest items.
 ///
 /// # Errors
@@ -765,9 +782,11 @@ async fn environment_items(
     self_view: bool,
     platform: &Platform,
     forbidden: &[String],
+    keys: &BTreeMap<Digest, PackageKey>,
 ) -> Result<Vec<EnvironmentItem>, VendorError> {
     let scope = EnvScope::Vendor {
         token_root: PathBuf::from(DIR_TOKEN),
+        keys: keys.clone(),
     };
     let entries = manager
         .resolve_env(roots, self_view, scope, platform)
@@ -2604,6 +2623,13 @@ mod tests {
         (dir, layout, manifest)
     }
 
+    /// The directory the composed environment names for `package`'s content, which is where a program the test stages must sit.
+    fn vendored_content_dir(package: &Package) -> String {
+        let digest = Digest::try_from(package.digest.as_str()).expect("a manifest digest");
+        let keys = VendorLayout::package_keys(std::slice::from_ref(&digest)).expect("one key");
+        VendorLayout::relative_content_dir(&keys[&digest])
+    }
+
     fn root_package(manifest: &VendorManifest) -> &Package {
         manifest
             .packages
@@ -2628,8 +2654,8 @@ mod tests {
             .find(|p| p.digest != package.digest)
             .expect("dependency");
         let files = [
-            format!("{}/bin/hello", dependency.content_dir),
-            format!("{}/bin/hello", package.content_dir),
+            format!("{}/bin/hello", vendored_content_dir(dependency)),
+            format!("{}/bin/hello", vendored_content_dir(package)),
         ];
         let (_dir, layout, manifest) = staged_tool(&files).await;
         let declared: Entrypoints =
@@ -2647,7 +2673,7 @@ mod tests {
         assert_eq!(sidecar.vendor_id, manifest.vendor_id);
         assert_eq!(
             sidecar.program,
-            format!("{DIR_TOKEN}/{}/bin/hello", package.content_dir),
+            format!("{DIR_TOKEN}/{}/bin/hello", vendored_content_dir(package)),
             "the package's own PATH entry is applied last, so it is searched first"
         );
         assert_eq!(
@@ -2680,7 +2706,7 @@ mod tests {
         let files = {
             let (_dir, _, manifest) = staged_tool(&[]).await;
             let package = root_package(&manifest);
-            vec![format!("{}/bin/hello", package.content_dir)]
+            vec![format!("{}/bin/hello", vendored_content_dir(package))]
         };
         let (_dir, layout, manifest) = staged_tool(&files).await;
         let package = root_package(&manifest);
@@ -2702,7 +2728,7 @@ mod tests {
         let files = {
             let (_dir, _, manifest) = staged_tool(&[]).await;
             let package = root_package(&manifest);
-            vec![format!("{}/bin/hello", package.content_dir)]
+            vec![format!("{}/bin/hello", vendored_content_dir(package))]
         };
         let (_dir, layout, manifest) = staged_tool(&files).await;
         let package = root_package(&manifest);

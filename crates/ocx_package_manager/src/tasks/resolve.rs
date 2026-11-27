@@ -173,6 +173,8 @@ pub enum EnvScope {
     Vendor {
         /// The `@VENDOR_DIR@` token the paths are rooted at.
         token_root: std::path::PathBuf,
+        /// The vendored name of every package of the run; a package it lacks fails the composition.
+        keys: std::collections::BTreeMap<ocx_oci::Digest, ocx_store::file_structure::PackageKey>,
     },
 }
 
@@ -697,7 +699,7 @@ impl PackageManager {
         let no_patches = scope.opt_out();
         // Every env caller composes here, so none can disagree on link-following or group-heal order.
         let paths = match (&scope, scope.toolchain_links()) {
-            (EnvScope::Vendor { token_root }, _) => composer::ComposePaths::vendor(token_root),
+            (EnvScope::Vendor { token_root, keys }, _) => composer::ComposePaths::vendor(token_root, keys.clone()),
             (_, Some(links)) => composer::ComposePaths::resolve(links, self.file_structure(), platform).await?,
             (_, None) => composer::ComposePaths::digest_only(),
         };
@@ -3307,6 +3309,11 @@ mod phase4_spec_tests {
                 true,
                 super::EnvScope::Vendor {
                     token_root: std::path::PathBuf::from("@VENDOR_DIR@"),
+                    keys: ocx_store::file_structure::VendorLayout::package_keys(&[
+                        root.identifier().digest(),
+                        dep_id.digest(),
+                    ])
+                    .unwrap(),
                 },
                 &super::host_platform(),
             )
