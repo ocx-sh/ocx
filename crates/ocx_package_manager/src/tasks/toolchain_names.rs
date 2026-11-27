@@ -146,13 +146,6 @@ fn record_claim(
 /// Whether `name` ends in `.launch`, ASCII case-insensitively, and so would collide with a launcher's record file.
 ///
 /// ASCII only, matching [`fold_case_insensitive`]: a filesystem folding more than ASCII is not modelled here.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the launcher writers that refuse such names land in a later step"
-    )
-)]
 pub(crate) fn is_record_name(name: &str) -> bool {
     let extension = ocx_env_apply::launch::RECORD_EXTENSION.as_bytes();
     let bytes = name.as_bytes();
