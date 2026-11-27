@@ -94,7 +94,7 @@ impl ShimError {
     fn stderr_message(&self) -> String {
         match self {
             ShimError::ContainmentViolation { path } => {
-                format!("ocx-shim: package root outside OCX home: {path}")
+                format!("ocx-shim: package root outside OCX home: {}", escape_controls(path))
             }
             ShimError::SelfPathFailure => "ocx-shim: cannot determine own path".to_string(),
             ShimError::OcxNotFound { program } => {
@@ -114,7 +114,11 @@ impl ShimError {
             }
             #[cfg(unix)]
             ShimError::DirectExecFailed { program, reason, .. } => {
-                format!("ocx-shim: failed to start {}: {reason}", escape_controls(program))
+                format!(
+                    "ocx-shim: failed to start {}: {}",
+                    escape_controls(program),
+                    escape_controls(reason)
+                )
             }
         }
     }
@@ -777,6 +781,20 @@ mod tests {
             "{:?}",
             argument.stderr_message()
         );
+    }
+
+    #[test]
+    fn a_containment_path_and_a_canonicalization_notice_reach_stderr_with_control_characters_escaped() {
+        let violation = ShimError::ContainmentViolation {
+            path: "/o/pk\u{1b}[2Jg\r\n".to_string(),
+        };
+        assert_eq!(
+            violation.stderr_message(),
+            "ocx-shim: package root outside OCX home: /o/pk\\u{1b}[2Jg\\r\\n"
+        );
+        let notice = crate::direct::canonicalize_notice("/o/pk\u{1b}g\n", "denied");
+        assert!(!notice.contains(char::is_control), "{notice:?}");
+        assert!(notice.contains("/o/pk\\u{1b}g\\n"), "{notice:?}");
     }
 
     #[test]

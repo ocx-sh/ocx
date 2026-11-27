@@ -1177,12 +1177,18 @@ fn check_containment(home: &core::HomeLaunch, ocx_home: Option<&OsStr>) -> Resul
         }
         Ok(_) => Ok(()),
         Err(err) => {
-            eprintln!(
-                "ocx-shim: cannot canonicalize package root {pkg_root} ({err}); delegating containment to `launcher exec`"
-            );
+            eprintln!("{}", canonicalize_notice(pkg_root, &err.to_string()));
             Ok(())
         }
     }
+}
+
+/// The stderr line for a package root that cannot be canonicalized; the root comes from a record file.
+pub(super) fn canonicalize_notice(pkg_root: &str, err: &str) -> String {
+    format!(
+        "ocx-shim: cannot canonicalize package root {} ({err}); delegating containment to `launcher exec`",
+        super::escape_controls(pkg_root)
+    )
 }
 
 /// The containment check and the plan of a home launch over the process environment; `image` is the launcher's
