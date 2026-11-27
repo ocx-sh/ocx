@@ -162,6 +162,13 @@ Recorded decisions, second run:
   unchanged; the page and the doc comment now state what it does. `ocx clean` keeps the manifests a deferred
   tree reads, proven red and green by the new test. A tree an older release prepared has no such link until the
   next render rewrites it; that gap is reported in the DONE block.
+- **Closing review, call 3 of 3 (2026-11-27).** Verdict Approve with deferred Warns: no Block, no High, eight
+  Warn. Question: Warns remain; may the verdict be Approve? Research: both outer cycles are spent, so no further
+  execute pass exists to take them; each Warn is a test-adequacy or wording item with no known defect behind it,
+  except one narrow naming limit the cross-model pass found, which the config-blob links already had. Decision:
+  the Warns go to follow-up issues and the plan moves to `landing`. One page sentence was corrected right after
+  the docs seat reported (c2a2127f, docs only); the DONE block names it as a change made after the gate run
+  started. The owner may read the verdict as Needs Work.
 
 ## Loop shape
 

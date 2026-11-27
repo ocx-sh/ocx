@@ -3,16 +3,16 @@
 ## Status
 
 - **Plan:** plan_vendor_rules_ocx
-- **State:** executing
+- **State:** landing
 - **Tier:** high
 - **Tier-grammar:** 5
 - **Updated:** 2026-11-27
 - **Active phase:** 0 — second run planned (§ Second run); first run landed (ocx `9c9e32d4`, rules_ocx `401c9c4`)
-- **Step:** /hex-execute → integration gate (pipelines R2A…R2C merged; verify-deep on the branch is the gate)
+- **Step:** awaiting /hex-finalize (closing review round 3: Approve with deferred Warns; integration gate run 45994015903 beside it)
 - **Feature branch:** ocx `hex/bazel-rbe-rules-ocx` (pipelines on `hex/bazel-rbe-rules-ocx--<pipeline>`, worktrees under `.agents/worktrees/`); rules_ocx one branch `hex/bazel-rbe-rules-ocx`, its worktree `/home/mherwig/dev/ocx-sh/rules_ocx/.agents/worktrees/hex-bazel-rbe-rules-ocx` shared by the rules_ocx pipelines of a wave (DP-43)
-- **Last update:** 2026-11-27 (after 5ac43824: fix pipelines R2A…R2C merged)
-- **Reviewed:** 7ebabeec (rules_ocx 83477a4)
-- **Next:** /hex-execute .claude/artifacts/plan_vendor_rules_ocx.md
+- **Last update:** 2026-11-27 (after c2a2127f: closing review round 3)
+- **Reviewed:** c2a2127f (rules_ocx 83477a4)
+- **Next:** /hex-finalize in ocx (pull request 784); rules_ocx `hex/bazel-rbe-rules-ocx` is finalized by hand and its pull request 36 stays a draft; both merges are the owner's
 
 ---
 
@@ -1835,6 +1835,26 @@ cross-model pass (`nox review`, ran, verdict `needs-attention`). Verdict **Needs
 - Gate evidence beside this review: ocx deep probe run 45985987951 red on two Windows acceptance tests (a fixture wrote a batch
   leaf into a wasm package; fixed at 7ebabeec) and on the two unit targets fixed at c3608b2b; rules_ocx gate run 45989881945 red on
   its Windows leg.
+
+Closing review, round 3 (code-diff scope, tier medium, loop mode, 2026-11-27, ocx `7ebabeec..8deab266`; rules_ocx unchanged): three
+sonnet seats (spec with the convergence check, quality with test adequacy, docs) and one cross-model pass (`nox review`, ran, verdict
+`needs-attention`). Verdict **Approve**, with deferred Warns: 0 Block, 0 High, 8 Warn.
+
+- Round-2 findings in ocx: A1 resolved (every blob the claim check reads is linked from the staged tree before its one publish
+  rename; `ocx clean` reads the links as roots; no write into a published directory), the fail-open directory listing resolved, the
+  zero file identity resolved, the page gaps resolved. One sentence of `entry-points.mdx` gave a non-absolute root exit 65; the code
+  gives 74; corrected at c2a2127f.
+- Cross-model finding rated Warn after reading the code: a `refs/blobs/` link name carries the digest only, so one closure that
+  holds the same digest from two registries keeps one link (`prepare_lazy.rs`, the naming the config-blob links already used).
+  Follow-up issue.
+- Other deferred Warns (follow-up issues): no unit case with a dependency edge for the new links; a silent dangling link when a
+  manifest is absent at prepare time; two untested error arms of `existing_launcher_dirs`; the loop-guard test may reach the
+  containment check instead of the PATH strip on macOS (same exit code and text); a rewritten fixture in `tasks/vendor.rs` tests;
+  ADR § 12 wording "no launcher of this build reads them".
+- Convergence: Converged for ocx (C-137 and C-RO-30 as amended). C-RO-25 keeps its note: the code matches and no Windows run at the
+  head covers the publish.
+- Fold-Back: not performed — this plan carries no `## Spec Deltas` block.
+- rules_ocx open findings of round 2 stand as recorded there; its branch takes no change beyond the dev-build pin.
 
 ## Run 2 — red-proof log
 
