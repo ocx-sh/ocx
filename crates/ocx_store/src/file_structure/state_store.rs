@@ -1331,7 +1331,7 @@ mod tests {
         let linked = BinEntryStamp::from_metadata(&link, &std::fs::metadata(&link).unwrap(), "1".repeat(64));
         assert_eq!(
             linked.file_id, stamp.file_id,
-            "C-003 — a hardlink IS the same file, and proving a trampoline `.exe` against the ShimBinStore \
+            "C-003 — a hardlink IS the same file, and proving a trampoline `.exe` against the launcher \
              blob is exactly that comparison"
         );
 

@@ -1195,7 +1195,13 @@ pub mod tests {
     async fn dot_bin_ocx_shim_is_never_collected() {
         let tmp = tempfile::tempdir().unwrap();
         let file_structure = home(&tmp);
-        let published_shim_blob = file_structure.shim_bin.ensure().await.unwrap();
+        let published_shim_blob = file_structure
+            .root()
+            .join(".bin")
+            .join("ocx-shim")
+            .join("ocx-shim-blob");
+        std::fs::create_dir_all(published_shim_blob.parent().unwrap()).unwrap();
+        std::fs::write(&published_shim_blob, b"blob").unwrap();
         let orphan_blob = seed_blob(&file_structure, "example.com", &digest_of('f')).await;
 
         let collector = super::super::GarbageCollector::build(

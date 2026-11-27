@@ -7,7 +7,6 @@ mod cas_path;
 pub mod error;
 mod layer_store;
 mod package_store;
-mod shim_bin_store;
 mod shim_store;
 mod state_store;
 mod symlink_store;
@@ -23,7 +22,6 @@ pub use blob_store::{BlobDir, BlobStore};
 pub use cas_path::{CasTier, DIGEST_FILENAME, DigestFileError, cas_ref_name, read_digest_file, write_digest_file};
 pub use layer_store::{LayerDir, LayerStore};
 pub use package_store::{PackageDir, PackageDirError, PackageStore, is_verified, record_origin, record_verified};
-pub use shim_bin_store::ShimBinStore;
 pub use shim_store::{ShimDir, ShimStore};
 pub use state_store::{BinEntryStamp, RenderStamp, RenderStampScope, RenderStampTarget, RenderStampV2, StateStore};
 pub use symlink_store::{SymlinkKind, SymlinkStore};
@@ -43,8 +41,6 @@ pub struct FileStructure {
     pub symlinks: SymlinkStore,
     pub state: StateStore,
     pub temp: TempStore,
-    /// Outside the GC tiers — never walked by `ocx clean`.
-    pub shim_bin: ShimBinStore,
     /// Deferred tools; walked by `ocx clean`, rooted in the lock pins rather than reachable from a package.
     pub shims: ShimStore,
     /// The global toolchain home; outside the GC tiers — never walked by `ocx clean`.
@@ -76,7 +72,6 @@ impl FileStructure {
             symlinks: SymlinkStore::new(root.join("symlinks")),
             state: StateStore::new(root.join("state")),
             temp: TempStore::new(root.join("temp")),
-            shim_bin: ShimBinStore::new(root.join(".bin").join("ocx-shim")),
             shims: ShimStore::new(root.join("shims"), shim_store::SHIM_BIN_DIRNAME),
             toolchain: ToolchainStore::new(root.join("toolchain")),
             locks,
