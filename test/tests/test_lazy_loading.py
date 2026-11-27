@@ -46,6 +46,8 @@ import pytest
 
 from src import OcxRunner, PackageInfo
 from src.helpers import (
+    assert_shim_dir_absent,
+    assert_shim_dir_exists,
     make_package,
     make_package_with_entrypoints,
     write_ocx_toml,
@@ -82,30 +84,6 @@ PUBLIC_BIN_PATH = [
 # ---------------------------------------------------------------------------
 # Helpers (DAMP — descriptive and meaningful, co-located with the tests)
 # ---------------------------------------------------------------------------
-
-
-def _deferred_launcher_dirs(ocx: OcxRunner, repo: str) -> list[Path]:
-    """Every `$OCX_HOME/deferred/<G>/<reg>/<repo>/<alg>/<2>/<30>/l` directory of `repo` (C-106, § 4.3)."""
-    root = ocx.ocx_home / "deferred"
-    return sorted(path for path in root.glob(f"*/*/{repo}/*/*/*/l") if path.is_dir())
-
-
-def assert_shim_dir_exists(ocx: OcxRunner, repo: str, why: str) -> Path:
-    """Assert `repo` owns exactly one deferred launcher directory, and return it."""
-    found = _deferred_launcher_dirs(ocx, repo)
-    assert len(found) == 1, (
-        f"{why}: expected exactly one `deferred/<G>/…/l` for {repo} under "
-        f"{ocx.ocx_home / 'deferred'}; found {[str(p) for p in found]}"
-    )
-    return found[0]
-
-
-def assert_shim_dir_absent(ocx: OcxRunner, repo: str, why: str) -> None:
-    """Assert `repo` owns no deferred launcher directory."""
-    found = _deferred_launcher_dirs(ocx, repo)
-    assert found == [], (
-        f"{why}: {repo} must own no `deferred/…/l`; found {[str(p) for p in found]}"
-    )
 
 
 def _run(
