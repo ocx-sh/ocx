@@ -11,7 +11,7 @@ use ocx_project::{ProjectLock, ProjectRegistry};
 use ocx_store::file_structure::{FileStructure, StaleEntry};
 
 use super::super::PackageManager;
-use super::garbage_collection::{GarbageCollector, ProjectRootDigests};
+use super::garbage_collection::{GarbageCollector, ProjectRootDigests, current_deferred};
 
 /// Bound on concurrent tool resolutions in [`collect_project_roots`].
 const COLLECT_ROOTS_CONCURRENCY: usize = 50;
@@ -32,6 +32,8 @@ pub struct CleanResult {
     /// Swept `state/projects/<key>/` directories, reported so a clean never
     /// revokes consent silently.
     pub consent: Vec<PathBuf>,
+    /// Launcher and deferred-tree directories of other generations, retired (or, in a dry run, reported).
+    pub launchers: Vec<PathBuf>,
 }
 
 /// The roots a locked tool pins: its per-platform leaves that are present on
@@ -51,12 +53,16 @@ async fn collect_tool_roots(
     roots
 }
 
-/// Whether a lock-pinned leaf is present as a package or a deferred shim.
+/// Whether a lock-pinned leaf is present as a package, a deferred tree or an older ocx's shim.
 // Checks shims too, or a deferred tool (no package dir) loses its pin and its shim is collected.
 // Never an unconditional `true`, or never-pulled leaves appear in `--dry-run`'s held report.
 async fn leaf_present_in_any_tier(file_structure: &FileStructure, leaf: &ocx_oci::PinnedPackageRef) -> bool {
     ocx_util::fs::path_exists_lossy(&file_structure.packages.path(leaf)).await
         || ocx_util::fs::path_exists_lossy(&file_structure.shims.path(leaf)).await
+        || match current_deferred(file_structure) {
+            Some(deferred) => ocx_util::fs::path_exists_lossy(&deferred.path(leaf)).await,
+            None => false,
+        }
 }
 
 /// GC roots from every live registered project's `ocx.lock` and from
@@ -262,6 +268,7 @@ impl PackageManager {
                         objects: Vec::new(),
                         temp,
                         consent: Vec::new(),
+                        launchers: Vec::new(),
                     });
                 }
             }
@@ -310,8 +317,72 @@ impl PackageManager {
         let temp = clean_temp(self.file_structure(), dry_run).await?;
         // Runs under `--force` too: `--force` waives the project registry, which this sweep never reads.
         let consent = sweep_consent_stamps(&self.file_structure().state, dry_run).await?;
-        Ok(CleanResult { objects, temp, consent })
+        let launchers = retire_other_generations(self.file_structure(), dry_run).await?;
+        Ok(CleanResult {
+            objects,
+            temp,
+            consent,
+            launchers,
+        })
     }
+}
+
+/// Retires every `launchers/<G'>` of every package and every `deferred/<G'>` whose name is not this ocx's
+/// generation, returning the paths removed (a dry run: the paths that would be). A host with no embedded blob
+/// knows no current generation and retires nothing. `entrypoints/`, `shims/` and `.bin/ocx-shim` are never read.
+// The helper step 2 reuses for `shells/default-*`: one `retire_dir` call per candidate, `LeftForLater` logged and not reported.
+async fn retire_other_generations(fs: &FileStructure, dry_run: bool) -> crate::Result<Vec<PathBuf>> {
+    let Some(generation) = ocx_store::launcher_generation::LauncherGeneration::host() else {
+        return Ok(Vec::new());
+    };
+    let mut parents = vec![fs.deferred_root()];
+    for package in fs.packages.list_all().await? {
+        parents.push(package.launchers_root());
+    }
+    let mut retired = Vec::new();
+    for parent in parents {
+        let Ok(mut entries) = tokio::fs::read_dir(&parent).await else {
+            continue;
+        };
+        let mut candidates = Vec::new();
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            if entry.file_name() == generation.as_str() {
+                continue;
+            }
+            // Only real directories are generation trees; `retire_dir` itself sweeps `.gc-*`/`.staging-*` debris.
+            if entry.file_type().await.is_ok_and(|kind| kind.is_dir()) {
+                candidates.push(entry.path());
+            }
+        }
+        candidates.sort();
+        for dir in candidates {
+            retire_one(&dir, dry_run, &mut retired).await?;
+        }
+    }
+    Ok(retired)
+}
+
+/// Retires `dir`; a refusal leaves it whole and unreported.
+async fn retire_one(dir: &Path, dry_run: bool, retired: &mut Vec<PathBuf>) -> crate::Result<()> {
+    if dry_run {
+        log::info!("Would retire launcher directory: {}", dir.display());
+        retired.push(dir.to_path_buf());
+        return Ok(());
+    }
+    match ocx_util::fs::retire_dir(dir).await {
+        Ok(ocx_util::fs::Retired::Removed) => {
+            log::info!("Retired launcher directory: {}", dir.display());
+            retired.push(dir.to_path_buf());
+        }
+        Ok(ocx_util::fs::Retired::LeftForLater) => {
+            log::warn!(
+                "Launcher directory '{}' is busy; left for a later clean.",
+                dir.display()
+            );
+        }
+        Err(e) => return Err(crate::Error::InternalFile(dir.to_path_buf(), e)),
+    }
+    Ok(())
 }
 
 /// Removes stale temp directories and orphan lock files, locking each where
@@ -1386,5 +1457,159 @@ repository = "localhost:5000/shfmt"
         let swept = sweep_consent_stamps(&state, false).await.unwrap();
 
         assert!(swept.is_empty(), "an absent sweep root yields nothing; got {swept:?}");
+    }
+
+    // ── launcher generations (C-137) ─────────────────────────────────────
+
+    use ocx_store::launcher_generation::LauncherGeneration;
+
+    /// A 16-hex generation name that is not `current`.
+    fn other_generation(current: &LauncherGeneration) -> String {
+        ["0123456789abcdef", "fedcba9876543210"]
+            .into_iter()
+            .find(|name| *name != current.as_str())
+            .unwrap()
+            .to_string()
+    }
+
+    async fn touch_dir(dir: &Path) -> PathBuf {
+        tokio::fs::create_dir_all(dir).await.unwrap();
+        tokio::fs::write(dir.join("f"), b"x").await.unwrap();
+        dunce::canonicalize(dir).unwrap()
+    }
+
+    /// A home whose global lock pins `cmake` (materialized: `content/`) and `shfmt` (deferred under `G`), and
+    /// the paths the launcher tests inspect.
+    struct LauncherHome {
+        _tmp: tempfile::TempDir,
+        manager: crate::PackageManager,
+        generation: LauncherGeneration,
+        package_current: PathBuf,
+        package_other: PathBuf,
+        deferred_current: PathBuf,
+        deferred_other: PathBuf,
+    }
+
+    async fn launcher_home() -> Option<LauncherHome> {
+        // No embedded blob on this host: no current generation, nothing to retire.
+        let generation = LauncherGeneration::host()?;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(tmp.path()).unwrap();
+        tokio::fs::write(root.join("ocx.lock"), LOCK_WITH_TWO_TOOLS)
+            .await
+            .unwrap();
+        let fs = FileStructure::with_root(root.clone());
+        let cmake = pinned_leaf("cmake", "localhost:5000", CMAKE_LEAF_HEX);
+        let shfmt = pinned_leaf(
+            "shfmt",
+            "localhost:5000",
+            "bbbb0000000000000000000000000000000000000000000000000000000000cc",
+        );
+        tokio::fs::create_dir_all(fs.packages.path(&cmake).join("content"))
+            .await
+            .unwrap();
+        let other = other_generation(&generation);
+        let package_current = touch_dir(&fs.packages.launchers(&cmake, &generation)).await;
+        let package_other = touch_dir(&fs.packages.launchers_root(&cmake).join(&other)).await;
+        let deferred_current = touch_dir(&fs.deferred(&generation).shim_dir(&shfmt).bin()).await;
+        let deferred_other = touch_dir(&fs.deferred_root().join(&other).join("some/tree/l")).await;
+        let manager = crate::test_support::export_fixture::offline_manager(&root);
+        Some(LauncherHome {
+            _tmp: tmp,
+            manager,
+            generation,
+            package_current,
+            package_other,
+            deferred_current,
+            deferred_other,
+        })
+    }
+
+    /// V-L41: the current generation comes from `LauncherGeneration::host()`; a constant would retire the wrong dir.
+    #[tokio::test]
+    async fn clean_retires_launcher_generations_other_than_the_hosts() {
+        let Some(home) = launcher_home().await else { return };
+        let result = home.manager.clean(false, false).await.unwrap();
+
+        let mut reported = result.launchers.clone();
+        reported.sort();
+        let mut expected = vec![home.package_other.clone(), home.deferred_other.clone()];
+        expected.sort();
+        assert_eq!(reported.len(), 2, "got {reported:?}");
+        assert!(
+            reported.iter().zip(&expected).all(|(r, e)| e.starts_with(r)),
+            "{reported:?} vs {expected:?}"
+        );
+        assert!(!home.package_other.exists());
+        assert!(!home.deferred_other.exists());
+        assert!(home.package_current.exists(), "launchers/<G> is kept");
+        assert!(
+            home.deferred_current.exists(),
+            "a lock-pinned deferred/<G> tree is kept"
+        );
+        assert!(
+            !result
+                .objects
+                .iter()
+                .any(|o| o.path.starts_with(&home.deferred_current))
+        );
+        let _ = &home.generation;
+    }
+
+    #[tokio::test]
+    async fn clean_dry_run_reports_other_launcher_generations_without_removing() {
+        let Some(home) = launcher_home().await else { return };
+        let result = home.manager.clean(true, false).await.unwrap();
+
+        assert_eq!(result.launchers.len(), 2, "got {:?}", result.launchers);
+        assert!(home.package_other.exists());
+        assert!(home.deferred_other.exists());
+    }
+
+    /// An unrooted `deferred/<G>/…` tree is an object, collected like an unpinned shim.
+    #[tokio::test]
+    async fn clean_collects_an_unrooted_deferred_tree_of_the_current_generation() {
+        let Some(home) = launcher_home().await else { return };
+        tokio::fs::remove_file(home.manager.file_structure().root().join("ocx.lock"))
+            .await
+            .unwrap();
+        let result = home.manager.clean(false, false).await.unwrap();
+
+        assert!(!home.deferred_current.exists());
+        assert!(
+            result
+                .objects
+                .iter()
+                .any(|o| home.deferred_current.starts_with(&o.path))
+        );
+    }
+
+    /// C-132 half: `entrypoints/`, old `shims/…` of a pinned leaf and `.bin/ocx-shim/*` are never touched.
+    #[tokio::test]
+    async fn clean_leaves_entrypoints_old_shims_and_the_shim_binary_alone() {
+        let Some(home) = launcher_home().await else { return };
+        let fs = home.manager.file_structure().clone();
+        let cmake = pinned_leaf("cmake", "localhost:5000", CMAKE_LEAF_HEX);
+        let entrypoints = touch_dir(&fs.packages.entrypoints(&cmake)).await;
+        let shim = touch_dir(&fs.shims.shim_dir(&cmake).bin()).await;
+        let shim_binary = touch_dir(&fs.root().join(".bin").join("ocx-shim")).await;
+
+        home.manager.clean(false, false).await.unwrap();
+
+        for kept in [entrypoints, shim, shim_binary] {
+            assert!(kept.join("f").exists(), "{} was touched", kept.display());
+        }
+    }
+
+    /// V-L26 clean half: a held `temp/deferred-…` scratch survives a clean.
+    #[tokio::test]
+    async fn clean_keeps_a_held_deferred_scratch() {
+        let Some(home) = launcher_home().await else { return };
+        let held = home.manager.file_structure().temp.scratch("deferred").await.unwrap();
+        let path = held.path().to_path_buf();
+
+        home.manager.clean(false, false).await.unwrap();
+
+        assert!(path.exists());
     }
 }
