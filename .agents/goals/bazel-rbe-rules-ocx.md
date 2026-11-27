@@ -180,6 +180,20 @@ Recorded decisions, second run:
   the Warns go to follow-up issues and the plan moves to `landing`. One page sentence was corrected right after
   the docs seat reported (c2a2127f, docs only); the DONE block names it as a change made after the gate run
   started. The owner may read the verdict as Needs Work.
+- **Red pull-request checks at 8deab266 and the cycle cap (2026-11-27).** Two checks of `verify-basic` are red for
+  a cause in this branch. Job `test`: `website:test` fails in `tests/glossary.test.mjs` on two retired words,
+  "deferred tool" in `explanation/deferred-packages.mdx` line 80 and "toolchain home" in `guides/clean-up.mdx`
+  line 60. The second fix pass wrote the second (b41c6d17) and the correction after it wrote the first (5ac43824).
+  Job `docs`: Lighthouse scores the landing page 0.99 for
+  performance where 1 is required (a timing measurement; the same job was red once before at c3608b2b).
+  Question: may a fix pass repair them? Research: § Loop shape counts "a red gate's fix pass" as an outer cycle,
+  and the shared verification contract uses the same words for both gates ("A red gate takes one fix pass, then
+  the same gate again"), the release gate inside `/hex-finalize` included. Both outer cycles are spent.
+  Decision: nothing is fixed. `/hex-finalize` finds its release gate red, may not take its fix pass, and halts
+  before any rewrite, so the branch is not squashed and pull request 784 stays a draft. The DONE block reports
+  the criteria that depend on it as not met and names the two-word repair as the next step for the owner.
+  Two other red checks need the squash to clear and stay red for the same reason: `Conventional Commits` (one
+  `Revert "…"` subject) and the launcher recency gate (six `Cross-build` jobs).
 
 ## Loop shape
 
