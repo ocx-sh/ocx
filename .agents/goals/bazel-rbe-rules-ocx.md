@@ -118,6 +118,20 @@ Recorded decisions, second run:
   of each repository is the integration gate beside the delta review, and a red there opens outer cycle 2. The
   owner may read this more strictly; the DONE block names it.
 
+- **Outer cycle 2 opened for rules_ocx (2026-11-27).** The rules_ocx gate run 45985484572 at 4eb3f15 was red on
+  Windows in `deep:windows-update-target` (four expectations and one fixture step). Linux was green. The fix pass
+  at 83477a4 is outer cycle 2, the last one. Run 45989881945 is its gate. A red Windows leg there is reported as
+  not met, with the failed expectations.
+- **Non-ASCII paths on Windows under Bazel (2026-11-27).** Question: may the Windows runfiles check stop gating
+  on a non-ASCII workspace? Research: Bazel's own client fails to change into such a workspace before any rule
+  runs, and fails the same way with a non-ASCII output root (probe lines of runs 45983140296 and 45985484572).
+  Decision: the check gates on ASCII paths and prints both non-ASCII cases as probes. The launcher's own handling
+  of non-ASCII paths is proven in ocx without Bazel, by seven tests that ran green on Linux, macOS and Windows.
+- **Security finding by reference (2026-11-27).** Location: rules_ocx, the Windows update target started through
+  `bazel run`. Class: argument handling ahead of the batch wrapper. Status: a limit of the batch-file design that
+  the wrapper cannot close; one character class is no longer checked end to end. The DONE block reports it in
+  full with the design that closes it.
+
 ## Loop shape
 
 - Entry point: Run the /hex-architect skill on .agents/goals/bazel-rbe-rules-ocx.md.
