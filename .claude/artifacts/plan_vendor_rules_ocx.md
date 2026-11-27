@@ -8,9 +8,9 @@
 - **Tier-grammar:** 5
 - **Updated:** 2026-11-27
 - **Active phase:** 0 — second run planned (§ Second run); first run landed (ocx `9c9e32d4`, rules_ocx `401c9c4`)
-- **Step:** /hex-execute → wave 6 (X2); PF merged, dev build D2 dispatched at `d9009ff6`
+- **Step:** awaiting /hex-execute (review-fix loop; closing review round 1 verdict Request Changes, fix wave 7)
 - **Feature branch:** ocx `hex/bazel-rbe-rules-ocx` (pipelines on `hex/bazel-rbe-rules-ocx--<pipeline>`, worktrees under `.agents/worktrees/`); rules_ocx one branch `hex/bazel-rbe-rules-ocx`, its worktree `/home/mherwig/dev/ocx-sh/rules_ocx/.agents/worktrees/hex-bazel-rbe-rules-ocx` shared by the rules_ocx pipelines of a wave (DP-43)
-- **Last update:** 2026-11-27 (after edb7d754: merge pipeline I2; added fix pipelines LF, LF3, LF4, FXA, FXB, FXC before the second launcher rebuild)
+- **Last update:** 2026-11-27 (after 40e157a7: closing review round 1; fix pipelines R1A…R1I appended)
 - **Next:** /hex-execute .claude/artifacts/plan_vendor_rules_ocx.md
 
 ---
@@ -1553,7 +1553,15 @@ on PF, IR, and act D2. Must not touch: code in either repository.
 | RD | rules_ocx | C-RO-27 (docs), C-RO-28 (pages); DP-45 | § RD | 1 | CW-R2 | | merged |
 | RP | rules_ocx | C-RO-27; V-L46…V-L49; MR-13; S-106 | § RP | 1 | CW-R2 | | merged |
 | IR | rules_ocx | integration; D1 pin; RE green locally | § IR | 2 | RM, RL, RU, RE, RD, RP, VF; acts B, D1 (after LA, CI2) | | merged |
-| X2 | . + rules_ocx | C-RO-29; fixture parity; CI evidence | § X2 | 6 | PF, IR; act D2 | | pending |
+| X2 | . + rules_ocx | C-RO-29; fixture parity; CI evidence | § X2 | 6 | PF, IR; act D2 | | merged |
+| R1A | . | review Block B1: deferred-tool launchers of an older release or another generation are served (ADR § 10); claim set from package metadata; PATH strip covers their directories | `crates/ocx_package_manager/src/tasks/materialize_lazy.rs`, `crates/ocx_cli/src/command/launcher/shim.rs`, their tests, `test/tests/test_lazy_loading.py` | 7 | X2 | review | pending |
+| R1B | . | review High H1: prompt gate compares size and file identity before hashing; clean keeps the directory `active` names when its read fails; `clean` help text | `crates/ocx_package_manager/src/tasks/render_toolchain.rs`, `crates/ocx_package_manager/src/activation.rs`, the clean task and command files | 7 | X2 | | pending |
+| R1C | . | review Warns: C-125 junction target in verbatim form, `retire_dir` on an absent directory, first-use re-check before retire, `LeftForLater` reported, vendor refuses a non-UTF-8 host path | `crates/ocx_util/src/fs/publish.rs`, `crates/ocx_package_manager/src/launcher/generate.rs`, `crates/ocx_package_manager/src/tasks/prepare_lazy.rs`, `crates/ocx_package_manager/src/tasks/vendor.rs` | 7 | X2 | | pending |
+| R1D | . | review Warns: launcher diagnostics, runfiles manifest read once per path, record write error keeps its cause and exits 65, V-L18 call-site test, old-model text in the launcher writer | `crates/ocx_shim/**`, `crates/ocx_env_apply/**`, `crates/ocx_package_manager/src/launcher.rs`, `crates/ocx_package_manager/src/launcher/{safety,body,direct}.rs`, `crates/ocx_package_manager/src/error.rs` | 7 | X2 | hard | pending |
+| R1E | . | review Highs H3…H5 and doc Warns: pages and records match the code | `website/src/content/docs/**` (hand-written pages), `crates/ocx_env/src/vars.rs` (doc text), `.claude/artifacts/adr_unified_launcher.md`, `.claude/rules/{subsystem-file-structure,arch-principles}.md` | 7 | X2 | | pending |
+| R1F | . | review Warns: recency gate fails on empty input, workflow names, path filter covers the launcher writer, shim tests run in the deep Windows leg | `.github/workflows/**`, `scripts/**` | 7 | X2 | | pending |
+| R1R | rules_ocx | review Warns: batch update wrapper (argument check, E12 real path, header), `facts.bzl` X2 before index read, test rows, update guide | `ocx/private/update.bat.tpl`, `ocx/private/facts.bzl`, `taskfile.yml`, `docs/**`, their tests | 7 | X2 | | pending |
+| R1I | . | review High H2 and hub files: per-OS skip ceilings and suite floors from the measured deep run, generated reference pages and goldens, red-proof log; launcher binary round 3 and dev build D3 are the meta-orchestrator's | § Run 2 — hub files (ocx) | 8 | R1A…R1F | | pending |
 
 ```mermaid
 graph TD
@@ -1763,6 +1771,30 @@ Round 1 (one round, plan-artifact scope): `reviewer:spec` (sonnet) on the decomp
   edit (it is not a blob input, but it is a `paths:` trigger). S15 C-RO-29 named in X2.1. S16 DOC2.1 greps each amendment.
 
 No re-validation round: no Block remained open after the fixes, and the plan-artifact scope runs one round.
+
+Closing review, round 1 (code-diff scope, tier high, 2026-11-27, ocx `9c9e32d4..40e157a7`, rules_ocx `401c9c4..31d9973`): ten sonnet seats
+(four spec slices with the convergence check, test coverage, quality, security, performance, docs with user feedback, CI). Cross-model
+review skipped: the codex harness returned `malformed_output` twice on the whole diff and `nox review` has no path filter. Verdict
+**Request Changes**: 1 Block, 6 High, about 45 Warn. Not converged.
+
+- B1 (`materialize_lazy.rs`, `command/launcher/shim.rs`): a deferred-tool launcher an older release wrote (`shims/…/bin/NAME`) or
+  another generation wrote (`deferred/<G'>/…`) is refused with `ShimNameNotClaimed` (exit 65) by the new `ocx`, because the claim set
+  is read from `deferred/<host G>` only. Root cause: ADR § 10 promised served command lines without tracing the served command's own
+  preconditions; verification rows were derived from the artifact list, not from the consumer's refusal sites. → R1A.
+- H1 (`render_toolchain.rs` `directory_matches`): every prompt of a `bin`-mode project hashes every launcher and record. Root cause:
+  the cheap-prompt rule lived only in the v1 gate's code, with no verification row. → R1B.
+- H2 (`test/limits/**`): per-OS skip ceilings and floors not moved for the platform-conditioned cases. → R1I.
+- H3 (`explanation/entry-points.mdx`), H4 (`ocx_env/src/vars.rs` doc for `OCX_BINARY_PIN`), H5 (`clean` help text): pages contradict
+  the code. Decision: the quote refusal in `launcher/safety.rs` stays (no relaxation of a refusal without a Windows run); the page is
+  corrected and a follow-up issue asks whether a JSON record still needs it. → R1E, R1B.
+- One security-class finding in rules_ocx (`ocx/private/update.bat.tpl`, argument handling) was rated a hardening Warn after
+  root-cause analysis by reading; it is recorded by reference in the goal file. → R1R.
+- Convergence: met C-101, C-103…C-112, C-114…C-124, C-126…C-136, C-138, C-140, C-142, C-RO-18…C-RO-24, C-RO-26…C-RO-29, C-RO-31,
+  MR-1…MR-14; partial C-125 (Windows junction target in verbatim form), C-137 (sweep of other generations takes no lock; stated limit
+  of ADR § 12), C-RO-25 (batch atomicity, CI only), C-RO-30 (batch E12 real path), ADR § 10 (B1); not judged by a spec seat C-102,
+  C-113, C-139, C-141, C-143 (the delta round judges them).
+- Deferred to follow-up issues: unify the two launcher writers and the `windows: bool` and `marker` parameters into enums; compose
+  probes launcher completeness twice; two serial syncs per launcher name; vendor walks a tree twice; `nox review` path filter.
 
 ## Run 2 — red-proof log
 
