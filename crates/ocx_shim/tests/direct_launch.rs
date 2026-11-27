@@ -328,11 +328,10 @@ fn a_missing_program_exits_74_naming_it() {
     assert!(stderr_of(&output).contains(PROGRAM), "{}", stderr_of(&output));
 }
 
-#[test]
-fn the_root_is_found_through_the_runfiles_tree_of_the_started_path() {
+fn root_through_runfiles_tree(label: &str) {
     // The vendor tree sits under `<launcher>.runfiles/<entry>/`, beside a launcher copy outside it, as a Bazel
     // output holds them.
-    let vendor = Vendor::with_root("runfiles", "out/bin/tool.runfiles/pkg");
+    let vendor = Vendor::with_root(label, "out/bin/tool.runfiles/pkg");
     vendor.install("[]", "[]", "[]");
     let outside = vendor.base.join("out/bin");
     std::fs::create_dir_all(vendor.base.join("out/bin/tool.runfiles/_main")).unwrap();
@@ -347,6 +346,37 @@ fn the_root_is_found_through_the_runfiles_tree_of_the_started_path() {
     assert!(output.status.success(), "{}", stderr_of(&output));
     let (args, _) = report(&output);
     assert_eq!(args[0], format!("{}/{PROGRAM}", vendor.root().display()));
+}
+
+#[test]
+fn the_root_is_found_through_the_runfiles_tree_of_the_started_path() {
+    root_through_runfiles_tree("runfiles");
+}
+
+/// The same tree under a directory whose name is not ASCII (BMP and non-BMP): found, and the child is started.
+#[test]
+fn the_root_is_found_through_a_runfiles_tree_under_a_non_ascii_directory() {
+    root_through_runfiles_tree("rünfiles-世界-😀");
+}
+
+/// Launcher, record and program all under non-ASCII names, no Bazel: the record beside the launcher is read and
+/// the program named by a non-ASCII record path is started.
+#[test]
+fn a_non_ascii_vendor_directory_and_program_path_launch() {
+    const NON_ASCII_PROGRAM: &str = "packages/ünï/世界-😀/bin/prøbe";
+    let vendor = Vendor::with_root("vendör-世界-😀", "vendor");
+    std::fs::create_dir_all(vendor.launcher().parent().unwrap()).unwrap();
+    std::fs::copy(LAUNCHER_BINARY, vendor.launcher()).unwrap();
+    vendor.write(NON_ASCII_PROGRAM, PROBE_SCRIPT.as_bytes(), 0o755);
+    let sidecar = format!(
+        r#"{{"kind":"direct","schema_version":1,"vendor_id":"{VENDOR_ID}","self":"{SELF_PATH}","program":"@VENDOR_DIR@/{NON_ASCII_PROGRAM}","args":[],"unset":[],"env":[]}}"#
+    );
+    vendor.write(&format!("{SELF_PATH}.launch"), sidecar.as_bytes(), 0o644);
+
+    let output = vendor.run(&[], &[]);
+    assert!(output.status.success(), "{}", stderr_of(&output));
+    let (args, _) = report(&output);
+    assert_eq!(args[0], format!("{}/{NON_ASCII_PROGRAM}", vendor.root().display()));
 }
 
 /// Measure only: the start-up cost the launcher adds when 1000 runfiles entries precede the matching one.

@@ -3480,4 +3480,147 @@ mod tests {
         let message = manifest_refusal(&manifest_world(&manifest));
         assert!(message.contains("1 candidate(s) rejected"), "{message}");
     }
+    // ── Non-ASCII paths, on the real filesystem ────────────────────────────
+    //
+    // A consuming ruleset cannot gate on a non-ASCII workspace on Windows (Bazel's client refuses one), so the
+    // launcher's own handling is proven here with real files. On Windows these run with `windows: true`, so the
+    // manifest bytes and the directory names cross the real UTF-8/UTF-16 boundary (`list_dir`, `Path::new`).
+
+    /// [`RealFs`] with the image and the identity check out of the way: the test binary is not the started path.
+    struct DiskFs;
+
+    impl LookupFs for DiskFs {
+        fn image_path(&self) -> Result<String, ShimError> {
+            Ok(NO_IMAGE.to_string())
+        }
+        fn read_sidecar(&self, path: &str) -> Result<Option<Vec<u8>>, ReadError> {
+            RealFs.read_sidecar(path)
+        }
+        fn read_lines(&self, path: &str, max_bytes: u64, max_line: usize) -> Result<Option<LineStream>, ReadError> {
+            RealFs.read_lines(path, max_bytes, max_line)
+        }
+        fn list_dir(&self, dir: &str) -> Vec<String> {
+            RealFs.list_dir(dir)
+        }
+        #[cfg(unix)]
+        fn is_executable_file(&self, path: &str) -> bool {
+            RealFs.is_executable_file(path)
+        }
+        #[cfg(unix)]
+        fn is_running_image(&self, _path: &str) -> bool {
+            true
+        }
+    }
+
+    const NON_ASCII: &str = "ünïcødé-世界-😀";
+
+    fn write_real(path: &std::path::Path, bytes: &[u8]) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    /// The root the launcher finds for `started` over the real files, separators normalised.
+    fn real_root(base: &std::path::Path, started: &std::path::Path) -> String {
+        let cwd = base.to_str().unwrap();
+        let context = LookupContext {
+            cwd,
+            runfiles_dir: None,
+            manifest_file: None,
+            windows: cfg!(windows),
+        };
+        let located = direct(locate(started.to_str().unwrap(), &context, &DiskFs).unwrap());
+        located.root.replace('\\', "/")
+    }
+
+    fn slashed(path: &std::path::Path) -> String {
+        path.to_str().unwrap().replace('\\', "/")
+    }
+
+    /// Entry 1: the manifest key is ASCII and the target path is not; and the key is not ASCII either.
+    #[test]
+    fn non_ascii_manifest_target_and_key_resolve_to_the_real_root() {
+        for key_prefix in ["pkg", NON_ASCII] {
+            let base = scratch_dir("manifest-non-ascii");
+            let root = base.join(NON_ASCII).join("vendor");
+            let record = sidecar_json(VENDOR_A, SELF_PATH);
+            write_real(&root.join(format!("{SELF_PATH}.launch")), &record);
+            let started = base.join("bin").join("tool");
+            write_real(&base.join("bin").join("tool.launch"), &record);
+            let line = format!(
+                "{key_prefix}/{SELF_PATH}.launch {}/{SELF_PATH}.launch\n",
+                root.to_str().unwrap()
+            );
+            write_real(
+                &base.join("bin").join("tool.runfiles").join("MANIFEST"),
+                line.as_bytes(),
+            );
+
+            assert_eq!(real_root(&base, &started), slashed(&root), "key prefix {key_prefix}");
+            std::fs::remove_dir_all(&base).unwrap();
+        }
+    }
+
+    /// Entry 2: a runfiles tree whose directory and whose entry carry non-ASCII names.
+    #[test]
+    fn a_runfiles_tree_under_a_non_ascii_directory_is_searched() {
+        let base = scratch_dir("tree-non-ascii");
+        let bin = base.join(NON_ASCII).join("bin");
+        let record = sidecar_json(VENDOR_A, SELF_PATH);
+        write_real(&bin.join("tool.launch"), &record);
+        let entry = bin.join("tool.runfiles").join("世界_repo");
+        write_real(&entry.join(format!("{SELF_PATH}.launch")), &record);
+
+        assert_eq!(real_root(&base, &bin.join("tool")), slashed(&entry));
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// Entry 3: no Bazel at all, the launcher and its record in a non-ASCII directory.
+    #[test]
+    fn a_launcher_in_a_non_ascii_directory_finds_the_record_beside_it() {
+        let base = scratch_dir("beside-non-ascii");
+        let vendor = base.join(NON_ASCII);
+        let started = vendor.join(SELF_PATH);
+        write_real(
+            &vendor.join(format!("{SELF_PATH}.launch")),
+            &sidecar_json(VENDOR_A, SELF_PATH),
+        );
+
+        assert_eq!(real_root(&base, &started), slashed(&vendor));
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// Entry 4: a record may name a program path with non-ASCII segments (BMP and non-BMP), on both platforms'
+    /// validation, and the launch plan spells it under the non-ASCII root.
+    #[test]
+    fn a_record_program_with_non_ascii_segments_is_accepted_and_planned() {
+        let program = "packages/ünï/世界/😀/bin/tööl";
+        let json = format!(
+            r#"{{"kind":"direct","schema_version":1,"vendor_id":"{VENDOR_A}","self":"{SELF_PATH}","program":"@VENDOR_DIR@/{program}","args":[],"unset":[],"env":[]}}"#
+        );
+        for windows in [false, true] {
+            let LaunchRecord::Direct(sidecar) = LaunchRecord::decode(json.as_bytes(), windows).unwrap() else {
+                panic!("expected a direct record");
+            };
+            let root = if windows { "C:/ünï/vendor" } else { "/ünï/vendor" };
+            let located = Located {
+                sidecar,
+                root: root.to_string(),
+            };
+            let launch = plan_launch(&located, Vec::new(), Vec::new(), windows);
+            let expected = format!("{root}/{program}");
+            assert_eq!(
+                launch.program,
+                if windows { expected.replace('/', "\\") } else { expected }
+            );
+        }
+    }
+
+    /// The Windows-only conversion of the image path from UTF-16 keeps non-ASCII and non-BMP text.
+    #[cfg(windows)]
+    #[test]
+    fn a_wide_image_path_with_non_ascii_text_converts_whole() {
+        let text = r"C:\ünï\世界\😀\tool.exe";
+        let wide: Vec<u16> = text.encode_utf16().collect();
+        assert_eq!(wide_to_string(&wide, "test").unwrap(), text);
+    }
 }
