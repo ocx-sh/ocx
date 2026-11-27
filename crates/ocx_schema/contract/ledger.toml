@@ -313,3 +313,10 @@ subjects = ["LocatedPaths", "WarmedPaths"]
 rule = "doc"
 pointer = "/$defs/PathKind/x-ocx-enum/0"
 reason = "reworded to name launchers/ as the sibling of content/ in the package root; the package kind is unchanged"
+
+[[break]]
+document = "vendor-manifest"
+subjects = ["*"]
+rule = "semantic"
+pointer = "/properties/schema_version/const"
+reason = "version 1 was written only by pre-release builds, with a different directory layout and without record_path, index_digest and index_lookups; the first released layout is version 2 so that a consumer can refuse the older one by number"

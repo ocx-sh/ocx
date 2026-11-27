@@ -1084,8 +1084,8 @@ pub enum Violation {
     Unacknowledged { kind: Kind, finding: Finding },
     /// A ledger entry that matches no finding (a `semantic` entry excepted).
     Stale(LedgerEntry),
-    /// A surviving item's version is not baseline + 1 when an entry lists it, or not the baseline when none does;
-    /// an added item's is not 1.
+    /// An item's version is not its baseline (1 when the baseline lacks it) plus 1 when a breaking or `semantic`
+    /// entry lists it.
     Version {
         kind: Kind,
         subject: String,
@@ -1241,7 +1241,7 @@ fn version_violations(
     };
     let mut out = Vec::new();
     let mut check = |kind: Kind, subject: &str, baseline: Option<u32>, found: u32| {
-        let expected = baseline.map_or(1, |baseline| baseline + bumped(kind, subject));
+        let expected = baseline.unwrap_or(1) + bumped(kind, subject);
         if expected != found {
             out.push(Violation::Version {
                 kind,

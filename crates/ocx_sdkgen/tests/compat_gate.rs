@@ -561,6 +561,47 @@ fn a_manifest_the_baseline_lacks_is_all_additions_and_starts_at_one() {
     );
 }
 
+/// A manifest the baseline lacks, at `version`, against `ledger`.
+fn added_manifest_violations(version: u32, ledger: &[LedgerEntry]) -> Vec<Violation> {
+    let (_, mut current) = pair(&case("vendor_manifest_property_removed"));
+    let mut base = base_documents();
+    base.vendor_manifest = None;
+    set(&mut current, Kind::VendorManifest, MANIFEST_VERSION, json!(version));
+    compat::gate(&base, &current, ledger)
+}
+
+fn manifest_version(expected: u32, found: u32) -> Violation {
+    Violation::Version {
+        kind: Kind::VendorManifest,
+        subject: "schema_version".to_owned(),
+        expected,
+        found,
+    }
+}
+
+#[test]
+fn an_entry_listing_an_added_manifest_justifies_version_two_and_nothing_else() {
+    let ledger = [entry("vendor-manifest", &["*"], EntryRule::Semantic, "")];
+    // Also proves a `semantic` entry matching no finding is not reported stale.
+    assert_eq!(added_manifest_violations(2, &ledger), []);
+    assert_eq!(added_manifest_violations(2, &[]), [manifest_version(1, 2)]);
+    assert_eq!(added_manifest_violations(3, &ledger), [manifest_version(2, 3)]);
+    assert_eq!(added_manifest_violations(1, &ledger), [manifest_version(2, 1)]);
+}
+
+#[test]
+fn an_entry_listing_an_added_report_justifies_version_two() {
+    let (base, mut current) = pair(&case("root_added"));
+    set(
+        &mut current,
+        Kind::Reports,
+        "/$defs/TagReportRoot/properties/schema_version/const",
+        json!(2),
+    );
+    let ledger = [entry("reports", &["TagReport"], EntryRule::Semantic, "")];
+    assert_eq!(compat::gate(&base, &current, &ledger), []);
+}
+
 #[test]
 fn a_manifest_break_needs_an_entry_and_a_bumped_schema_version() {
     let (base, mut current) = pair(&case("vendor_manifest_property_removed"));
