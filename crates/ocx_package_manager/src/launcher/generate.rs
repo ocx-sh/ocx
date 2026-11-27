@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 
 use ocx_package::metadata::entrypoint::Entrypoints;
 use ocx_store::file_structure::FileStructure;
+use ocx_store::launcher_generation::LauncherGeneration;
+use ocx_util::fs::{Published, publish_dir};
 
 use super::body::utf8_baked_path;
 use super::direct::write_direct_launcher_for;
@@ -56,6 +58,72 @@ pub(super) async fn generate_for(
         write_launcher(dest, name.as_str(), blob, &record, windows).await?;
     }
     Ok(())
+}
+
+/// Whether `dir` is a complete launcher directory for `entries`: a real directory (`lstat`, no link) holding, per
+/// name that gets a launcher, `NAME[.exe]` and `NAME.launch` as regular files.
+pub(crate) async fn launchers_complete(dir: &Path, entries: &Entrypoints) -> bool {
+    async fn is_file(path: PathBuf) -> bool {
+        tokio::fs::symlink_metadata(path).await.is_ok_and(|m| m.is_file())
+    }
+    if !tokio::fs::symlink_metadata(dir).await.is_ok_and(|m| m.is_dir()) {
+        return false;
+    }
+    for (name, _entry) in entries.iter().filter(|(name, _)| !is_record_name(name.as_str())) {
+        let name = name.as_str();
+        let launcher = if cfg!(windows) {
+            format!("{name}.exe")
+        } else {
+            name.to_owned()
+        };
+        if !is_file(dir.join(launcher)).await || !is_file(dir.join(format!("{name}.{RECORD_EXTENSION}"))).await {
+            return false;
+        }
+    }
+    true
+}
+
+/// Publishes `<package_dir>/launchers/<generation>` for `entries`, built complete in a locked scratch directory and
+/// moved in with one rename; a published directory is never edited. `package_dir` is the final package directory and
+/// is never created here.
+///
+/// # Errors
+///
+/// A failed write, a host without a launcher blob, a missing `package_dir`, or a directory that won the race and is
+/// not complete.
+#[cfg_attr(not(test), expect(dead_code, reason = "compose_roots calls it in the next step"))]
+pub(crate) async fn publish_package_launchers(
+    fs: &FileStructure,
+    package_dir: &Path,
+    generation: &LauncherGeneration,
+    entries: &Entrypoints,
+) -> Result<Published, crate::Error> {
+    let blob = host_launcher_blob(package_dir)?;
+    let target = package_dir.join("launchers").join(generation.as_str());
+    let scratch = fs
+        .temp
+        .scratch("launchers")
+        .await
+        .map_err(|e| crate::error::file_error(&target, std::io::Error::other(e)))?;
+    generate_for(package_dir, entries, scratch.path(), blob, cfg!(windows)).await?;
+
+    // No `create_dir_all`: a package directory removed meanwhile must not come back as a husk holding only launchers.
+    let parent = package_dir.join("launchers");
+    match tokio::fs::create_dir(&parent).await {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(crate::error::file_error(&parent, e)),
+    }
+    let published = publish_dir(scratch.path(), &target)
+        .await
+        .map_err(|e| crate::error::file_error(&target, e))?;
+    if published == Published::AlreadyThere && !launchers_complete(&target, entries).await {
+        return Err(crate::error::file_error(
+            &target,
+            std::io::Error::other("another process published an incomplete launcher directory"),
+        ));
+    }
+    Ok(published)
 }
 
 /// The embedded launcher image of this host.
@@ -272,6 +340,7 @@ mod tests {
     use ocx_package::metadata::entrypoint::{Entrypoint, EntrypointName, Entrypoints};
 
     use super::generate_direct;
+    use super::{FileStructure, LauncherGeneration, Published};
     use ocx_env_apply::launch::{DirectRecord, LaunchKind, LaunchRecord, PackageRecord, SCHEMA_VERSION};
 
     /// A direct entry-point render writes `<name>` and `<name>.launch` carrying the entry's own sidecar.
@@ -480,20 +549,82 @@ mod tests {
         assert_eq!(listing(tmp.path()), ["bar", "bar.launch"]);
     }
 
-    /// A second generation over the same directory converges on the same bytes.
+    /// C-140: a second publication over a complete `launchers/<G>` is `AlreadyThere` and rewrites nothing.
     #[tokio::test]
     async fn generate_is_idempotent() {
         let tmp = tempdir().unwrap();
-        let pkg_root = tmp.path().join("pkg");
-        let dest = pkg_root.join("launchers");
+        let fs = FileStructure::with_root(tmp.path().join("home"));
+        let pkg_dir = tmp.path().join("pkg");
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        let generation = LauncherGeneration::host().expect("the test host has a launcher blob");
+        let entries = entries_for(&["cmake", "ctest"]);
+
+        let first = super::publish_package_launchers(&fs, &pkg_dir, &generation, &entries)
+            .await
+            .unwrap();
+        assert_eq!(first, Published::New);
+        let dir = pkg_dir.join("launchers").join(generation.as_str());
+        let before = snapshot(&dir);
+
+        let second = super::publish_package_launchers(&fs, &pkg_dir, &generation, &entries)
+            .await
+            .unwrap();
+
+        assert_eq!(second, Published::AlreadyThere);
+        assert_eq!(snapshot(&dir), before, "names, bytes and inodes are unchanged");
+        assert_eq!(listing(&dir).len(), 4);
+        assert_eq!(listing(&pkg_dir.join("launchers")), [generation.as_str()]);
+    }
+
+    /// V-L24 helper half: a removed package directory is neither recreated nor given a `launchers/`.
+    #[tokio::test]
+    async fn publish_does_not_recreate_a_removed_package_directory() {
+        let tmp = tempdir().unwrap();
+        let fs = FileStructure::with_root(tmp.path().join("home"));
+        let pkg_dir = tmp.path().join("gone");
+        let generation = LauncherGeneration::host().expect("the test host has a launcher blob");
+
+        let result = super::publish_package_launchers(&fs, &pkg_dir, &generation, &entries_for(&["cmake"])).await;
+
+        assert!(result.is_err());
+        assert!(!pkg_dir.exists());
+    }
+
+    /// An incomplete directory is not complete; neither is a link, nor a directory short one record.
+    #[tokio::test]
+    async fn completeness_needs_a_real_directory_with_every_file() {
+        let tmp = tempdir().unwrap();
         let entries = entries_for(&["cmake"]);
+        let dir = tmp.path().join("d");
+        super::generate(&tmp.path().join("pkg"), &entries, &dir).await.unwrap();
+        assert!(super::launchers_complete(&dir, &entries).await);
 
-        super::generate(&pkg_root, &entries, &dest).await.unwrap();
-        let first = std::fs::read(dest.join("cmake.launch")).unwrap();
-        super::generate(&pkg_root, &entries, &dest).await.unwrap();
+        std::fs::remove_file(dir.join("cmake.launch")).unwrap();
+        assert!(!super::launchers_complete(&dir, &entries).await);
+        assert!(!super::launchers_complete(&tmp.path().join("absent"), &entries).await);
+        #[cfg(unix)]
+        {
+            let link = tmp.path().join("link");
+            let full = tmp.path().join("full");
+            super::generate(&tmp.path().join("pkg"), &entries, &full).await.unwrap();
+            std::os::unix::fs::symlink(&full, &link).unwrap();
+            assert!(!super::launchers_complete(&link, &entries).await);
+        }
+    }
 
-        assert_eq!(std::fs::read(dest.join("cmake.launch")).unwrap(), first);
-        assert_eq!(listing(&dest), ["cmake", "cmake.launch"]);
+    /// Every file of `dir` as (name, bytes, inode on Unix), sorted.
+    fn snapshot(dir: &std::path::Path) -> Vec<(String, Vec<u8>, u64)> {
+        listing(dir)
+            .into_iter()
+            .map(|name| {
+                let path = dir.join(&name);
+                #[cfg(unix)]
+                let inode = std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(&path).unwrap());
+                #[cfg(not(unix))]
+                let inode = 0;
+                (name, std::fs::read(&path).unwrap(), inode)
+            })
+            .collect()
     }
 
     #[test]

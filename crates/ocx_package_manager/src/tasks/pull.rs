@@ -446,7 +446,7 @@ pub async fn setup_owned(
     Ok(info)
 }
 
-/// A package's directory inside a vendor tree, the one destination that is not the store.
+/// A package's place in a vendor tree: its directory `p/<HEX16>` and the content directory `p/<HEX16>/c` inside it.
 #[derive(Debug, Clone)]
 pub(crate) struct VendorTarget {
     package_dir: std::path::PathBuf,
@@ -471,15 +471,15 @@ impl VendorTarget {
     }
 }
 
-/// Copies `pinned`'s content into `target` and writes nothing else there.
+/// Assembles `pinned`'s layers into `target`'s content directory `p/<HEX16>/c` and writes nothing else.
 ///
-/// No `refs/`, `metadata.json`, `resolve.json`, `install.json`, `digest` or OCI manifest, no install
-/// symlink and no entry-point launcher: the tree must hold only what a remote executor runs, and a GC
-/// reference into a directory the store does not own would pin it. Assembly copies rather than
-/// hardlinks, since the tree leaves the volume `$OCX_HOME` sits on. Dependencies are set up in the
-/// store as for any pull; the caller vendors each package of the closure itself.
+/// The layers are copied, not hardlinked, since the tree leaves the volume `$OCX_HOME` sits on. Its package
+/// directory holds no `metadata.json`, `resolve.json`, `install.json`, `digest`, `refs/` or `launchers/`, and no
+/// install symlink: the caller writes the direct launchers beside it in `p/<HEX16>/e/`. Dependencies are set up in
+/// the store as for any pull; the caller vendors each package of the closure itself.
 ///
-/// The returned [`InstallInfo`] is rooted at `target`.
+/// The returned [`InstallInfo`] is rooted at `target`'s package directory, so its `content()` names `content` there,
+/// not `c`; nothing reads it.
 ///
 /// # Errors
 ///
@@ -526,6 +526,27 @@ pub(crate) async fn setup_vendored(
     let resolved_package = resolved_package_of(&metadata, &dependencies);
     let dir = file_structure::PackageDir::with_root(target.package_dir().to_path_buf());
     Ok(InstallInfo::new(pinned.clone(), metadata, resolved_package, dir).with_platform(resolved.platform))
+}
+
+/// Writes `launchers/<G>/` into the temp package directory `pkg`, each record naming `final_root`.
+///
+/// The package move publishes it; `entrypoints/` is never written.
+///
+/// # Errors
+///
+/// The host has no launcher blob (the error names the launcher path), or as [`crate::launcher::generate`].
+async fn write_package_launchers(
+    pkg: &file_structure::PackageDir,
+    final_root: &std::path::Path,
+    entrypoints: &ocx_package::metadata::entrypoint::Entrypoints,
+) -> Result<(), crate::Error> {
+    let generation = ocx_store::launcher_generation::LauncherGeneration::host().ok_or_else(|| {
+        crate::error::file_error(
+            pkg.launchers_root(),
+            std::io::Error::other("no launcher blob for this host"),
+        )
+    })?;
+    crate::launcher::generate(final_root, entrypoints, &pkg.launchers(&generation)).await
 }
 
 /// [`setup_owned`] plus what it observed.
@@ -697,12 +718,11 @@ async fn setup_owned_impl(
     if let Some(entrypoints) = metadata.entrypoints()
         && !entrypoints.is_empty()
     {
-        let dest = pkg.entrypoints();
         // The post-move root, not the temp path, or every launcher breaks after the rename.
         let final_pkg_root = dest_override
             .map(std::path::Path::to_path_buf)
             .unwrap_or_else(|| fs.packages.path(pinned));
-        crate::launcher::generate(&final_pkg_root, entrypoints, &dest)
+        write_package_launchers(&pkg, &final_pkg_root, entrypoints)
             .await
             .map_err(PackageErrorKind::Internal)?;
     }
@@ -1492,6 +1512,33 @@ mod tests {
         },
     };
     use ocx_store::file_structure::FileStructure;
+
+    /// A pull writes `launchers/<G>/` recording the post-move root, and nothing under `entrypoints/`.
+    #[tokio::test]
+    async fn pull_writes_launchers_with_the_final_root_and_no_entrypoints() {
+        use ocx_store::launcher_generation::LauncherGeneration;
+        let tmp = tempfile::tempdir().unwrap();
+        let temp_pkg = tmp.path().join("temp-pkg");
+        let final_root = tmp.path().join("packages").join("final");
+        std::fs::create_dir_all(&temp_pkg).unwrap();
+        let pkg = ocx_store::file_structure::PackageDir::with_root(temp_pkg.clone());
+
+        super::write_package_launchers(&pkg, &final_root, &Entrypoints::from_names(["cmake"]))
+            .await
+            .unwrap();
+
+        let generation = LauncherGeneration::host().unwrap();
+        let record = std::fs::read(
+            temp_pkg
+                .join("launchers")
+                .join(generation.as_str())
+                .join("cmake.launch"),
+        )
+        .unwrap();
+        let record: ocx_env_apply::launch::PackageRecord = serde_json::from_slice(&record).unwrap();
+        assert_eq!(record.package_root, final_root.to_str().unwrap());
+        assert!(!temp_pkg.join("entrypoints").exists());
+    }
 
     /// Drives `setup_owned` against a leaf that is a perfectly valid OCI
     /// artifact but not an OCX package, and returns the refusal.
