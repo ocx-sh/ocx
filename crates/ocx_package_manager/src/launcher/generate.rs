@@ -995,6 +995,11 @@ mod tests {
                 if *path == package.launchers_root() && cause.kind() == std::io::ErrorKind::PermissionDenied),
             "{error:?}"
         );
+        assert_eq!(
+            ocx_exit::ClassifyExitCode::classify(&error),
+            Some(ocx_exit::ExitCode::PermissionDenied),
+            "C-127: a permission refusal on first use exits 77"
+        );
     }
 
     /// An incomplete directory is not complete; neither is a link, nor a directory short one record.

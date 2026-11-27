@@ -5105,6 +5105,31 @@ mod tests {
         assert_eq!(tree.home.active_target_name(), Some(kept), "…and so does `active`");
     }
 
+    /// C-127: the render turns a staging failure into a `Skipped` reason (above) and never an error, so
+    /// no exit-74 error escapes; the helper's own error, were it propagated, answers 77 for a refusal.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_refused_staging_directory_answers_permission_denied() {
+        use ocx_exit::ClassifyExitCode as _;
+        let tree = Tree::new();
+        tree.create_home_root();
+        // SAFETY: `geteuid` takes no arguments, touches no memory, and always succeeds.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let record = toolchain_record(&TrampolineTarget::Global, None, false, tree.home.root()).unwrap();
+        deny_writes(&shells_root(&tree.home));
+        let result = stage_render_dir(&tree.home, &["cmake".to_owned()], b"blob", &record, false).await;
+        allow_writes(&shells_root(&tree.home));
+
+        let error = result.expect_err("a read-only `shells/` cannot take a staging directory");
+        assert_eq!(
+            error.classify(),
+            Some(ocx_exit::ExitCode::PermissionDenied),
+            "{error:?}"
+        );
+    }
+
     /// C-044, case 49 — a launcher replaced by a **symlink** to a file outside the
     /// tree is never written through: the next render publishes a new directory
     /// whose entry is a regular file, and the link's target is byte-identical.
