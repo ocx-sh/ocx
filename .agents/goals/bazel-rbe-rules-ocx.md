@@ -131,6 +131,30 @@ Recorded decisions, second run:
   `bazel run`. Class: argument handling ahead of the batch wrapper. Status: a limit of the batch-file design that
   the wrapper cannot close; one character class is no longer checked end to end. The DONE block reports it in
   full with the design that closes it.
+- **Delta review, call 2 of 3 (2026-11-27).** Verdict Needs Work: no Block, two High, about twenty Warn. The
+  record is in `.claude/artifacts/plan_vendor_rules_ocx.md` § Review record. Question: which outer cycle does its
+  fix pass belong to? Research: § Loop shape counts each review and execute pass as one. ocx has had one (review
+  round 1 and its fix pass); the probe fixes belonged to it. rules_ocx has had two (that pass, and the repair
+  after its red gate). Decision: the fix pass R2A to R2C is outer cycle 2 for ocx, the last one. The next
+  `verify-deep.yml` run on the ocx branch is its gate; a red job there is reported as not met and nothing more
+  is fixed. rules_ocx takes no further fix: its branch changes only by the pin of the dev build and the
+  recomposed commit series. The owner may read the count more strictly; the DONE block names it.
+- **rules_ocx gate run 45989881945 at 83477a4 (2026-11-27).** The Windows leg is red. Per the entry above this
+  is reported as not met for "CI green per job" and "Deep verify passed" in rules_ocx, with the failed
+  expectations in the DONE block. The delta review also found that one row of that Windows check cannot fail
+  the task (its expectation runs in a subshell); that is a follow-up issue in rules_ocx, not fixed here.
+- **A deferred tool after `ocx clean` (2026-11-27), revising the cleaned-home entry above.** Question: is the
+  refusal with exit 81 acceptable when an ordinary `ocx clean` is what removed the metadata? Research: the
+  cross-model pass and two seats read that `ocx clean` keeps a deferred tree's config blobs and drops its
+  manifests, so every deferred tool that was never started stops working after a clean. That cuts a feature.
+  Decision: `ocx clean` keeps what a kept deferred tree reads (pipeline R2A). The refusal with exit 81 stays for
+  a home whose metadata is gone for another reason, and still starts no download for a name check.
+- **Security findings by reference (2026-11-27, delta review).** Three, all in rules_ocx, all rated Warn, none
+  fixed in this run. Location: `ocx/private/update.bat.tpl`, declaration selection; class: name comparison
+  consistency. Location: `ocx/private/update.bat.tpl` with `ocx/private/update_repo.bzl`, declaration names;
+  class: input character set, reachability not confirmed. Location: `scripts/ocx_under_test.sh`, the memo file;
+  class: trust in a file under a shared temporary directory, local hosts only. The DONE block reports them in
+  full.
 
 ## Loop shape
 

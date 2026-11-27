@@ -8,9 +8,10 @@
 - **Tier-grammar:** 5
 - **Updated:** 2026-11-27
 - **Active phase:** 0 — second run planned (§ Second run); first run landed (ocx `9c9e32d4`, rules_ocx `401c9c4`)
-- **Step:** awaiting /hex-execute (review-fix loop; closing review round 1 verdict Request Changes, fix wave 7)
+- **Step:** awaiting /hex-execute (review-fix loop; round 2 verdict Needs Work; ocx pipelines R2A…R2C)
 - **Feature branch:** ocx `hex/bazel-rbe-rules-ocx` (pipelines on `hex/bazel-rbe-rules-ocx--<pipeline>`, worktrees under `.agents/worktrees/`); rules_ocx one branch `hex/bazel-rbe-rules-ocx`, its worktree `/home/mherwig/dev/ocx-sh/rules_ocx/.agents/worktrees/hex-bazel-rbe-rules-ocx` shared by the rules_ocx pipelines of a wave (DP-43)
-- **Last update:** 2026-11-27 (after 40e157a7: closing review round 1; fix pipelines R1A…R1I appended)
+- **Last update:** 2026-11-27 (after 7ebabeec: delta review round 2; fix pipelines R2A…R2C appended)
+- **Reviewed:** 7ebabeec (rules_ocx 83477a4)
 - **Next:** /hex-execute .claude/artifacts/plan_vendor_rules_ocx.md
 
 ---
@@ -1561,7 +1562,10 @@ on PF, IR, and act D2. Must not touch: code in either repository.
 | R1E | . | review Highs H3…H5 and doc Warns: pages and records match the code | `website/src/content/docs/**` (hand-written pages), `crates/ocx_env/src/vars.rs` (doc text), `.claude/artifacts/adr_unified_launcher.md`, `.claude/rules/{subsystem-file-structure,arch-principles}.md` | 7 | X2 | | merged |
 | R1F | . | review Warns: recency gate fails on empty input, workflow names, path filter covers the launcher writer, shim tests run in the deep Windows leg | `.github/workflows/**`, `scripts/**` | 7 | X2 | | merged |
 | R1R | rules_ocx | review Warns: batch update wrapper (argument check, E12 real path, header), `facts.bzl` X2 before index read, test rows, update guide | `ocx/private/update.bat.tpl`, `ocx/private/facts.bzl`, `taskfile.yml`, `docs/**`, their tests | 7 | X2 | | merged |
-| R1I | . | review High H2 and hub files: per-OS skip ceilings and suite floors from the measured deep run, generated reference pages and goldens, red-proof log; launcher binary round 3 and dev build D3 are the meta-orchestrator's | § Run 2 — hub files (ocx) | 8 | R1A…R1F | | pending |
+| R1I | . | review High H2 and hub files: per-OS skip ceilings and suite floors from the measured deep run, generated reference pages and goldens, red-proof log; launcher binary round 3 and dev build D3 are the meta-orchestrator's | § Run 2 — hub files (ocx) | 8 | R1A…R1F | | merged |
+| R2A | . | delta review High A1 and Warns: `ocx clean` keeps the manifests a deferred tree's claim check reads; a home whose metadata is gone still refuses with exit 81; the launcher directory listing fails closed on a read error; tests for the refusal and for the loop guard; limit files for the new cases | `crates/ocx_package_manager/src/tasks/{clean,materialize_lazy}.rs`, `crates/ocx_cli/src/command/launcher/shim.rs`, `test/tests/test_lazy_loading.py`, `test/SUITE_FLOOR`, `test/SKIP_CEILING`, `test/limits/**`, the census pins | 9 | R1I | | pending |
+| R2B | . | delta review Warns: a zero file identity is no identity in the per-prompt gate; a call-site test for the declared-binary `executable` flag | `crates/ocx_store/src/file_structure/state_store.rs`, `crates/ocx_package_manager/src/tasks/vendor.rs` (tests only) | 9 | R1I | | pending |
+| R2C | . | delta review doc Warns and convergence gaps C-137, C-RO-30: pages name the right slug, the deferred first use, the vendor refusals, the skipped home; ADR § 12 states the sweep's lock limit; this plan's C-137 and C-RO-30 lines match the code | `website/src/content/docs/**` (hand-written pages), `.claude/artifacts/adr_unified_launcher.md`, this plan's § Run 2 — component contracts | 9 | R1I | | pending |
 
 ```mermaid
 graph TD
@@ -1795,6 +1799,37 @@ review skipped: the codex harness returned `malformed_output` twice on the whole
   C-113, C-139, C-141, C-143 (the delta round judges them).
 - Deferred to follow-up issues: unify the two launcher writers and the `windows: bool` and `marker` parameters into enums; compose
   probes launcher completeness twice; two serial syncs per launcher name; vendor walks a tree twice; `nox review` path filter.
+
+Delta review, round 2 (code-diff scope, tier high, loop mode, 2026-11-27, ocx `40e157a7..7ebabeec`, rules_ocx `6ebbe1b^..83477a4`):
+eight sonnet seats (three spec slices with the convergence check, test coverage, quality with CI, security, performance, docs) and one
+cross-model pass (`nox review`, ran, verdict `needs-attention`). Verdict **Needs Work**: 0 Block, 2 High, about 20 Warn.
+
+- Round-1 findings: B1, H1, H3, H4, H5 resolved (four seats each read the claim set, the PATH strip and the containment check; no
+  route to a wrong program or a self re-entry found). H2 resolved as far as the measured run reaches; the per-OS ceilings cite no
+  run id beside their numbers.
+- A1 High (`tasks/materialize_lazy.rs`, `tasks/clean.rs`; cross-model pass, confirmed by reading): `ocx clean` keeps a deferred
+  tree's config blobs but not its manifests, and the claim check now reads those manifests, so every deferred tool that was never
+  started refuses with exit 81 after an ordinary `ocx clean`. Root cause: the B1 fix moved the claim source to package metadata
+  without adding that metadata to the root set of the tree that needs it; the goal file recorded the symptom as a decision
+  ("no fetch") instead of asking why a kept tree loses what it reads. → R2A.
+- A2 High (rules_ocx `taskfile.yml`, `deep:windows-update-target`): the `no bazel found` row calls `expect` inside a subshell, so a
+  failed expectation there never reaches the final failure list. Root cause: the helper records failures in a shell variable and the
+  row needed an environment override, written as a subshell. Not fixed in this run: rules_ocx spent its second outer cycle; reported
+  in the DONE block and as a follow-up issue.
+- Warns to R2A…R2C: the launcher directory listing swallows a read error and fails open; a zero file identity matches on size alone;
+  no test for the exit-81 refusal, for the loop guard through an older `shims/<id>/bin`, or for the `executable` call site; five page
+  gaps (slug for a refused `@VENDOR_DIR@` root, deferred first use, vendor refusals, skipped home, `clean` lede).
+- Warns not fixed (follow-up issues or the DONE block): rules_ocx items (three security-class findings by reference in the goal
+  file, the X2 text read as a retry trigger, the loose `launch_line` pattern behind V-L48, the memo comment); the Windows-only
+  hostile-argument test tolerates exit 64 on the arguments it is about; `_snapshot` maps a Windows permission error to a constant;
+  `launcher_unsafe_hint` wording; `random_hex16` and `retarget_symlink` duplicates; the completeness re-check and the retire are
+  not serialised (narrow window, same class as the limit ADR § 12 gains in R2C); the fast path believes a same-size in-place rewrite
+  (inside the trust boundary, stated in the stamp's doc).
+- Convergence: met C-102, C-113, C-139, C-141, C-143, C-125, ADR § 10; partial C-137 (lock wording, → R2C), C-RO-30 (this plan's
+  line lags ADR 0003 of rules_ocx, → R2C), C-RO-25 (code matches; no Windows run at the head covers the publish).
+- Gate evidence beside this review: ocx deep probe run 45985987951 red on two Windows acceptance tests (a fixture wrote a batch
+  leaf into a wasm package; fixed at 7ebabeec) and on the two unit targets fixed at c3608b2b; rules_ocx gate run 45989881945 red on
+  its Windows leg.
 
 ## Run 2 — red-proof log
 
