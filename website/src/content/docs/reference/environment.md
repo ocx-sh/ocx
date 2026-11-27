@@ -135,12 +135,13 @@ Read for the `basic` type, which `TYPE` may leave to be inferred; ignored for an
 Absolute path to the running `ocx`, set on every spawn so a child OCX runs the same binary, not whatever `$PATH` resolves.
 
 Set by OCX on every subprocess it spawns, so the inner `ocx launcher exec` of a generated
-launcher runs the binary that installed the package. Unset, launchers fall back to
-`$PATH`-resolved `ocx`; set it by hand only to pin a specific binary.
+launcher runs the binary that installed the package. Unset or empty, a launcher falls
+back to the `ocx` its record names (toolchain launchers only), else the first `ocx` on
+`PATH`; set it by hand only to pin a specific binary.
 
-The Windows `.exe` shim treats a defined but empty value as defined, the Unix launcher's
-`${OCX_BINARY_PIN:-ocx}` as unset. The value is the installed `ocx` path when the running
-binary is that one and the path is safely owned, else the running binary; never empty.
+An empty value counts as unset on every platform. The `PATH` walk takes absolute entries only and skips the launcher's own directory and any other launcher.
+
+The value is the installed `ocx` path when the running binary is that one and the path is safely owned, else the running binary; never empty.
 
 - Audience: public
 - Value: `path`
