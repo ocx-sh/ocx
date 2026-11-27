@@ -429,6 +429,21 @@ def windows_only_package(ocx: OcxRunner, repo: str, tmp_path: Path) -> PackageIn
     )
 
 
+def foreign_platform_package(ocx: OcxRunner, repo: str, tmp_path: Path) -> PackageInfo:
+    """A one-leaf package whose platform is never the host's: `windows/amd64`, or `linux/amd64` on a Windows host."""
+    if current_platform() != "windows/amd64":
+        return windows_only_package(ocx, repo, tmp_path)
+    return make_package(
+        ocx,
+        repo,
+        "1.0.0",
+        tmp_path,
+        bins=["tool"],
+        binaries=["tool"],
+        platform="linux/amd64",
+    )
+
+
 def no_names_package(ocx: OcxRunner, repo: str, tmp_path: Path) -> PackageInfo:
     """Declares no binaries and no entry points; only an env constant."""
     return make_package(
