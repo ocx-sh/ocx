@@ -27,7 +27,7 @@ from uuid import uuid4
 import pytest
 
 from src.runner import OcxRunner, PackageInfo, current_platform
-from src.vendor_fixtures import VENDOR_TOKEN, entrypoint_package, publish_tree
+from src.vendor_fixtures import VENDOR_TOKEN, publish_tree
 
 pytestmark = pytest.mark.command("vendor")
 
@@ -722,21 +722,40 @@ def _injected(stdout: str) -> bool:
 def test_cmd_target_with_hostile_arguments_runs_no_injected_command(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    pkg = entrypoint_package(ocx, unique_repo, tmp_path / "pkg")
+    from src.helpers import make_package_with_entrypoints
+
+    pkg = make_package_with_entrypoints(
+        ocx,
+        unique_repo,
+        tmp_path / "pkg",
+        ["gamma"],
+        bins=["gamma"],
+        # On Windows `bins=["gamma"]` writes `bin/gamma.bat`, and the default PATHEXT order takes `.bat` before `.cmd`,
+        # so the probe overwrites that file; a `gamma.cmd` beside it would never run.
+        extra_files={"bin/gamma.bat": "@echo gamma-cmd %*\r\n"},
+        env=[PATH_ENTRY],
+    )
     out, manifest = _vendor_project(ocx, tmp_path / "proj", {"ep": pkg})
     (package,) = manifest["packages"]
-    (gamma,) = [e for e in package["entrypoints"] if e["name"] == "gamma"]
+    (gamma,) = package["entrypoints"]
     env = {k: v for k, v in os.environ.items()}
 
+    ran = 0
     for argument in HOSTILE_ARGS:
         result = _run(
             [str(out / gamma["launcher_path"]), argument], cwd=tmp_path, env=env
         )
         assert result.returncode in (0, 64), f"{argument!r}: {result.stderr}"
+        if result.returncode == 0:
+            assert any(
+                line.startswith("gamma-cmd") for line in result.stdout.splitlines()
+            ), f"{argument!r}: the probe did not run: {result.stdout!r}"
+            ran += 1
         assert not _injected(result.stdout), f"{argument!r} ran an injected command"
+    assert ran, "the launcher must run the probe for at least one hostile argument"
 
-    # Control: the `list2cmdline` quoter lets the same argument inject through the same `.cmd`.
-    cmd = out / package["content_dir"] / "bin" / "gamma.cmd"
+    # Control: the `list2cmdline` quoter lets the same argument inject through the same batch file.
+    cmd = out / package["content_dir"] / "bin" / "gamma.bat"
     quoted = _run([str(cmd), HOSTILE_ARGS[2]], cwd=tmp_path, env=env)
     assert _injected(quoted.stdout), (
         "the control must show the injection it guards against"
