@@ -128,7 +128,7 @@ BASE_PATH = os.pathsep.join(["/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "
 # toolchain half equals the `toolchain_bin` field `ocx shell state` reports —
 # but that comparison realpaths both sides through `active`, so it pins the
 # *identity*, not the spelling. A producer that regressed to registering
-# `shells/default/bin` would still satisfy it. The `active/bin` **spelling** is
+# `shells/default-<hex>/bin` would still satisfy it. The `active/bin` **spelling** is
 # pinned by `test_shell_reconcile_edge_cases.py` and `test_session_path.py`,
 # which compare raw strings.
 # `test_ec_path_005` and `test_ec_rec_001` then compare a live shell's PATH

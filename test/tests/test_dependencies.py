@@ -1491,11 +1491,11 @@ def _list_dep_targets(obj_dir: Path) -> list[Path]:
 def test_public_dep_entrypoints_appear_in_consumer_path(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    """A's env must include B's entrypoints/ in PATH when B is a public dependency.
+    """A's env must include B's launchers/<G> in PATH (C-129) when B is a public dependency.
 
-    The visible-package pipeline emits a synthetic `PATH ⊳ <B_pkg_root>/entrypoints`
+    The visible-package pipeline emits a synthetic `PATH ⊳ <B_pkg_root>/launchers/<G>`
     for every visible package that has non-empty entrypoints.  When A depends on B
-    publicly, B is visible to A — so B's entrypoints/ must appear in `ocx env A`.
+    publicly, B is visible to A — so B's launchers/<G> must appear in `ocx env A`.
     """
     b_repo = f"{unique_repo}_b"
     a_repo = f"{unique_repo}_a"
@@ -1521,18 +1521,18 @@ def test_public_dep_entrypoints_appear_in_consumer_path(
     env_result = ocx.json("package", "env", pkg_a.short)
     path_values = [e["value"] for e in env_result["items"] if e["key"] == "PATH"]
 
-    assert any("entrypoints" in v for v in path_values), (
-        f"expected B's entrypoints/ in PATH for public dep; PATH values: {path_values}"
+    assert any("launchers" in v for v in path_values), (
+        f"expected B's launchers/<G> in PATH for public dep; PATH values: {path_values}"
     )
 
 
 def test_sealed_dep_entrypoints_excluded_from_consumer_path(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    """A's env must NOT include B's entrypoints/ in PATH when B is a sealed dependency.
+    """A's env must NOT include B's launchers/<G> in PATH when B is a sealed dependency.
 
     Sealed (non-exported) dependencies are not visible to A's consumers — the
-    synthetic entrypoints/ PATH entry for B must not appear in `ocx env A`.
+    synthetic launchers/<G> PATH entry for B must not appear in `ocx env A`.
     """
     b_repo = f"{unique_repo}_b"
     a_repo = f"{unique_repo}_a"
@@ -1558,13 +1558,13 @@ def test_sealed_dep_entrypoints_excluded_from_consumer_path(
     env_result = ocx.json("package", "env", pkg_a.short)
     path_values = [e["value"] for e in env_result["items"] if e["key"] == "PATH"]
 
-    # B's entrypoints/ dir must not appear in PATH for A (sealed dep not exported).
+    # B's launchers/<G> dir must not appear in PATH for A (sealed dep not exported).
     b_find = ocx.json("package", "which", pkg_b.short)["paths"]
     assert len(b_find) == 1, f"one identifier in, one entry out: {b_find}"
     b_pkg_root = str(Path(next(iter(b_find.values()))["path"]))
 
-    assert not any(v.startswith(b_pkg_root) and "entrypoints" in v for v in path_values), (
-        f"sealed dep B's entrypoints/ must NOT appear in consumer PATH; PATH values: {path_values}"
+    assert not any(v.startswith(b_pkg_root) and "launchers" in v for v in path_values), (
+        f"sealed dep B's launchers/<G> must NOT appear in consumer PATH; PATH values: {path_values}"
     )
 
 

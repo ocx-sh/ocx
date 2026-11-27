@@ -1,9 +1,25 @@
+import re
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
 from src import OcxRunner, PackageInfo, assert_dir_exists, assert_not_exists
-from src.helpers import make_package
+from src.helpers import make_package, make_package_with_entrypoints, write_ocx_toml
+from src.toolchain_fixtures import (
+    EXIT_SUCCESS,
+    SHELLS_DIR,
+    ToolchainProject,
+    active_shell,
+    generated_shells,
+    is_link,
+    locked_project,
+    make_link,
+    read_link,
+    read_render_stamp,
+    run_in,
+    snapshot_tree,
+)
 
 pytestmark = pytest.mark.command("clean")
 
@@ -178,3 +194,245 @@ def test_clean_preserves_committed_index_home(
         "ocx clean must not touch any file under the committed index home. "
         f"Before: {[name for name, _ in before]}, after: {[name for name, _ in after]}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Launcher generations (adr_unified_launcher.md section 12; V-L30, V-L41; C-137, S-105)
+# ---------------------------------------------------------------------------
+
+_GENERATION = re.compile(r"^[0-9a-f]{16}$")
+
+
+def _hex16() -> str:
+    """A 16-hex name no real generation or render collides with."""
+    return uuid4().hex[:16]
+
+
+def _launchers_entries(report: dict) -> list[dict]:
+    """The report's entries of kind ``launchers``."""
+    return [item for item in report["items"] if item["kind"] == "launchers"]
+
+
+def _reported(report: dict) -> set[Path]:
+    """The resolved paths of the ``launchers`` entries. Resolved, because the
+    report names the path as ocx joined it and the test planted it through the
+    home the runner configured; both can differ by a link."""
+    return {Path(item["path"]).resolve() for item in _launchers_entries(report)}
+
+
+def _plant_launcher_dir(directory: Path, name: str = "tool") -> Path:
+    """A complete-looking launcher directory: ``NAME`` and ``NAME.launch``."""
+    directory.mkdir(parents=True)
+    (directory / name).write_bytes(b"\x7fELF-not-run")
+    (directory / f"{name}.launch").write_text("{}", encoding="utf-8")
+    return directory
+
+
+class _Generations:
+    """An installed package with a planted superseded generation, and a planted
+    ``deferred/<G'>`` subtree."""
+
+    def __init__(self, ocx: OcxRunner, tmp_path: Path, unique_repo: str) -> None:
+        pkg = make_package_with_entrypoints(
+            ocx, unique_repo, tmp_path, ["tool"], bins=["tool"]
+        )
+        installed = ocx.json("package", "install", pkg.short)["packages"]
+        # `path` is the candidate link, which targets the package root; first
+        # use writes `launchers/<G>/` there.
+        self.package_root = Path(installed[pkg.short]["path"]).resolve()
+        launchers = self.package_root / "launchers"
+        assert launchers.is_dir(), (
+            f"C-137 precondition: first use writes `launchers/<G>/` under {self.package_root}"
+        )
+        current = [p for p in launchers.iterdir() if _GENERATION.match(p.name)]
+        assert len(current) == 1, f"one current generation expected; found {current}"
+        self.current = current[0]
+        self.stale = _plant_launcher_dir(launchers / _hex16())
+        home = Path(ocx.env["OCX_HOME"])
+        self.deferred = home / "deferred" / _hex16()
+        _plant_launcher_dir(
+            self.deferred / "ocx.sh" / "repo" / "sha256" / "ab" / ("c" * 30) / "l"
+        )
+
+
+def test_clean_retires_a_superseded_package_generation_as_launchers(
+    ocx: OcxRunner, tmp_path: Path, unique_repo: str
+) -> None:
+    """V-L41 / C-137 / S-105 -- `launchers/<G'>` is retired and reported as
+    `launchers`; the current generation stays.
+
+    RED: a clean that walks no `launchers/` leaves `G'` and reports nothing.
+    """
+    generations = _Generations(ocx, tmp_path, unique_repo)
+
+    report = ocx.json("clean")
+
+    assert generations.stale.resolve() in _reported(report), (
+        f"V-L41 -- the report lists {generations.stale} as `launchers`; got {report['items']}"
+    )
+    assert_not_exists(generations.stale)
+    assert_dir_exists(generations.current)
+    assert generations.current.resolve() not in _reported(report), (
+        "V-L41 -- the generation this ocx writes is never retired"
+    )
+
+
+def test_clean_retires_a_superseded_deferred_generation_as_launchers(
+    ocx: OcxRunner, tmp_path: Path, unique_repo: str
+) -> None:
+    """V-L41 / C-137 -- the whole `deferred/<G'>` subtree is retired as `launchers`.
+
+    RED: a clean that never walks `deferred/` leaves the subtree.
+    """
+    generations = _Generations(ocx, tmp_path, unique_repo)
+
+    report = ocx.json("clean")
+
+    assert generations.deferred.resolve() in _reported(report), (
+        f"V-L41 -- the report lists {generations.deferred} as `launchers`; got {report['items']}"
+    )
+    assert_not_exists(generations.deferred)
+
+
+def test_clean_dry_run_reports_launcher_generations_and_removes_nothing(
+    ocx: OcxRunner, tmp_path: Path, unique_repo: str
+) -> None:
+    """V-L41 / S-105 -- `--dry-run` reports the same `launchers` entries a real
+    clean would, and every directory is still there afterwards.
+
+    RED: no `launchers` entry is reported, or the directories are gone.
+    """
+    generations = _Generations(ocx, tmp_path, unique_repo)
+
+    dry = ocx.json("clean", "--dry-run")
+
+    planted = {generations.stale.resolve(), generations.deferred.resolve()}
+    assert planted <= _reported(dry), (
+        f"V-L41 -- the dry run names both superseded directories; got {dry['items']}"
+    )
+    assert all(item["dry_run"] for item in _launchers_entries(dry)), (
+        "V-L41 -- every dry-run entry says so"
+    )
+    assert_dir_exists(generations.stale)
+    assert_dir_exists(generations.deferred)
+    assert_dir_exists(generations.current)
+
+    real = ocx.json("clean")
+    assert _reported(real) == _reported(dry), (
+        "S-105 -- the dry run reported exactly what the real clean retired"
+    )
+
+
+# -- toolchain homes ---------------------------------------------------------
+
+
+def _render_twice(ocx: OcxRunner, tmp_path: Path) -> tuple[ToolchainProject, str, str]:
+    """A project rendered, then rendered again with one more tool, so the v2 stamp
+    names ``shell_dir`` and a different ``previous_shell_dir``. Returns the
+    project and the two directory names (previous, current)."""
+    project = locked_project(ocx, tmp_path)
+    first = active_shell(project.home)
+    label = _hex16()[:8]
+    extra = make_package(
+        ocx, f"t_{label}_extra", "1.0.0", tmp_path, cascade=False, bins=[f"xbin{label}"]
+    )
+    body = project.config_body().replace(
+        "[tools]\n", f'[tools]\nxkey{label} = "{extra.fq}"\n', 1
+    )
+    write_ocx_toml(project.directory, body)
+    assert run_in(ocx, project.directory, "lock").returncode == EXIT_SUCCESS
+    pulled = run_in(ocx, project.directory, "pull", "-g", "all")
+    assert pulled.returncode == EXIT_SUCCESS, pulled.stderr
+    second = active_shell(project.home)
+    assert first and second and first != second, (
+        "precondition: new content published a new directory"
+    )
+    return project, first, second
+
+
+def test_clean_retires_superseded_toolchain_directories_and_keeps_the_stamped_two(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """V-L30 / C-137 -- an older `default-<hex>`, a `.staging-<hex>` and a `.gc-<hex>`
+    are retired as `launchers`; the stamp's `shell_dir` and `previous_shell_dir`
+    stay, and so does `shells/default`.
+
+    RED: a clean that walks no `shells/` retires none of the three.
+    """
+    project, previous, current = _render_twice(ocx, tmp_path)
+    stamp = read_render_stamp(ocx, project.home)
+    assert stamp is not None
+    assert (stamp["shell_dir"], stamp["previous_shell_dir"]) == (current, previous)
+
+    shells = project.home / SHELLS_DIR
+    older = _plant_launcher_dir(shells / f"default-{_hex16()}" / "bin").parent
+    staging = _plant_launcher_dir(shells / f".staging-{_hex16()}" / "bin").parent
+    gc = _plant_launcher_dir(shells / f".gc-{_hex16()}" / "bin").parent
+    default = _plant_launcher_dir(shells / "default" / "bin").parent
+    default_tree = snapshot_tree(default)
+    kept_tree = {name: snapshot_tree(shells / name) for name in (previous, current)}
+
+    report = ocx.json("clean")
+
+    reported = _reported(report)
+    for planted in (older, staging, gc):
+        assert planted.resolve() in reported, (
+            f"C-137 -- {planted.name} is reported as `launchers`; got {report['items']}"
+        )
+        assert_not_exists(planted)
+    assert not reported & {
+        (shells / previous).resolve(),
+        (shells / current).resolve(),
+    }, "V-L30 -- the stamped two are never reported"
+    for name, tree in kept_tree.items():
+        assert snapshot_tree(shells / name) == tree, f"V-L30 -- {name} stays whole"
+    assert active_shell(project.home) == current
+    assert snapshot_tree(default) == default_tree, (
+        "C-132 -- `shells/default` is never touched"
+    )
+
+
+def test_clean_never_retires_a_symlink_candidate_in_shells(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """V-L30 / C-132 -- a link named like a generated directory is not a candidate.
+
+    RED: a clean that removes by name alone deletes the link, or follows it and
+    deletes the directory it names.
+    """
+    project, previous, current = _render_twice(ocx, tmp_path)
+    shells = project.home / SHELLS_DIR
+    link = shells / f"default-{_hex16()}"
+    make_link(shells / previous, link)
+    previous_tree = snapshot_tree(shells / previous)
+
+    ocx.json("clean")
+
+    assert is_link(link), "V-L30 -- the symlink child is left in place"
+    assert read_link(link).endswith(previous), "V-L30 -- and still names its target"
+    assert snapshot_tree(shells / previous) == previous_tree
+    assert sorted(generated_shells(project.home)) == sorted(
+        [previous, current, link.name]
+    )
+
+
+def test_clean_dry_run_reports_superseded_toolchain_directories_and_removes_nothing(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """V-L30 / S-105 -- `--dry-run` names the superseded toolchain directories and
+    removes none.
+
+    RED: nothing is reported, or the directories are gone.
+    """
+    project, _, _ = _render_twice(ocx, tmp_path)
+    shells = project.home / SHELLS_DIR
+    older = _plant_launcher_dir(shells / f"default-{_hex16()}" / "bin").parent
+    staging = _plant_launcher_dir(shells / f".staging-{_hex16()}" / "bin").parent
+
+    dry = ocx.json("clean", "--dry-run")
+
+    assert {older.resolve(), staging.resolve()} <= _reported(dry), (
+        f"S-105 -- the dry run names both; got {dry['items']}"
+    )
+    assert_dir_exists(older)
+    assert_dir_exists(staging)

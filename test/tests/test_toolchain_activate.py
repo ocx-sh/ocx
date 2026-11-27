@@ -63,6 +63,7 @@ from uuid import uuid4
 
 import pytest
 
+from src import previous_release
 from src import shell_matrix as matrix
 from src.exec_state import default_state, encode
 from src.helpers import bash_executable, make_package, posix_shell_path, write_ocx_toml
@@ -71,19 +72,23 @@ from src.shell_eval import git_bash_env
 from src.toolchain_fixtures import (
     DEFAULT_GROUP,
     EXIT_SUCCESS,
+    active_shell,
     assert_key_and_binary_namespaces_stay_disjoint,
     bin_entries,
     copy_tree,
     entry_link,
+    generated_shells,
     git,
     link_entries,
     locked_project,
     make_link,
+    path_facing_bin,
     read_render_stamp,
     remove_link,
     resolved_toolchain_bin,
     resolved_toolchain_home,
     run_in,
+    run_previous_in,
     shell_bin,
     snapshot_tree,
     trampoline_body,
@@ -656,7 +661,7 @@ def test_a_tool_in_both_toolchains_resolves_to_the_projects_trampoline(
 def test_env_mode_never_puts_the_project_trampoline_dir_on_path(
     ocx: OcxRunner, arena: Arena, tmp_path: Path
 ) -> None:
-    """C-005: ``shells/default/bin`` is ``bin`` mode's, and ``env`` mode composes instead.
+    """C-005: ``shells/default-<hex>/bin`` is ``bin`` mode's, and ``env`` mode composes instead.
 
     Both halves in one probe: the trampoline directory is **rendered on disk**
     and still absent from ``PATH``, while the composed package directory *is*
@@ -761,7 +766,7 @@ def test_every_ordered_activate_transition_keeps_both_session_directories(
     Three things are asserted per prompt, and they fail independently:
 
     1. both session directories survive (C-059);
-    2. the project's ``shells/default/bin`` is on ``PATH`` in ``bin`` mode and
+    2. the project's ``shells/default-<hex>/bin`` is on ``PATH`` in ``bin`` mode and
        **gone** in the
        other two — it lives outside ``$OCX_HOME``, so only ``owned_home``
        authorises removing it, and a ``None`` there strands it for the shell's
@@ -886,7 +891,7 @@ def test_the_prompt_path_never_prunes_the_stale_trampolines(
 
     A prompt that pruned would be a whole-directory delete inside an
     attacker-writable tree, running before every command the user types.
-    Byte-identity over the whole home, not just over ``shells/default/bin``.
+    Byte-identity over the whole home, not just over ``shells/default-<hex>/bin``.
     """
     project = locked_project(ocx, tmp_path, label="c2")
     home = resolved_toolchain_home(ocx, project.directory)
@@ -1139,7 +1144,7 @@ def test_a_committed_hostile_bin_never_reaches_path_before_a_render(
     canonical project directory — so ``bin_mode_entry`` finds no stamp for it
     and withholds. Consent is granted explicitly through ``[shell.consent]
     paths``, which is the point: a user who *did* authorise the directory still
-    must not get an unrendered ``shells/default/bin`` on ``PATH``.
+    must not get an unrendered ``shells/default-<hex>/bin`` on ``PATH``.
     """
     project = locked_project(ocx, tmp_path, label="d6")
     clone = _clone(project.directory, tmp_path / "hostile-clone")
@@ -1165,7 +1170,7 @@ def test_a_committed_hostile_bin_never_reaches_path_before_a_render(
     )
     segments = _segments(result)
     assert _real(shell_bin(Path(state["toolchain_home"]))) not in segments, (
-        f"a committed, unstamped shells/default/bin must never reach PATH: {segments}"
+        f"a committed, unstamped shells/default-<hex>/bin must never reach PATH: {segments}"
     )
     assert install_bin in segments and global_bin in segments, (
         f"refusing the clone must not cost the two session directories: {segments}"
@@ -1359,10 +1364,10 @@ def test_a_symlinked_project_home_is_refused_from_the_owned_set(
 def test_a_repointed_link_with_bin_untouched_is_healed_or_withheld(
     ocx: OcxRunner, arena: Arena, tmp_path: Path
 ) -> None:
-    """C-062: ``shells/default/bin`` matching its stamp is not enough — the links
+    """C-062: ``shells/default-<hex>/bin`` matching its stamp is not enough — the links
     must resolve.
 
-    The repoint leaves ``shells/default/bin`` byte-identical, so a gate that fingerprinted
+    The repoint leaves ``shells/default-<hex>/bin`` byte-identical, so a gate that fingerprinted
     only the trampolines would pass it through and expose a trampoline that
     dereferences to the wrong package. Either outcome the design allows is
     accepted (heal, or withhold); what is refused is exposing the directory
@@ -1379,7 +1384,7 @@ def test_a_repointed_link_with_bin_untouched_is_healed_or_withheld(
     remove_link(link)
     make_link(other, link)
     assert snapshot_tree(shell_bin(home)) == before, (
-        "the repoint must leave shells/default/bin byte-untouched"
+        "the repoint must leave shells/default-<hex>/bin byte-untouched"
     )
 
     result = _session(
@@ -1399,10 +1404,10 @@ def test_a_repointed_link_with_bin_untouched_is_healed_or_withheld(
     # reds, so the premise is wrong and the docstring's "either outcome" is the
     # contract. What is never allowed is the conjunction below.
     #
-    # Not vacuous: `correct != other` and the byte-identical `shells/default/bin`
+    # Not vacuous: `correct != other` and the byte-identical `shells/default-<hex>/bin`
     # snapshot above prove the repoint really happened before the prompt ran.
     assert not (exposed and not healed), (
-        "refused: `shells/default/bin` is on PATH while `default/"
+        "refused: `shells/default-<hex>/bin` is on PATH while `default/"
         f"{project.default_key}` still points at the other package; "
         f"link={link_entries(home)[f'default/{project.default_key}']!r} segments={segments}"
     )
@@ -1422,7 +1427,7 @@ def test_a_branch_switch_at_the_same_path_never_dereferences_the_other_branch(
     checkout = two_branch_checkout(ocx, tmp_path, label="d12")
     assert run_in(ocx, checkout.directory, "pull", "-g", "all").returncode == EXIT_SUCCESS
     trampoline = shell_bin(checkout.home) / trampoline_name(checkout.binary)
-    # The `.exec` sidecar on Windows: the `.exe` is a launcher blob shared by every project.
+    # The `.launch` record carries the project root; the launcher program is one blob shared by every project.
     before = trampoline_body(trampoline).read_bytes()
     stale_target = link_entries(checkout.home)[f"default/{checkout.key}"]
 
@@ -1435,7 +1440,7 @@ def test_a_branch_switch_at_the_same_path_never_dereferences_the_other_branch(
 
     assert git(checkout.directory, "checkout", "-q", checkout.other_branch).returncode == EXIT_SUCCESS
     assert trampoline_body(trampoline).read_bytes() == before, (
-        "the switch must leave shells/default/bin byte-identical, or the stamp — not the link — is what notices"
+        "the switch must leave shells/default-<hex>/bin byte-identical, or the stamp — not the link — is what notices"
     )
 
     result = _session(
@@ -1479,3 +1484,129 @@ def test_a_branch_switch_at_the_same_path_never_dereferences_the_other_branch(
             "withholding is the other allowed outcome, and it owes the user the hint; "
             f"stderr:\n{result.stderr}"
         )
+
+
+# ---------------------------------------------------------------------------
+# E — two ocx versions rendering and prompting alternately on one home
+# ---------------------------------------------------------------------------
+
+
+def _bin_mode_segments(arena: Arena, project_directory: Path) -> list[str]:
+    """The ``PATH`` a ``bin``-mode prompt of ``arena.binary`` leaves in a bash session."""
+    result = _session(
+        arena,
+        _cd(project_directory),
+        matrix.prompt(SHELL),
+        _path_probe("path"),
+        cwd=project_directory,
+        extra_env={"OCX_TOOLCHAIN_ACTIVATE": "bin"},
+    )
+    return _segments(result)
+
+
+def _launcher_output(
+    ocx: OcxRunner, home: Path, binary: str, cwd: Path
+) -> subprocess.CompletedProcess[str]:
+    """Start the launcher ``<home>/active/bin/<binary>`` and capture it.
+
+    The launcher finds its ``ocx`` through the pin, and an older launcher script
+    finds it on ``PATH``; both name the binary under test, so each state of the
+    home is exercised by the same program.
+    """
+    env = dict(ocx.env)
+    env["OCX_BINARY_PIN"] = str(ocx.binary)
+    env["PATH"] = os.pathsep.join([str(ocx.binary.parent), env.get("PATH", "")])
+    return subprocess.run(
+        [str(path_facing_bin(home) / trampoline_name(binary))],
+        cwd=cwd,
+        env=env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        stdin=subprocess.DEVNULL,
+        timeout=_TIMEOUT,
+        check=False,
+    )
+
+
+def test_two_ocx_versions_alternate_on_one_home_and_every_launcher_starts(
+    ocx: OcxRunner, arena: Arena, tmp_path: Path
+) -> None:
+    """V-L34 / C-134 / S-102 — ``ocx-previous`` and the new ``ocx`` render and prompt
+    alternately on one home.
+
+    * the new render names ``shells/default-<hex>`` and the new prompt exposes it;
+    * the older prompt omits the project entry while ``active`` names that directory;
+    * the older render heals ``active`` to ``shells/default`` and its prompt exposes it
+      again (the positive control: the older ocx *does* see this project, so the
+      omission above is about ``active`` and not about consent);
+    * the new render re-switches to the same ``default-<hex>`` the stamp names and
+      publishes nothing;
+    * every launcher in ``active/bin`` starts at each state.
+
+    RED: render in place into ``shells/default`` — ``active`` never names a new
+    directory, so the older prompt keeps the entry and step 2 reds.
+    """
+    older = dataclasses.replace(arena, binary=previous_release.resolve())
+    project = locked_project(ocx, tmp_path, label="m1")
+    home = resolved_toolchain_home(ocx, project.directory)
+
+    # 1. the new render
+    published = active_shell(home)
+    assert published in generated_shells(home), (
+        f"S-102 — the new render's `active` names `shells/default-<hex>`; it names {published!r}"
+    )
+    assert _real(shell_bin(home)) in _bin_mode_segments(arena, project.directory), (
+        "S-102 — the new prompt exposes the new directory"
+    )
+    started = _launcher_output(ocx, home, project.default_binary, tmp_path)
+    assert project.default_package.marker in started.stdout, (
+        f"C-134 — the launcher of the new directory starts; rc={started.returncode}\n{started.stderr}"
+    )
+
+    # 2. the older prompt while `active` names the new directory
+    withheld = _bin_mode_segments(older, project.directory)
+    assert active_shell(home) == published, "C-080 — the older prompt is read-only"
+    assert _real(shell_bin(home)) not in withheld, (
+        f"S-102 — the older prompt omits the project entry while `active` names {published!r}: {withheld}"
+    )
+
+    # 3. the older render heals `active` to `shells/default`
+    healed = run_previous_in(ocx, project.directory, "pull", "-g", "all")
+    assert healed.returncode == EXIT_SUCCESS, healed.stderr
+    assert active_shell(home) == "default", (
+        f"S-102 — the older render repoints `active` to `shells/default`; it names {active_shell(home)!r}"
+    )
+    assert _real(shell_bin(home)) in _bin_mode_segments(older, project.directory), (
+        "S-102 — the older prompt exposes `shells/default` again"
+    )
+    assert _real(shell_bin(home)) in _bin_mode_segments(arena, project.directory), (
+        "C-134 — the new prompt gates by the v1 stamp while `active` names `shells/default`"
+    )
+    started = _launcher_output(ocx, home, project.default_binary, tmp_path)
+    assert project.default_package.marker in started.stdout, (
+        f"C-134 — the older launcher starts under the new ocx; rc={started.returncode}\n{started.stderr}"
+    )
+
+    # 4. the new render re-switches without publishing
+    assert (
+        run_in(ocx, project.directory, "pull", "-g", "all").returncode == EXIT_SUCCESS
+    )
+    stamp = read_render_stamp(ocx, home)
+    assert stamp is not None
+    assert stamp["shell_dir"] == published, (
+        f"S-102 — the new stamp still names the first directory; {stamp['shell_dir']!r} vs {published!r}"
+    )
+    assert active_shell(home) == published, (
+        f"S-102 — the new render re-switches to the stamped directory; `active` names {active_shell(home)!r}"
+    )
+    assert generated_shells(home) == [published], (
+        f"S-102 — a re-switch publishes no new `default-*`; shells/ holds {generated_shells(home)}"
+    )
+    assert _real(shell_bin(home)) in _bin_mode_segments(arena, project.directory), (
+        "S-102 — the new prompt exposes the re-switched directory"
+    )
+    started = _launcher_output(ocx, home, project.default_binary, tmp_path)
+    assert project.default_package.marker in started.stdout, (
+        f"C-134 — the launcher starts after the re-switch; rc={started.returncode}\n{started.stderr}"
+    )

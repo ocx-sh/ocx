@@ -1371,7 +1371,7 @@ def test_project_env_override_reaches_generated_entrypoint_launcher(
     """A project ``[env]`` override reaches a tool invoked THROUGH a
     generated entrypoint launcher, not only through ``ocx run``'s own
     direct child (R1 — the launcher is the PRIMARY path: synth-PATH is
-    pushed last so ``entrypoints/`` shadows ``bin/``, so a package with
+    pushed last so ``launchers/<G>`` shadows ``bin/``, so a package with
     entrypoints resolves through its launcher under ``ocx run``).
 
     Without the received state's ``replay.env`` (R1), the launcher
