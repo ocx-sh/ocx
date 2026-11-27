@@ -29,9 +29,13 @@ MARKER = "requires_testing_build"
 DOC_RUNNER = Path("tests/test_doc_scripts.py")
 
 # Registered `Testing` variables no shipped Rust code reads: cargo's live-shell tests and the Python
-# shell matrix (`src/shell_matrix.py`) read the first; the telemetry unit test's child re-run reads the
-# second. A test naming either needs no `__testing` build.
-HARNESS_ONLY = {"__OCX_TESTING_REQUIRE_LIVE_SHELLS", "__OCX_TESTING_TELEMETRY_PROXY_CHILD"}
+# shell matrix (`src/shell_matrix.py`) read the first; the telemetry and `app::seam` unit tests' child
+# re-runs read the others. A test naming one needs no `__testing` build.
+HARNESS_ONLY = {
+    "__OCX_TESTING_REQUIRE_LIVE_SHELLS",
+    "__OCX_TESTING_SEAM_CHILD",
+    "__OCX_TESTING_TELEMETRY_PROXY_CHILD",
+}
 
 _DECLARED = re.compile(r"\bpub\s+(__OCX_TESTING_[A-Z_]+)\s*:")
 # The visibility class is the second field; attributes such as `propagation = UserInput` may follow it.
