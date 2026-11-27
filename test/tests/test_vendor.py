@@ -9,6 +9,7 @@ carries its control: the same check shown failing on a deliberately bad input.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import posixpath
@@ -27,15 +28,20 @@ from src.registry import fetch_platform_manifest_digest
 from src.runner import OcxRunner, PackageInfo, current_platform
 from src.vendor_fixtures import (
     VENDOR_TOKEN,
+    assert_short_layout,
     bazel_names_package,
     cmake_with_ccache,
+    entrypoint_package,
     env_template_package,
+    hex16,
     host_bins,
+    launch_named_package,
     layer_digests,
     links_package,
     no_names_package,
     partial_platform_pair,
     record_requests,
+    reserved_segment_package,
     setuid_package,
     windows_only_package,
 )
@@ -158,8 +164,8 @@ def _env_values(manifest: dict[str, Any]) -> list[str]:
 def _bazel_findings(root: Path) -> list[str]:
     """Bazel files or terms outside package content and launcher bytes.
 
-    Scans file names everywhere but package `content/`, and the text of the
-    manifest and every `.direct` sidecar (launchers are ocx's own blob). The
+    Scans file names everywhere but package content `p/<HEX16>/c/`, and the text of the
+    manifest and every `.launch` record (launchers are ocx's own blob). The
     manifest's `packages[].tree` lists the names inside package content, which
     the scan exempts, so it is dropped before the scan.
     """
@@ -168,12 +174,12 @@ def _bazel_findings(root: Path) -> list[str]:
     findings: list[str] = []
     for path in sorted(root.rglob("*")):
         rel = path.relative_to(root)
-        if "content" in rel.parts and rel.parts[0] == "packages":
+        if rel.parts[0] == "p" and rel.parts[2:3] == ("c",):
             continue
         if path.name in names:
             findings.append(f"file {rel.as_posix()}")
         if path.is_file() and (
-            path.name == "manifest.json" or path.suffix == ".direct"
+            path.name == "manifest.json" or path.suffix == ".launch"
         ):
             text = path.read_text(encoding="utf-8")
             if path.name == "manifest.json" and rel.parent == Path("."):
@@ -281,12 +287,167 @@ def test_vendor_writes_manifest_content_and_launchers(
     assert report["content"] == "present"
     assert report["tool_count"] == 1
     manifest = _manifest(out)
-    assert manifest["schema_version"] == 1
+    assert manifest["schema_version"] == 2
     assert manifest["content"] == "present"
     assert manifest["dir_token"] == VENDOR_TOKEN
     tool = _tools(manifest)["hello"]
     assert (out / tool["launcher_path"]).is_file()
     assert (out / tool["target_path"]).is_file()
+    # V-L50: the short layout, every launcher with its record file.
+    assert {p.name for p in out.iterdir()} == {"manifest.json", "l", "p"}
+    (package,) = manifest["packages"]
+    assert package["content_dir"] == f"p/{hex16(package['digest'])}/c"
+    assert tool["launcher_path"] == "l/hello" + (
+        ".exe" if sys.platform == "win32" else ""
+    )
+    assert tool["record_path"] == "l/hello.launch"
+    assert (out / tool["record_path"]).is_file()
+    assert_short_layout(out, manifest)
+
+
+# ---------------------------------------------------------------------------
+# The short layout and the launcher records (V-L50, V-L53)
+# ---------------------------------------------------------------------------
+
+
+def test_closure_and_entrypoints_land_in_the_short_layout(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    cmake, _ccache = cmake_with_ccache(ocx, unique_repo, tmp_path / "cm")
+    entry = entrypoint_package(ocx, f"{unique_repo}_ep", tmp_path / "ep")
+    out = tmp_path / "out"
+
+    _vendor(
+        ocx,
+        _project(ocx, tmp_path / "proj", {"cmake": cmake, "ep": entry}),
+        out,
+        *HOST,
+    )
+
+    manifest = _manifest(out)
+    assert len(manifest["packages"]) == 3
+    assert_short_layout(out, manifest)
+    (entry_package,) = [p for p in manifest["packages"] if p["entrypoints"]]
+    short = f"p/{hex16(entry_package['digest'])}"
+    assert sorted(e["name"] for e in entry_package["entrypoints"]) == ["alpha", "gamma"]
+    for e in entry_package["entrypoints"]:
+        assert e["record_path"] == f"{short}/e/{e['name']}.launch"
+        assert (out / e["record_path"]).is_file()
+    exposed = _tools(manifest)
+    assert {"cmake", "alpha", "gamma"} <= set(exposed)
+    assert exposed["alpha"]["record_path"] == "l/alpha.launch"
+
+    # Control: the check turns red on the layout the previous release wrote.
+    old = json.loads(json.dumps(manifest))
+    package = old["packages"][0]
+    package["content_dir"] = "packages/@REGISTRY@/sha256/ab/" + "0" * 30 + "/content"
+    with pytest.raises(AssertionError):
+        assert_short_layout(out, old)
+    missing = json.loads(json.dumps(manifest))
+    del missing["tools"][0]["record_path"]
+    with pytest.raises(AssertionError):
+        assert_short_layout(out, missing)
+
+
+@pytest.mark.parametrize("manifest_only", [False, True], ids=["full", "manifest_only"])
+def test_manifest_is_schema_version_2_with_record_paths_exactly_with_launchers(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, manifest_only: bool
+) -> None:
+    flags = ["--manifest-only"] if manifest_only else []
+    pkg = _publish(ocx, unique_repo, tmp_path, "pkg", bins=["hello"])
+    out = tmp_path / "out"
+    _vendor(ocx, _project(ocx, tmp_path / "proj", {"hello": pkg}), out, *flags, *HOST)
+
+    manifest = _manifest(out)
+    assert manifest["schema_version"] == 2
+    assert_short_layout(out, manifest)
+    for tool in manifest["tools"]:
+        assert ("record_path" in tool) == ("launcher_path" in tool), tool
+    if manifest_only:
+        assert [p.name for p in out.iterdir()] == ["manifest.json"]
+
+
+def test_wasm_tool_without_a_launcher_has_no_record_path(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    # `wasip1/wasm` has no launcher blob: `launcher_path` and `record_path` are omitted together.
+    tool = _publish(
+        ocx,
+        unique_repo,
+        tmp_path,
+        "tool",
+        bins=["tool"],
+        binaries=["tool"],
+        platform="wasip1/wasm",
+    )
+    out = tmp_path / "out"
+    _vendor(
+        ocx,
+        _project(ocx, tmp_path / "proj", {"tool": tool}),
+        out,
+        "-p",
+        "wasip1/wasm",
+    )
+
+    manifest = _manifest(out)
+    exposed = _tools(manifest)["tool"]
+    assert "launcher_path" not in exposed and "record_path" not in exposed
+    assert_short_layout(out, manifest)
+    assert not (out / "l").exists() or list((out / "l").iterdir()) == []
+
+
+# ---------------------------------------------------------------------------
+# Names ocx never writes (V-L27 vendor half, V-L56)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "segment",
+    ["_ocx_reserved", "_OCX_Reserved", "not_ocx_reserved"],
+    ids=["exact", "ascii_case_folded", "control_substring"],
+)
+def test_package_path_segment_ocx_reserved_is_refused_with_65(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, segment: str
+) -> None:
+    pkg = reserved_segment_package(ocx, unique_repo, tmp_path / "pkg", segment)
+    out = tmp_path / "out"
+
+    result = _vendor(
+        ocx, _project(ocx, tmp_path / "proj", {"tool": pkg}), out, *HOST, check=False
+    )
+
+    if segment == "not_ocx_reserved":
+        assert result.returncode == 0, result.stderr
+        assert_short_layout(out, _manifest(out))
+        return
+    assert result.returncode == EXIT_DATA, result.stderr
+    assert _detail(result) == "vendor_path_unrepresentable"
+    assert not out.exists(), "a refused run leaves no directory"
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["x.launch", "x.LAUNCH", "x.launcher"],
+    ids=["tool", "tool_case_folded", "control_other_suffix"],
+)
+def test_tool_name_ending_in_launch_is_refused_with_65(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, name: str
+) -> None:
+    pkg = launch_named_package(ocx, unique_repo, tmp_path / "pkg", name)
+    out = tmp_path / "out"
+
+    result = _vendor(
+        ocx, _project(ocx, tmp_path / "proj", {"tool": pkg}), out, *HOST, check=False
+    )
+
+    if name == "x.launcher":
+        assert result.returncode == 0, result.stderr
+        manifest = _manifest(out)
+        assert (out / _tools(manifest)[name]["record_path"]).is_file()
+        return
+    assert result.returncode == EXIT_DATA, result.stderr
+    assert _detail(result) == "vendor_path_unrepresentable"
+    assert not out.exists(), "a refused run leaves no directory"
 
 
 # ---------------------------------------------------------------------------
@@ -478,16 +639,16 @@ def test_vendor_output_carries_no_bazel_file_or_term(
     # The package's own BUILD files and the case variant land in content, untouched.
     paths = {f["path"] for p in _manifest(out)["packages"] for f in p["tree"]["files"]}
     for name in ("BUILD.bazel", "BUILD", "pkg/build.bazel"):
-        assert any(p.endswith(f"/content/{name}") for p in paths), name
+        assert any(p.endswith(f"/c/{name}") for p in paths), name
 
     # Control: a planted BUILD.bazel and a planted term are found.
-    (out / "selections" / "BUILD.bazel").write_text("", encoding="utf-8")
+    (out / "l" / "BUILD.bazel").write_text("", encoding="utf-8")
     manifest = out / "manifest.json"
     planted = json.loads(manifest.read_text(encoding="utf-8"))
     planted["note"] = "runfiles"
     manifest.write_text(json.dumps(planted), encoding="utf-8")
     findings = _bazel_findings(out)
-    assert "file selections/BUILD.bazel" in findings
+    assert "file l/BUILD.bazel" in findings
     assert any("'runfiles'" in f for f in findings)
 
 
@@ -546,7 +707,7 @@ def test_environment_values_hold_only_the_token(
     assert items["TPL_HOME"] == f"{VENDOR_TOKEN}/{content_dir}"
     assert items["TPL_DATA"] == f"{VENDOR_TOKEN}/{content_dir}/share/data"
     texts = [(out / "manifest.json").read_text(encoding="utf-8")] + [
-        p.read_text(encoding="utf-8") for p in out.rglob("*.direct")
+        p.read_text(encoding="utf-8") for p in out.rglob("*.launch")
     ]
     for text in texts:
         assert str(out) not in text
@@ -694,8 +855,8 @@ def test_setuid_bit_is_cleared_and_modes_and_mtimes_are_normalised(
     files = {
         f["path"]: f for p in _manifest(out)["packages"] for f in p["tree"]["files"]
     }
-    tool = out / next(p for p in files if p.endswith("/content/bin/tool"))
-    plain = out / next(p for p in files if p.endswith("/content/bin/plain"))
+    tool = out / next(p for p in files if p.endswith("/c/bin/tool"))
+    plain = out / next(p for p in files if p.endswith("/c/bin/plain"))
     assert stat.S_IMODE(tool.stat().st_mode) & 0o7022 == 0
     assert tool.stat().st_mode & stat.S_IXUSR
     # Control: a normal file keeps the mode it was archived with.
@@ -877,7 +1038,7 @@ def test_stale_lock_exits_data_error_until_relocked(
 
 
 # ---------------------------------------------------------------------------
-# Manifest and sidecar bytes are host-independent
+# Manifest and record bytes are host-independent
 # ---------------------------------------------------------------------------
 
 
@@ -902,7 +1063,7 @@ def _tree_listing(root: Path) -> list[tuple[str, str, int, int]]:
     return rows
 
 
-def test_manifest_and_sidecars_are_byte_identical_across_hosts(
+def test_manifest_and_records_are_byte_identical_across_hosts(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
     pkg = env_template_package(ocx, unique_repo, tmp_path / "pkg")
@@ -931,10 +1092,10 @@ def test_manifest_and_sidecars_are_byte_identical_across_hosts(
     )
     assert result.returncode == 0, result.stderr
 
-    sidecars = sorted(p.relative_to(first) for p in first.rglob("*.direct"))
-    assert sidecars, "no .direct sidecar was written"
-    assert sorted(p.relative_to(second) for p in second.rglob("*.direct")) == sidecars
-    for rel in [Path("manifest.json"), *sidecars]:
+    records = sorted(p.relative_to(first) for p in first.rglob("*.launch"))
+    assert records, "no .launch record was written"
+    assert sorted(p.relative_to(second) for p in second.rglob("*.launch")) == records
+    for rel in [Path("manifest.json"), *records]:
         assert (first / rel).read_bytes() == (second / rel).read_bytes(), rel
     assert _tree_listing(first) == _tree_listing(second)
 
@@ -960,3 +1121,160 @@ def test_vendor_id_is_a_function_of_platform_and_digests(
     a, b = _manifest(tmp_path / "a"), _manifest(tmp_path / "b")
     assert a["vendor_id"] == b["vendor_id"]
     assert [p["digest"] for p in a["packages"]] == [digest]
+
+
+# ---------------------------------------------------------------------------
+# A declared binary the content lacks (V-L52)
+# ---------------------------------------------------------------------------
+
+
+def _claims_missing_binary(ocx: OcxRunner, repo: str, tmp_path: Path) -> PackageInfo:
+    """`bin/hello` exists; the `binaries` claim also lists `corepack`, which the content lacks."""
+    return make_package(
+        ocx,
+        repo,
+        "1.0.0",
+        tmp_path,
+        bins=host_bins(["hello"]),
+        binaries=["hello", "corepack"],
+    )
+
+
+def test_declared_binary_missing_from_content_is_refused_with_65_naming_the_claim(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    pkg = _claims_missing_binary(ocx, unique_repo, tmp_path / "pkg")
+    out = tmp_path / "out"
+
+    result = _vendor(
+        ocx, _project(ocx, tmp_path / "proj", {"hello": pkg}), out, *HOST, check=False
+    )
+
+    assert result.returncode == EXIT_DATA, result.stderr
+    assert _detail(result) == "vendor_path_unrepresentable"
+    message = json.loads(result.stdout)["error"]["message"]
+    assert unique_repo in message, message
+    assert "1.0.0" in message, message
+    assert "binaries" in message, message
+    assert "corepack" in message, message
+    assert "does not hold" in message, message
+    assert "publisher" in message, message
+    assert not out.exists(), "a refused run leaves no directory"
+
+
+def test_declared_binary_missing_from_content_does_not_stop_a_manifest_only_run(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    pkg = _claims_missing_binary(ocx, unique_repo, tmp_path / "pkg")
+    out = tmp_path / "out"
+
+    _vendor(
+        ocx,
+        _project(ocx, tmp_path / "proj", {"hello": pkg}),
+        out,
+        "--manifest-only",
+        *HOST,
+    )
+
+    assert _manifest(out)["content"] == "absent"
+
+
+# ---------------------------------------------------------------------------
+# `--index`: lookups recorded (V-L55), the directory untouched (V-L60)
+# ---------------------------------------------------------------------------
+
+
+def _index_tree_hash(root: Path) -> dict[str, tuple[int, str | None]]:
+    """Every node under `root`: relative path -> (mode, sha256 of bytes; `None` for a directory)."""
+    nodes: dict[str, tuple[int, str | None]] = {}
+    for path in sorted(root.rglob("*")):
+        info = path.lstat()
+        digest = (
+            None
+            if stat.S_ISDIR(info.st_mode)
+            else hashlib.sha256(path.read_bytes()).hexdigest()
+        )
+        nodes[path.relative_to(root).as_posix()] = (stat.S_IMODE(info.st_mode), digest)
+    return nodes
+
+
+def _filled_index(ocx: OcxRunner, tmp_path: Path, pkg: PackageInfo) -> Path:
+    index = tmp_path / "index"
+    index.mkdir()
+    ocx.plain("--index", str(index), "index", "update", pkg.short)
+    return index
+
+
+def test_index_lookups_list_every_path_read_sorted_unique_and_relative(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    pkg = _publish(ocx, unique_repo, tmp_path, "pkg", bins=["hello"])
+    project = _project(ocx, tmp_path / "proj", {"hello": pkg})
+    index = _filled_index(ocx, tmp_path, pkg)
+    out = tmp_path / "out"
+
+    _ocx(
+        ocx,
+        project,
+        "--index",
+        str(index),
+        "vendor",
+        "-o",
+        str(out),
+        *HOST,
+        env=None,
+    )
+
+    lookups = _manifest(out)["index_lookups"]
+    assert lookups, "a run with --index reads at least the root document"
+    paths = [entry["path"] for entry in lookups]
+    assert paths == sorted(set(paths)), paths
+    for path in paths:
+        assert not path.startswith("/") and "\\" not in path, path
+        assert ".." not in path.split("/"), path
+    assert all(isinstance(entry["found"], bool) for entry in lookups), lookups
+    found = [entry["path"] for entry in lookups if entry["found"]]
+    assert found, lookups
+    for path in found:
+        assert (index / path).is_file(), path
+
+
+def test_index_lookups_are_absent_without_index(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    pkg = _publish(ocx, unique_repo, tmp_path, "pkg", bins=["hello"])
+    out = tmp_path / "out"
+
+    _vendor(ocx, _project(ocx, tmp_path / "proj", {"hello": pkg}), out, *HOST)
+
+    assert "index_lookups" not in _manifest(out)
+
+
+@pytest.mark.parametrize("filled", [True, False], ids=["filled", "lacks_the_package"])
+def test_vendor_with_index_leaves_the_index_directory_byte_identical(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, filled: bool
+) -> None:
+    pkg = _publish(ocx, unique_repo, tmp_path, "pkg", bins=["hello"])
+    project = _project(ocx, tmp_path / "proj", {"hello": pkg})
+    if filled:
+        index = _filled_index(ocx, tmp_path, pkg)
+    else:
+        index = tmp_path / "index"
+        index.mkdir()
+        (index / "sentinel.txt").write_text("keep\n", encoding="utf-8")
+    before = _index_tree_hash(index)
+    assert before, "the index fixture holds files, or the comparison proves nothing"
+
+    _ocx(
+        ocx,
+        project,
+        "--index",
+        str(index),
+        "vendor",
+        "-o",
+        str(tmp_path / "out"),
+        *HOST,
+        env=None,
+    )
+
+    assert _index_tree_hash(index) == before

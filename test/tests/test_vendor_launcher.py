@@ -2,7 +2,7 @@
 # Copyright 2026 The OCX Authors
 """The vendored launcher starts tools from a moved, read-only or runfiles tree (design § 4.2).
 
-The launcher is a copy of one blob plus a `.direct` sidecar; nothing else may
+The launcher is a copy of one blob plus a `NAME.launch` record; nothing else may
 be needed to start a tool. Each case runs the launcher with no `ocx` on `PATH`
 and carries its control: the same setup shown failing, or the observation
 shown able to see what the case asserts is absent.
@@ -123,9 +123,9 @@ def _launcher(out: Path, manifest: dict[str, Any], name: str) -> Path:
     return out / tool["launcher_path"]
 
 
-def _sidecar(launcher: Path) -> Path:
+def _record(launcher: Path) -> Path:
     stem = launcher.name.removesuffix(".exe")
-    return launcher.with_name(f"{stem}.direct")
+    return launcher.with_name(f"{stem}.launch")
 
 
 def _script_package(
@@ -172,11 +172,11 @@ def vendored_tool(
 def _stage_runfiles(
     parent: Path, out: Path, launcher: Path, *, repo: str = "repo"
 ) -> Path:
-    """`<parent>/tool` + `tool.direct` + `tool.runfiles/<repo>/<whole vendored tree>`, as Bazel stages a tool."""
+    """`<parent>/tool` + `tool.launch` + `tool.runfiles/<repo>/<whole vendored tree>`, as Bazel stages a tool."""
     parent.mkdir(parents=True)
     started = parent / "tool"
     shutil.copy2(launcher, started)
-    shutil.copy2(_sidecar(launcher), parent / "tool.direct")
+    shutil.copy2(_record(launcher), parent / "tool.launch")
     shutil.copytree(out, parent / "tool.runfiles" / repo, symlinks=True)
     return started
 
@@ -275,18 +275,18 @@ def test_moved_vendored_directory_runs_without_ocx(
     assert result.stdout.splitlines()[0] == "payload"
     assert f"ran:{moved}/" in result.stdout, "the root is the new location"
 
-    # Control: a sidecar with the old root baked absolute fails after the move.
-    sidecar = _sidecar(moved / relative)
-    baked = sidecar.read_text(encoding="utf-8").replace(VENDOR_TOKEN, str(out))
+    # Control: a record with the old root baked absolute fails after the move.
+    record = _record(moved / relative)
+    baked = record.read_text(encoding="utf-8").replace(VENDOR_TOKEN, str(out))
     assert str(out) in baked
-    sidecar.chmod(0o644)
-    sidecar.write_text(baked, encoding="utf-8")
+    record.chmod(0o644)
+    record.write_text(baked, encoding="utf-8")
     stale = _run([str(moved / relative)], cwd="/", env={"PATH": CLEAN_PATH})
     assert stale.returncode != 0, "a baked-absolute root cannot survive the move"
 
 
 # ---------------------------------------------------------------------------
-# Lookup is bound to the started image and the sidecar
+# Lookup is bound to the started image and the record
 # ---------------------------------------------------------------------------
 
 
@@ -294,13 +294,13 @@ def _foreign_tree(tmp_path: Path, out: Path, launcher: Path) -> Path:
     """A copy of the vendored tree with another `vendor_id` whose tool prints `OTHER`."""
     other = tmp_path / "other-tree"
     shutil.copytree(out, other, symlinks=True)
-    sidecar = _sidecar(other / launcher.relative_to(out))
-    document = json.loads(sidecar.read_text(encoding="utf-8"))
+    record = _record(other / launcher.relative_to(out))
+    document = json.loads(record.read_text(encoding="utf-8"))
     document["vendor_id"] = "sha256:" + "0" * 64
     program = other / document["program"].removeprefix(f"{VENDOR_TOKEN}/")
     program.write_text("#!/bin/sh\necho OTHER\n", encoding="utf-8")
     program.chmod(0o755)
-    sidecar.write_text(json.dumps(document), encoding="utf-8")
+    record.write_text(json.dumps(document), encoding="utf-8")
     return other
 
 
@@ -343,7 +343,7 @@ def test_runfiles_dir_entry_serves_a_start_path_under_it(
     runfiles = tmp_path / "runfiles"
     runfiles.mkdir()
     shutil.copy2(launcher, runfiles / "tool")
-    shutil.copy2(_sidecar(launcher), runfiles / "tool.direct")
+    shutil.copy2(_record(launcher), runfiles / "tool.launch")
     shutil.copytree(out, runfiles / "repo", symlinks=True)
     env = {"PATH": CLEAN_PATH, "RUNFILES_DIR": str(runfiles)}
 
@@ -356,13 +356,13 @@ def test_runfiles_dir_entry_serves_a_start_path_under_it(
     outside = tmp_path / "outside"
     outside.mkdir()
     shutil.copy2(launcher, outside / "tool")
-    shutil.copy2(_sidecar(launcher), outside / "tool.direct")
+    shutil.copy2(_record(launcher), outside / "tool.launch")
     lost = _run([str(outside / "tool")], cwd=tmp_path, env=env)
     assert lost.returncode == EX_CONFIG
 
 
 @posix_only
-def test_fifo_at_candidate_sidecar_does_not_hang(
+def test_fifo_at_candidate_record_does_not_hang(
     vendored_tool: tuple[Path, dict[str, Any]], tmp_path: Path
 ) -> None:
     out, manifest = vendored_tool
@@ -370,12 +370,12 @@ def test_fifo_at_candidate_sidecar_does_not_hang(
     started = tmp_path / "bin" / "tool"
     started.parent.mkdir()
     shutil.copy2(launcher, started)
-    shutil.copy2(_sidecar(launcher), started.parent / "tool.direct")
+    shutil.copy2(_record(launcher), started.parent / "tool.launch")
     candidate = (
         started.parent
         / "tool.runfiles"
         / "repo"
-        / f"{launcher.relative_to(out).as_posix()}.direct"
+        / f"{launcher.relative_to(out).as_posix()}.launch"
     )
     candidate.parent.mkdir(parents=True)
     os.mkfifo(candidate)
@@ -399,7 +399,7 @@ def test_fifo_at_candidate_sidecar_does_not_hang(
 
 
 @posix_only
-def test_fifo_as_own_sidecar_exits_78(
+def test_fifo_as_own_record_exits_78(
     vendored_tool: tuple[Path, dict[str, Any]], tmp_path: Path
 ) -> None:
     out, manifest = vendored_tool
@@ -407,7 +407,7 @@ def test_fifo_as_own_sidecar_exits_78(
     started = tmp_path / "bin" / "tool"
     started.parent.mkdir()
     shutil.copy2(launcher, started)
-    os.mkfifo(started.parent / "tool.direct")
+    os.mkfifo(started.parent / "tool.launch")
 
     result = _run([str(started)], cwd=tmp_path, env={"PATH": CLEAN_PATH}, timeout=5)
 
@@ -424,7 +424,7 @@ def test_path_hit_that_is_not_the_running_image_exits_78(
     decoy_dir = tmp_path / "decoy"
     decoy_dir.mkdir()
     shutil.copy2(launcher, decoy_dir / "tool")
-    shutil.copy2(_sidecar(launcher), decoy_dir / "tool.direct")
+    shutil.copy2(_record(launcher), decoy_dir / "tool.launch")
 
     # Started as `real` but named `tool`: the `PATH` search hits the decoy, a different file.
     mismatched = _run(

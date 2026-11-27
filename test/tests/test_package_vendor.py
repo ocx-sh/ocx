@@ -10,9 +10,11 @@ control: the same check shown failing on a deliberately bad input.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shlex
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -21,16 +23,20 @@ from typing import Any
 import pytest
 
 from src.helpers import make_package
+from src.registry import fetch_manifest_digest, fetch_platform_manifest_digest
 from src.runner import OcxRunner, PackageInfo, current_platform
 from src.vendor_fixtures import (
     VENDOR_TOKEN,
+    assert_short_layout,
     cmake_with_ccache,
     env_template_package,
     host_bins,
+    launch_named_package,
     layer_digests,
     links_package,
     partial_platform_pair,
     record_requests,
+    reserved_segment_package,
     wasm_file_package,
     windows_only_package,
 )
@@ -52,10 +58,20 @@ def _pvendor(
     env: dict[str, str] | None = None,
     check: bool = True,
     cwd: Path | None = None,
+    root: tuple[str, ...] = (),
 ) -> subprocess.CompletedProcess[str]:
-    """Run `ocx package vendor [-o out] <args>`; `args` carry flags and identifiers."""
+    """Run `ocx [root] package vendor [-o out] <args>`; `args` carry flags and identifiers."""
     output = ["-o", str(out)] if out is not None else []
-    argv = [str(ocx.binary), "--format", "json", "package", "vendor", *output, *args]
+    argv = [
+        str(ocx.binary),
+        "--format",
+        "json",
+        *root,
+        "package",
+        "vendor",
+        *output,
+        *args,
+    ]
     result = subprocess.run(
         argv,
         cwd=cwd or ocx.ocx_home,
@@ -132,12 +148,46 @@ def test_package_vendor_writes_manifest_content_and_launchers(
     assert report["content"] == "present"
     assert report["tool_count"] == 1
     manifest = _manifest(out)
-    assert manifest["schema_version"] == 1
+    assert manifest["schema_version"] == 2
     assert manifest["content"] == "present"
     assert manifest["dir_token"] == VENDOR_TOKEN
     tool = _tools(manifest)["hello"]
     assert (out / tool["launcher_path"]).is_file()
     assert (out / tool["target_path"]).is_file()
+    assert {p.name for p in out.iterdir()} == {"manifest.json", "l", "p"}
+    assert tool["record_path"] == "l/hello.launch"
+    assert (out / tool["record_path"]).is_file()
+    assert_short_layout(out, manifest)
+
+
+# ---------------------------------------------------------------------------
+# Names ocx never writes (V-L27 vendor half, V-L56)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("refusal", ["reserved_segment", "launch_name", "control"])
+def test_package_vendor_refuses_reserved_segment_and_launch_name_with_65(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, refusal: str
+) -> None:
+    if refusal == "reserved_segment":
+        pkg = reserved_segment_package(
+            ocx, unique_repo, tmp_path / "pkg", "_ocx_reserved"
+        )
+    elif refusal == "launch_name":
+        pkg = launch_named_package(ocx, unique_repo, tmp_path / "pkg", "x.launch")
+    else:
+        pkg = reserved_segment_package(ocx, unique_repo, tmp_path / "pkg", "reserved")
+    out = tmp_path / "out"
+
+    result = _pvendor(ocx, out, *HOST, pkg.fq, check=False)
+
+    if refusal == "control":
+        assert result.returncode == 0, result.stderr
+        assert_short_layout(out, _manifest(out))
+        return
+    assert result.returncode == EXIT_DATA, result.stderr
+    assert _detail(result) == "vendor_path_unrepresentable"
+    assert not out.exists(), "a refused run leaves no directory"
 
 
 # ---------------------------------------------------------------------------
@@ -397,7 +447,7 @@ def test_package_vendor_wasm_package_has_files_and_no_launcher(
     manifest = _manifest(out)
     assert manifest["platform"].startswith("wasip1/wasm")
     files = {f["path"] for p in manifest["packages"] for f in p["tree"]["files"]}
-    wasm_path = next(p for p in sorted(files) if p.endswith("/content/share/tool.wasm"))
+    wasm_path = next(p for p in sorted(files) if p.endswith("/c/share/tool.wasm"))
     assert (out / wasm_path).read_bytes() == b"\x00asm\x01\x00\x00\x00"
     tool = _tools(manifest)["tool"]
     assert "launcher_path" not in tool
@@ -409,3 +459,97 @@ def test_package_vendor_wasm_package_has_files_and_no_launcher(
     _pvendor(ocx, host_out, *HOST, host_tool.fq)
     host_manifest_tool = _tools(_manifest(host_out))["tool"]
     assert (host_out / host_manifest_tool["launcher_path"]).is_file()
+
+
+# ---------------------------------------------------------------------------
+# `index_digest` (V-L54), a bare platform manifest (V-L59), `--index` (V-L60)
+# ---------------------------------------------------------------------------
+
+
+def test_index_digest_is_on_a_root_resolved_through_an_index_and_on_no_dependency(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    cmake, _ccache = cmake_with_ccache(ocx, unique_repo, tmp_path / "cm")
+    out = tmp_path / "out"
+
+    _pvendor(ocx, out, *HOST, cmake.fq)
+
+    manifest = _manifest(out)
+    packages = {p["digest"]: p for p in manifest["packages"]}
+    (root_digest,) = manifest["selections"][0]["roots"]
+    root = packages.pop(root_digest)
+    assert packages, "the closure holds the dependency"
+    expected = fetch_manifest_digest(ocx.registry, cmake.repo, cmake.tag)
+    assert root["index_digest"] == expected
+    assert root["index_digest"] != root["digest"], (
+        "the index is not the platform manifest"
+    )
+    for dependency in packages.values():
+        assert "index_digest" not in dependency, dependency
+
+
+def test_platform_manifest_identifier_carries_no_index_digest(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    pkg = _publish(ocx, unique_repo, tmp_path, "pkg", bins=["hello"])
+    leaf = fetch_platform_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
+    out = tmp_path / "out"
+
+    _pvendor(ocx, out, *HOST, f"{ocx.registry}/{pkg.repo}@{leaf}")
+
+    (package,) = _manifest(out)["packages"]
+    assert package["digest"] == leaf
+    assert "index_digest" not in package, package
+
+
+def test_bare_platform_manifest_vendors_for_the_requested_platform(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    pkg = _publish(ocx, unique_repo, tmp_path, "pkg", bins=["hello"])
+    leaf = fetch_platform_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
+    out = tmp_path / "out"
+
+    _pvendor(ocx, out, *HOST, f"{ocx.registry}/{pkg.repo}@{leaf}")
+
+    manifest = _manifest(out)
+    assert manifest["platform"] == current_platform()
+    assert manifest["available_platforms"] == ["any"]
+    assert "hello" in _tools(manifest)
+
+
+def test_digest_addressed_vendor_with_index_leaves_the_index_directory_byte_identical(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    pkg = _publish(ocx, unique_repo, tmp_path, "pkg", bins=["hello"])
+    leaf = fetch_platform_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
+    index = tmp_path / "index"
+    index.mkdir()
+    (index / "sentinel.txt").write_text("keep\n", encoding="utf-8")
+
+    def tree() -> dict[str, tuple[int, str | None]]:
+        nodes: dict[str, tuple[int, str | None]] = {}
+        for path in sorted(index.rglob("*")):
+            info = path.lstat()
+            digest = (
+                None
+                if stat.S_ISDIR(info.st_mode)
+                else hashlib.sha256(path.read_bytes()).hexdigest()
+            )
+            nodes[path.relative_to(index).as_posix()] = (
+                stat.S_IMODE(info.st_mode),
+                digest,
+            )
+        return nodes
+
+    before = tree()
+    assert before, "the index fixture holds files, or the comparison proves nothing"
+
+    _pvendor(
+        ocx,
+        tmp_path / "out",
+        *HOST,
+        f"{ocx.registry}/{pkg.repo}@{leaf}",
+        root=("--index", str(index)),
+    )
+
+    assert tree() == before

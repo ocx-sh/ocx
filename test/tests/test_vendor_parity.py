@@ -28,6 +28,7 @@ from src.helpers import make_package
 from src.runner import OcxRunner, PackageInfo, current_platform, registry_dir
 from src.vendor_fixtures import (
     VENDOR_TOKEN,
+    assert_short_layout,
     empty_dir_package,
     entrypoint_package,
     host_bins,
@@ -105,9 +106,10 @@ def _manifest(out: Path) -> dict[str, Any]:
 
 
 def _store_to_token(text: str, ocx: OcxRunner) -> str:
-    """The manifest's rewrite of an installed package path: `<home>/packages/` -> `@VENDOR_DIR@/packages/`."""
-    prefix = (ocx.ocx_home / "packages").as_posix() + "/"
-    return text.replace(prefix, f"{VENDOR_TOKEN}/packages/")
+    """The manifest's rewrite of an installed content path: `<home>/packages/<registry>/<alg>/<2>/<30>/content` -> `@VENDOR_DIR@/p/<HEX16>/c`."""
+    home = re.escape((ocx.ocx_home / "packages").as_posix())
+    pattern = re.compile(home + r"/[^/]+/[^/]+/([0-9a-f]{2})/([0-9a-f]{30})/content")
+    return pattern.sub(lambda m: f"{VENDOR_TOKEN}/p/{(m[1] + m[2])[:16]}/c", text)
 
 
 def _expected_items(report: dict[str, Any], ocx: OcxRunner) -> list[dict[str, Any]]:
@@ -227,7 +229,11 @@ def _tree_diff(installed: Path, vendored: Path, *, omit_links: bool) -> list[str
 def _installed_content(ocx: OcxRunner, package: dict[str, Any]) -> Path:
     """`content/` of an ordinary pull of the vendored package: vendoring installs nothing in the home."""
     _ocx(ocx, ocx.ocx_home, "package", "pull", *HOST, package["identifier"])
-    return ocx.ocx_home / package["content_dir"]
+    algorithm, _, hex_part = package["digest"].partition(":")
+    (content,) = (ocx.ocx_home / "packages").glob(
+        f"*/{algorithm}/{hex_part[:2]}/{hex_part[2:32]}/content"
+    )
+    return content
 
 
 # ---------------------------------------------------------------------------
@@ -249,6 +255,13 @@ def test_selection_environment_equals_ocx_env_report(
     actual = _environment(_manifest(out), "selection:default")
     assert len(expected) == 3, f"the probe declares three entries: {expected}"
     assert actual == expected
+    # The selection environment names the `p/<HEX16>/c` paths of `packages[]`.
+    manifest = _manifest(out)
+    assert_short_layout(out, manifest)
+    (package,) = manifest["packages"]
+    assert any(
+        f"{VENDOR_TOKEN}/{package['content_dir']}" in item["value"] for item in actual
+    ), actual
 
     mutated = json.loads(json.dumps(expected))
     mutated[0]["value"] += "/mutated"
@@ -450,10 +463,10 @@ def test_launcher_child_matches_ocx_exec_child(
     package = _manifest(out)["packages"][0]
     exec_args, exec_env = _comparable(
         *_parse_probe(via_exec.stdout),
-        str(project / ".ocx" / "toolchain" / "links" / "default" / "probe"),
+        str(project / ".ocx" / "toolchain" / "links" / "default" / "probe" / "content"),
     )
     launch_args, launch_env = _comparable(
-        *_parse_probe(via_launcher.stdout), str(out / package["package_dir"])
+        *_parse_probe(via_launcher.stdout), str(out / package["content_dir"])
     )
     assert launch_args == exec_args
     assert launch_env == exec_env
@@ -477,12 +490,15 @@ def test_launcher_child_matches_ocx_exec_child(
     )
     assert "OCX_IDENTITY_TOKEN" in _parse_probe(direct.stdout)[1]
 
-    # Control 2: a sidecar with `unset` emptied lets the credential through.
-    sidecar = launcher.with_name(launcher.name + ".direct")
-    document = json.loads(sidecar.read_text(encoding="utf-8"))
+    # Control 2: a record with `unset` emptied lets the credential through.
+    tool = _manifest(out)["tools"][0]
+    record = out / tool["record_path"]
+    assert tool["record_path"] == f"{tool['launcher_path'].removesuffix('.exe')}.launch"
+    document = json.loads(record.read_text(encoding="utf-8"))
+    assert document["kind"] == "direct"
     assert "OCX_IDENTITY_TOKEN" in document["unset"]
     document["unset"] = []
-    sidecar.write_text(json.dumps(document), encoding="utf-8")
+    record.write_text(json.dumps(document), encoding="utf-8")
     leaked = subprocess.run(
         [str(launcher)],
         cwd=project,
@@ -547,7 +563,7 @@ def test_real_manifest_validates_against_published_schema(
 # ---------------------------------------------------------------------------
 
 _HEX64 = re.compile(r"[0-9a-f]{64}")
-_STORE_SPLIT = re.compile(r"/[0-9a-f]{2}/[0-9a-f]{30}")
+_HEX16 = re.compile(r"(?<![0-9A-Za-z])p/[0-9a-f]{16}(?![0-9a-f])")
 
 
 def _host_free(text: str, registry: str, repo: str) -> str:
@@ -558,7 +574,7 @@ def _host_free(text: str, registry: str, repo: str) -> str:
         .replace(repo, "@REPO@")
         .replace(repo.upper(), "@REPO_UPPER@")
     )
-    return _STORE_SPLIT.sub("/@XX@/@DIGEST30@", _HEX64.sub("@DIGEST64@", text))
+    return _HEX16.sub("p/@HEX16@", _HEX64.sub("@DIGEST64@", text))
 
 
 def test_windows_amd64_manifest_equals_golden(
