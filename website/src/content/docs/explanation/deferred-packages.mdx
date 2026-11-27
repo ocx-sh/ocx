@@ -69,8 +69,8 @@ When one package is selected under several groups, `ocx pull` materializes it ea
 
 A shim's launcher is the same native program an [entry point][entrypoints-ref] uses. Its record `NAME.launch` is of kind `deferred` and holds the pinned identifier:
 
-```json title="cmake.launch"
-{"kind":"deferred","schema_version":1,"identifier":"ocx.sh/kitware/cmake:3.31.6@sha256:1f2e3d4c5b6a79881f2e3d4c5b6a79881f2e3d4c5b6a79881f2e3d4c5b6a7988"}
+```json title="node.launch"
+{"kind":"deferred","schema_version":1,"identifier":"ocx.sh/nodejs/node:24@sha256:1f2e3d4c5b6a79881f2e3d4c5b6a79881f2e3d4c5b6a79881f2e3d4c5b6a7988"}
 ```
 
 The launcher starts the hidden `ocx launcher shim` subcommand. The subcommand receives the pinned identifier the shim was built for and the name the caller typed. It runs the ordinary pull, which is the same three-layer fetch, extract, and assemble pipeline an eager install uses. It then resolves the requested name on the freshly materialized package's own `PATH` and executes it.
