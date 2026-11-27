@@ -19,7 +19,7 @@ type Result<T> = std::result::Result<T, ocx_util::error::FileError>;
 #[derive(Debug, Clone)]
 pub struct ShimDir {
     pub dir: PathBuf,
-    /// The launcher subdirectory's name: [`SHIM_BIN_DIRNAME`] under `shims/`, `l` under `deferred/<G>/`.
+    /// The launcher subdirectory's name: `bin` under `shims/`, `l` under `deferred/<G>/`.
     pub marker: &'static str,
 }
 
