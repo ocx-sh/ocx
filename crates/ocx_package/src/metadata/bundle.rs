@@ -57,9 +57,9 @@ pub struct Bundle {
 
     /// Named entrypoints that `ocx install` generates launchers for.
     ///
-    /// Each entry produces a Unix `.sh` script and, on Windows, a native
-    /// `.exe` shim plus its `.shim` sidecar under the package's
-    /// `entrypoints/` sibling directory at install time.
+    /// Each entry produces a launcher `NAME` (`NAME.exe` on Windows) and its
+    /// `NAME.launch` record under the package's `launchers/<generation>/`
+    /// directory at install time.
     /// Absent or empty means no launchers are generated.
     #[serde(skip_serializing_if = "Entrypoints::is_empty", default)]
     pub entrypoints: Entrypoints,
