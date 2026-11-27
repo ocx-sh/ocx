@@ -694,7 +694,8 @@ async fn closure_root_of(
     pinned: &PinnedPackageRef,
     requested: &PackageRef,
 ) -> Result<Arc<InstallInfo>, VendorError> {
-    // The shim directory is never read: a vendor composition names no host path.
+    // Only named, never read or written: `closure_root` wants a slot, and a vendor composition names no host path.
+    // `fs.shims` is the tree an older ocx owns.
     let shim = manager.file_structure().shims.shim_dir(pinned);
     manager
         .closure_root(nodes, shim)

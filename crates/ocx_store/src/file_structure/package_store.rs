@@ -18,7 +18,7 @@ pub enum PackageDirError {
 
 const LAUNCHERS_DIRNAME: &str = "launchers";
 
-/// One package directory: `content/`, `entrypoints/`, the JSON sidecars, `digest` and `refs/`.
+/// One package directory: `content/`, `launchers/<G>/` (and the `entrypoints/` an older release wrote), the JSON sidecars, `digest` and `refs/`.
 #[derive(Debug, Clone)]
 pub struct PackageDir {
     pub dir: PathBuf,

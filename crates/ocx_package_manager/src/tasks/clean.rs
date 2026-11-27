@@ -1598,7 +1598,7 @@ repository = "localhost:5000/shfmt"
         assert!(swept.is_empty(), "an absent sweep root yields nothing; got {swept:?}");
     }
 
-    // ── launcher generations (C-137) ─────────────────────────────────────
+    // ── launcher generations ─────────────────────────────────────
 
     use ocx_store::launcher_generation::LauncherGeneration;
 
@@ -1664,7 +1664,7 @@ repository = "localhost:5000/shfmt"
         })
     }
 
-    /// V-L41: the current generation comes from `LauncherGeneration::host()`; a constant would retire the wrong dir.
+    /// The current generation comes from `LauncherGeneration::host()`; a constant would retire the wrong dir.
     #[tokio::test]
     async fn clean_retires_launcher_generations_other_than_the_hosts() {
         let Some(home) = launcher_home().await else { return };
@@ -1723,7 +1723,7 @@ repository = "localhost:5000/shfmt"
         );
     }
 
-    /// C-132 half: `entrypoints/`, old `shims/…` of a pinned leaf and `.bin/ocx-shim/*` are never touched.
+    /// `entrypoints/`, old `shims/…` of a pinned leaf and `.bin/ocx-shim/*` are never touched.
     #[tokio::test]
     async fn clean_leaves_entrypoints_old_shims_and_the_shim_binary_alone() {
         let Some(home) = launcher_home().await else { return };
@@ -1740,7 +1740,7 @@ repository = "localhost:5000/shfmt"
         }
     }
 
-    /// V-L26 clean half: a held `temp/deferred-…` scratch survives a clean.
+    /// A held `temp/deferred-…` scratch survives a clean.
     #[tokio::test]
     async fn clean_keeps_a_held_deferred_scratch() {
         let Some(home) = launcher_home().await else { return };
@@ -1764,7 +1764,8 @@ repository = "localhost:5000/shfmt"
         "default-cccccccccccccccc",
         ".staging-dddddddddddddddd",
         ".gc-eeeeeeeeeeeeeeee",
-        "default-AAAAAAAAAAAAAAAA",
+        // Not a generation (uppercase). Distinct from every other name beyond case, or a case-insensitive file system merges two rows.
+        "default-FFFFFFFFFFFFFFFF",
         "other",
     ];
     /// The three names a clean retires from [`SHELL_NAMES`] when the stamp keeps `GEN_A` and `GEN_B`.

@@ -642,8 +642,42 @@ mod tests {
     ///
     /// Red state: `Context::try_init` running `LogSettings::init_with_progress`
     /// under the seam.
+    // Sibling unit tests build a `Context` outside the seam, which installs the global subscriber and
+    // the `log` bridge for the rest of the process, so the check runs in a child no test has touched.
+    #[test]
+    #[expect(
+        clippy::disallowed_types,
+        reason = "the case re-runs this test binary in a process with no global subscriber"
+    )]
+    fn seam_installs_no_global_subscriber_and_logs_to_err() {
+        if ocx_env::__OCX_TESTING_SEAM_CHILD.get().is_some() {
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                "--exact",
+                "app::seam::tests::child_of_the_global_subscriber_test",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(ocx_env::__OCX_TESTING_SEAM_CHILD.name, "1")
+            .output()
+            .expect("run the child");
+        let report = String::from_utf8_lossy(&output.stdout);
+
+        assert!(
+            output.status.success(),
+            "{report}{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(report.contains("1 passed"), "the child case never ran: {report}");
+    }
+
     #[tokio::test]
-    async fn seam_installs_no_global_subscriber_and_logs_to_err() {
+    async fn child_of_the_global_subscriber_test() {
+        if ocx_env::__OCX_TESTING_SEAM_CHILD.get().is_none() {
+            return;
+        }
         let root = tempfile::tempdir().expect("tempdir");
         let outcome = drive(
             &["status"],

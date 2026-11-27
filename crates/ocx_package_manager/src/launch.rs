@@ -764,6 +764,10 @@ mod firewall_tests {
             "test-only live-shell harness",
         ),
         (
+            "ocx_cli/src/app/seam.rs",
+            "test-only re-run of the test binary as a child with no global subscriber",
+        ),
+        (
             "ocx_cli/tests/linux_self_contained.rs",
             "integration test running `ldd` against the built binary",
         ),

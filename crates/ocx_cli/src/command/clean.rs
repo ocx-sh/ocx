@@ -7,13 +7,11 @@ use clap::Parser;
 
 use crate::api;
 
-/// Remove unreferenced objects and stale temp directories.
+/// Remove unreferenced objects, stale temp directories and the launcher directories of other ocx builds.
 ///
 /// An object is unreferenced when its `refs/` directory is empty or absent, as
-/// after `ocx uninstall` without `--purge` or a manual symlink removal. A temp
-/// directory is stale when no running process holds its `install.lock`: a
-/// previous download was interrupted. It also removes the launcher directories
-/// of other ocx builds.
+/// after `ocx uninstall` without `--purge`. A temp directory is stale when no
+/// running process holds its `install.lock`.
 ///
 /// Packages any registered project's `ocx.lock` holds are retained, even from
 /// another project directory; `--force` ignores the project registry.

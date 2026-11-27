@@ -462,16 +462,19 @@ fn trampoline_lookup_exclusions(
     file_structure: &ocx_store::file_structure::FileStructure,
     project_home: &ocx_store::file_structure::ToolchainHome,
 ) -> Vec<std::path::PathBuf> {
-    // Spelled out, not imported, so dropping an entry reds this function's test, not an unused-import lint.
-    vec![
+    let mut excluded = vec![
         // From the store's resolver, never a literal `join`, or the list drifts silently from the tree shape.
         file_structure.toolchain.bin(),
         project_home.bin(),
-        file_structure
-            .toolchain
-            .shell_bin(ocx_store::file_structure::DEFAULT_SHELL),
-        project_home.shell_bin(ocx_store::file_structure::DEFAULT_SHELL),
-    ]
+    ];
+    for home in [file_structure.toolchain.home(), project_home] {
+        // The live render (`shells/default-<hex>`) and the `shells/default` an older ocx renders in place.
+        let live = home.active_target_name().map(|name| home.render_dir(&name).join("bin"));
+        let legacy = home.shell_bin(ocx_store::file_structure::DEFAULT_SHELL);
+        excluded.extend(live.filter(|live| *live != legacy));
+        excluded.push(legacy);
+    }
+    excluded
 }
 
 /// Re-attribute a missing selected project to [`ProjectContextError::NoProjectIn`] (64), not the config tier's 79.
@@ -830,6 +833,29 @@ mod tests {
             4,
             "four distinct directories; collapsing any two would leave one unexcluded"
         );
+    }
+
+    /// A home rendered by the unified launcher has `active -> shells/default-<hex>` and no `shells/default`.
+    #[cfg(unix)]
+    #[test]
+    fn the_exclusion_set_names_the_live_render_directory() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let file_structure = ocx_store::file_structure::FileStructure::with_root(dir.path().to_path_buf());
+        let project_home = ocx_store::file_structure::ToolchainHome::new(dir.path().join("project/toolchain"));
+        let name = "default-8d41c2e07a95b3f6";
+        for home in [file_structure.toolchain.home(), &project_home] {
+            std::fs::create_dir_all(home.render_dir(name).join("bin")).expect("mkdir render");
+            std::os::unix::fs::symlink(format!("shells/{name}"), home.active()).expect("link active");
+        }
+
+        let excluded = trampoline_lookup_exclusions(&file_structure, &project_home);
+
+        for home in [file_structure.toolchain.home(), &project_home] {
+            assert!(
+                excluded.contains(&home.render_dir(name).join("bin")),
+                "the live render's bin must be excluded: {excluded:?}"
+            );
+        }
     }
 
     // ── a trampoline's baked home, re-attributed ──────────────────────────────
