@@ -76,7 +76,7 @@ jobs:
   # ocx_shim/launcher specification suite is green (cost: gate Windows-class
   # work behind Linux passing — subsystem-ci.md cost table).
   gate:
-    name: Linux Gate (shim spec tests)
+    name: Linux Gate (launcher spec tests)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
