@@ -36,6 +36,7 @@ import dataclasses
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -45,6 +46,7 @@ from uuid import uuid4
 
 import pytest
 
+from src import previous_release
 from src.helpers import make_package, rglob_no_links, write_ocx_toml
 from src.runner import OcxRunner, PackageInfo
 
@@ -55,9 +57,12 @@ __all__ = [
     "EXIT_SUCCESS",
     "LINKS_DIR",
     "SHELLS_DIR",
+    "STAMP_V1",
+    "STAMP_V2",
     "ToolchainProject",
     "TwoBranchCheckout",
     "active_link",
+    "active_shell",
     "active_target",
     "assert_key_and_binary_namespaces_stay_disjoint",
     "back_reference_entries",
@@ -65,6 +70,7 @@ __all__ = [
     "copy_tree",
     "entry_link",
     "expected_bin",
+    "generated_shells",
     "git",
     "is_link",
     "link_entries",
@@ -81,6 +87,7 @@ __all__ = [
     "resolved_toolchain_bin",
     "resolved_toolchain_home",
     "run_in",
+    "run_previous_in",
     "rust_debug",
     "sha256_of",
     "shell_bin",
@@ -107,6 +114,15 @@ SHELLS_DIR = "shells"
 ACTIVE_LINK = "active"
 DEFAULT_SHELL = "default"
 
+#: The two render-stamp files: v1 is what an older ``ocx`` writes and the new
+#: one only reads; v2 is what the new ``ocx`` writes (``adr_unified_launcher.md`` § 8.2).
+STAMP_V1 = "render_stamp.json"
+STAMP_V2 = "render_stamp.v2.json"
+
+#: A directory the new ``ocx`` publishes under ``shells/`` (``adr_unified_launcher.md`` § 6.4).
+GENERATED_SHELL = re.compile(r"^default-[0-9a-f]{16}$")
+
+
 def is_link(path: Path) -> bool:
     """Whether ``path`` is a symlink or, on Windows, a directory junction.
 
@@ -125,15 +141,15 @@ def trampoline_name(name: str) -> str:
 
 
 def trampoline_files(name: str) -> list[str]:
-    """Every ``bin/`` entry exposed binary ``name`` occupies: the trampoline
-    alone on POSIX, and on Windows the ``.exe`` plus its ``.exec`` sidecar."""
-    return [f"{name}.exe", f"{name}.exec"] if sys.platform == "win32" else [name]
+    """Every ``bin/`` entry exposed binary ``name`` occupies: the launcher
+    program (``name`` on POSIX, ``name.exe`` on Windows) and its ``name.launch``
+    record -- the same pair on every platform."""
+    return [trampoline_name(name), f"{name}.launch"]
 
 
 def expected_bin(*names: str) -> list[str]:
     """The sorted ``bin/`` entries exposed binaries ``names`` occupy, so a
-    comparison with :func:`bin_entries` holds on Windows's ``.exe`` + ``.exec``
-    pair as well as on POSIX's single file."""
+    comparison with :func:`bin_entries` holds for the launcher plus record pair."""
     return sorted(file for name in names for file in trampoline_files(name))
 
 
@@ -168,19 +184,41 @@ def make_link(target: str | Path, link: Path) -> None:
 
 
 def trampoline_body(trampoline: Path) -> Path:
-    """The file that carries a trampoline's baked project root: the trampoline
-    itself on POSIX, its ``.exec`` sidecar on Windows, where the ``.exe`` is a
-    shared launcher blob with the same bytes in every project."""
-    return trampoline.with_suffix(".exec") if sys.platform == "win32" else trampoline
+    """The ``<name>.launch`` record beside a launcher: the file that carries the
+    baked project root. The launcher program itself is one shared blob with the
+    same bytes in every project, on every platform."""
+    name = trampoline.name
+    if sys.platform == "win32":
+        name = name.removesuffix(".exe")
+    return trampoline.with_name(f"{name}.launch")
 
 
-def active_target(home: Path, shell: str = DEFAULT_SHELL) -> str:
-    """What ``read_link`` reports for a correct ``active``: the relative
-    ``shells/<shell>`` on POSIX, the absolute ``<home>\\shells\\<shell>`` a
-    Windows junction can hold."""
+def active_target(home: Path, shell: str) -> str:
+    """What ``read_link`` reports for an ``active`` that names ``shells/<shell>``:
+    the relative ``shells/<shell>`` on POSIX, the absolute
+    ``<home>\\shells\\<shell>`` a Windows junction can hold."""
     if sys.platform == "win32":
         return str(home / SHELLS_DIR / shell)
     return f"{SHELLS_DIR}/{shell}"
+
+
+def active_shell(home: Path) -> str | None:
+    """The directory name under ``shells/`` that ``active`` names, or ``None``
+    when ``active`` is not a link. Read off the link, never derived: the name is
+    16 random hex characters a test cannot compute."""
+    link = home / ACTIVE_LINK
+    if not is_link(link):
+        return None
+    return Path(read_link(link)).name
+
+
+def generated_shells(home: Path) -> list[str]:
+    """The sorted ``shells/default-<16 hex>`` children, nothing else (no
+    ``default``, no ``.staging-*``)."""
+    shells = home / SHELLS_DIR
+    if not shells.is_dir():
+        return []
+    return sorted(p.name for p in shells.iterdir() if GENERATED_SHELL.match(p.name))
 
 
 def remove_link(path: Path) -> None:
@@ -294,6 +332,28 @@ def run_in(
     )
 
 
+def run_previous_in(
+    ocx: OcxRunner, cwd: Path, *args: str
+) -> subprocess.CompletedProcess[str]:
+    """Run the previous-release ``ocx`` from ``cwd`` against the runner's own home.
+
+    The older binary renders the older layout (``shells/default``, a v1 stamp)
+    into the same ``$OCX_HOME`` the new one uses -- the mixed-version home of
+    ``adr_unified_launcher.md`` § 10.
+    """
+    return subprocess.run(
+        [str(previous_release.resolve()), *args],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env=dict(ocx.env),
+        stdin=subprocess.DEVNULL,
+        check=False,
+        timeout=_TIMEOUT,
+    )
+
+
 def git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
     """Run ``git`` in ``cwd`` under a hermetic identity and no ambient config.
 
@@ -401,14 +461,16 @@ def active_link(home: Path) -> Path:
     return home / ACTIVE_LINK
 
 
-def shell_bin(home: Path, shell: str = DEFAULT_SHELL) -> Path:
-    """``<home>/shells/<shell>/bin`` — the **physical** trampoline directory.
+def shell_bin(home: Path, shell: str | None = None) -> Path:
+    """``<home>/shells/<shell>/bin`` -- the **physical** launcher directory.
 
-    Where the renderer writes. Every observation of *what a render produced*
-    uses this and never :func:`path_facing_bin`, so a repointed ``active``
-    cannot make a stale tree look freshly rendered.
+    ``shell=None`` is the directory ``active`` names, read off the link (a
+    render's name is random). With no ``active`` it is the older layout's
+    ``shells/default``, the one a test plants by hand. Every observation of
+    *what a render produced* uses this and never :func:`path_facing_bin`, so a
+    repointed ``active`` cannot make a stale tree look freshly rendered.
     """
-    return home / SHELLS_DIR / shell / "bin"
+    return home / SHELLS_DIR / (shell or active_shell(home) or DEFAULT_SHELL) / "bin"
 
 
 def path_facing_bin(home: Path) -> Path:
@@ -445,21 +507,21 @@ def resolved_toolchain_bin(
     return Path(payload["toolchain_bin"])
 
 
-def render_stamp_path(ocx: OcxRunner, home: Path) -> Path | None:
+def render_stamp_path(ocx: OcxRunner, home: Path, version: int = 2) -> Path | None:
     """The render stamp describing ``home``, or ``None`` when none was written.
 
-    Both tiers are searched, because the path differs by scope: a project's
-    stamp lives at ``$OCX_HOME/state/projects/<key>/render_stamp.json`` and the
-    global tree's at ``$OCX_HOME/state/render_stamp.json``. The match is on the
-    stamp's own recorded ``home``, never on a key the test re-derives.
+    ``version`` 2 is the file the new ``ocx`` writes (``render_stamp.v2.json``),
+    1 the one an older ``ocx`` writes (``render_stamp.json``). Both tiers are
+    searched, because the path differs by scope: a project's stamp lives at
+    ``$OCX_HOME/state/projects/<key>/<file>`` and the global tree's at
+    ``$OCX_HOME/state/<file>``. The match is on the stamp's own recorded
+    ``home``, never on a key the test re-derives.
     """
+    file = STAMP_V2 if version == 2 else STAMP_V1
     state = Path(ocx.env["OCX_HOME"]) / "state"
     if not state.exists():
         return None
-    candidates = [
-        state / "render_stamp.json",
-        *sorted(state.rglob("render_stamp.json")),
-    ]
+    candidates = [state / file, *sorted(state.rglob(file))]
     for candidate in candidates:
         if not candidate.exists():
             continue
@@ -472,9 +534,9 @@ def render_stamp_path(ocx: OcxRunner, home: Path) -> Path | None:
     return None
 
 
-def read_render_stamp(ocx: OcxRunner, home: Path) -> dict | None:
-    """The parsed render stamp for ``home``, or ``None`` when none was written."""
-    path = render_stamp_path(ocx, home)
+def read_render_stamp(ocx: OcxRunner, home: Path, version: int = 2) -> dict | None:
+    """The parsed render stamp for ``home`` (see :func:`render_stamp_path`), or ``None``."""
+    path = render_stamp_path(ocx, home, version)
     return json.loads(path.read_text(encoding="utf-8")) if path else None
 
 
@@ -539,7 +601,7 @@ def _walk(root: Path) -> Iterator[Path]:
             yield from _walk(path)
 
 
-def bin_entries(home: Path, shell: str = DEFAULT_SHELL) -> list[str]:
+def bin_entries(home: Path, shell: str | None = None) -> list[str]:
     """The on-disk entry names under :func:`shell_bin` — the set
     :external+ocx:``RenderStamp::names`` claims to mirror.
 
@@ -767,8 +829,7 @@ def assert_key_and_binary_namespaces_stay_disjoint(project: ToolchainProject) ->
         f"{project.home}"
     )
     assert links, (
-        f"the negative is vacuous on an unrendered tree: no links under "
-        f"{project.home}"
+        f"the negative is vacuous on an unrendered tree: no links under {project.home}"
     )
 
     for key in (project.default_key, project.group_key):
@@ -902,7 +963,11 @@ class TwoBranchCheckout:
         Default group only (C-045), so the group tool contributes nothing here —
         which is itself part of what the sync test pins.
         """
-        only = self.main_only_binary if branch == self.main_branch else self.other_only_binary
+        only = (
+            self.main_only_binary
+            if branch == self.main_branch
+            else self.other_only_binary
+        )
         return sorted(f for name in (self.binary, only) for f in trampoline_files(name))
 
 
