@@ -72,7 +72,19 @@ Start a tool by its launcher. The launcher finds the directory from its own path
 
 The launcher runs with the caller's environment, minus the variables OCX treats as credentials or state. `ocx exec` strips the same ones. It writes nothing, so a read-only directory works.
 
-A launcher that cannot find its directory, or finds a `NAME.launch` record it cannot accept, exits 78 and prints what it tried. A directory path that contains the platform's list separator (`:` on Unix, `;` on Windows) is refused for the same exit code.
+A launcher that cannot run exits 78 and prints what it tried. Each refusal has one cause and one remedy:
+
+| Cause | What to do |
+|---|---|
+| The `NAME.launch` record beside the launcher is missing | Keep the launcher and its record in the same directory when you copy or move it |
+| The record cannot be read, is not valid, or is of a kind the launcher does not run | Replace the directory with a fresh `ocx vendor` run; do not edit a record |
+| On Linux and macOS, the launcher was started through a path that is not the running file | Start the launcher by its real path in the vendored directory |
+| The launcher finds no vendored directory beside it, in a runfiles tree or in a runfiles manifest | Keep the launcher inside its vendored directory. Under Bazel, make sure the set is in the target's runfiles |
+| The directory path contains the platform's list separator (`:` on Unix, `;` on Windows) | Move the directory to a path without it |
+| A runfiles manifest is larger than 64 MiB or holds a line longer than 64 KiB, or cannot be read | Fix or regenerate the manifest |
+| The launcher file was deleted or replaced after it started, or its own path cannot be resolved | Run it again from an intact directory |
+
+`manifest.json` is the only interface a consumer may rely on. File names inside the tree, such as `l/`, `p/` and the record files, are implementation details that can change.
 
 ## Move it \{#vendor-move\}
 

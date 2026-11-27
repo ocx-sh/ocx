@@ -9,7 +9,7 @@ import ShellSession from '@ocx-sh/theme/components/ShellSession.astro'
 
 This page shows how to provision a [Bazel][bazel] workspace's tools through OCX with the `rules_ocx` module, and which OCX settings apply while Bazel fetches them. It covers the OCX side only. The Bazel side lives in the [`rules_ocx` documentation][rules-ocx-docs].
 
-`rules_ocx` never re-implements OCX in Starlark. It downloads a pinned `ocx` binary inside a repository rule and drives that binary. The contracts it relies on are your `ocx.lock` and the OCI manifests.
+`rules_ocx` never re-implements OCX in Starlark. It downloads a pinned `ocx` binary inside a repository rule and runs [`ocx vendor`][cmd-vendor] with it. The one OCX document it reads is the [`manifest.json`][vendor-manifest] that `ocx vendor` writes. The digests it relies on are the ones in your `ocx.lock` and the OCI manifests.
 
 ## Provision the workspace toolchain \{#bazel-project\}
 
@@ -73,15 +73,26 @@ A single package that is not in your project takes `ocx.package(name = "jq", pac
 
 ## What the rules ask of OCX \{#bazel-commands\}
 
-A repository rule calls three OCX commands, so those are the ones to test when a fetch fails:
+A repository rule runs one OCX command, `ocx vendor`, so that is the one to test when a fetch fails:
 
 | Step | Command |
 |---|---|
-| Staleness gate | [`ocx lock --check`][cmd-lock] |
-| Download | [`ocx pull`][cmd-pull] for a project, `ocx package install` for a single package |
-| Environment | `ocx --format json env --pinned` |
+| Tool list | `ocx vendor --manifest-only`, once per platform; the result is stored as a fact in `MODULE.bazel.lock` |
+| Fetch | `ocx vendor`, once per platform, into a fresh scratch `OCX_HOME` |
 
-A failed step reports an [exit code and error document][p-scripts-and-json]. A stale lock fails the fetch with exit 65, the same as in [any pipeline][p-nattended-ci-unattended-frozen]. Run `ocx lock` and commit the result.
+`rules_ocx` generates its `BUILD.bazel` files from `manifest.json` alone. It derives no file name inside the vendored tree, and neither should you.
+
+A failed step reports an [exit code and error document][p-scripts-and-json].
+
+## What is locked \{#bazel-locks\}
+
+Each declaration has one source of truth for its digests:
+
+- An `ocx.project` is pinned by its `ocx.lock`. Run `ocx update` on it to move it.
+- An `ocx.package` with a digest in its identifier is pinned by that digest.
+- An `ocx.package` with only a tag is pinned by one platform manifest digest per platform, which `rules_ocx` stores in `MODULE.bazel.lock`.
+
+A moved tag changes nothing until you run `bazel run @tools//:update`. The target refreshes the stored digests. The [`rules_ocx` update guide][rules-ocx-update] lists every kind and what moves it.
 
 ## Settings that reach a fetch \{#bazel-env\}
 
@@ -106,21 +117,24 @@ The `rules_ocx` guides cover the Bazel half of this: the [offline mirror guide][
 [rules-ocx-docs]: /integrations/bazel/
 [rules-ocx-mirror]: /integrations/bazel/guides/offline-mirror/
 [rules-ocx-trust]: /integrations/bazel/concepts/trust-and-config/
+[rules-ocx-update]: /integrations/bazel/guides/update-locks/
 
 {/* commands */}
 [cmd-lock]: ../reference/command-line/commands.md#lock
-[cmd-pull]: ../reference/command-line/commands.md#pull
+[cmd-vendor]: ../reference/command-line/commands.md#vendor
 
 {/* environment */}
 [env-mirrors]: ../reference/environment.md#ocx-mirrors
 [env-insecure]: ../reference/environment.md#ocx-insecure-registries
+
+{/* reference */}
+[vendor-manifest]: ../reference/vendor-manifest.md
 
 {/* guides */}
 [explanation-project-toolchain]: ../explanation/project-toolchain.md
 
 {/* pages */}
 [p-scripts-and-json]: ./scripts-and-json.mdx
-[p-nattended-ci-unattended-frozen]: ./unattended-ci.mdx#unattended-frozen
 [p-istry-auth-recipes-auth-method]: ./registry-auth-recipes.mdx#auth-method
 [p-proxy-and-ca-ca-env]: ./proxy-and-ca.mdx#ca-env
 [p-github-actions]: ./github-actions.mdx
