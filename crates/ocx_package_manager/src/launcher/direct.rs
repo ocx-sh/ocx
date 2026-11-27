@@ -5,10 +5,9 @@
 
 use std::path::Path;
 
-use ocx_env_apply::launch::{DirectRecord, RECORD_EXTENSION, RecordError};
+use ocx_env_apply::launch::{DirectRecord, LaunchRecord, RECORD_EXTENSION, RecordError};
 use ocx_store::file_structure::normalise_written_file;
 
-use super::generate::write_launcher_file;
 use crate::exec_env::unforwarded_keys;
 use crate::tasks::vendor::VendorError;
 
@@ -30,16 +29,6 @@ pub async fn write_direct_launcher_for(
     sidecar: &DirectRecord,
     windows: bool,
 ) -> Result<(), VendorError> {
-    // Launcher `X.launch` is the file tool `X`'s sidecar needs; case-folded for a case-insensitive target filesystem.
-    let suffix = format!(".{RECORD_EXTENSION}");
-    if !windows
-        && name.len() >= suffix.len()
-        && name.as_bytes()[name.len() - suffix.len()..].eq_ignore_ascii_case(suffix.as_bytes())
-    {
-        return Err(VendorError::PathUnrepresentable {
-            path: format!("{name}: a launcher name ends in the sidecar suffix {suffix}"),
-        });
-    }
     let mut sidecar = sidecar.clone();
     // The launcher's environment is never the caller's: every credential and every plumbing key is removed.
     sidecar.unset = unset_keys();
@@ -49,7 +38,7 @@ pub async fn write_direct_launcher_for(
             reason: other.to_string(),
         },
     })?;
-    let body = serde_json::to_string_pretty(&sidecar).map_err(crate::Error::from)?;
+    let body = LaunchRecord::Direct(sidecar).encode();
 
     let launcher = dir.join(if windows {
         format!("{name}.exe")
@@ -61,7 +50,9 @@ pub async fn write_direct_launcher_for(
         .await
         .map_err(|e| crate::error::file_error(&launcher, e))?;
     let sidecar_path = dir.join(format!("{name}.{RECORD_EXTENSION}"));
-    write_launcher_file(sidecar_path.clone(), body).await?;
+    tokio::fs::write(&sidecar_path, body)
+        .await
+        .map_err(|e| crate::error::file_error(&sidecar_path, e))?;
     // The host umask and clock must not reach the vendored bytes.
     let normalised = launcher.clone();
     tokio::task::spawn_blocking(move || {
@@ -145,21 +136,6 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let result = write_direct_launcher_for(tmp.path(), "tool", b"blob", sidecar, cfg!(windows)).await;
         (tmp, result)
-    }
-
-    /// A name ending `.launch` would write its launcher over another tool's sidecar; a Windows launcher is `.exe`, so only a Unix one collides.
-    #[tokio::test]
-    async fn a_launcher_name_ending_in_the_sidecar_suffix_is_refused() {
-        for name in ["tool.launch", "tool.LAUNCH"] {
-            let tmp = tempfile::tempdir().expect("tempdir");
-            let result = write_direct_launcher_for(tmp.path(), name, b"blob", &sidecar("bin/tool"), false).await;
-            assert!(matches!(result, Err(VendorError::PathUnrepresentable { .. })), "{name}");
-            assert_eq!(std::fs::read_dir(tmp.path()).expect("dir").count(), 0, "{name}");
-        }
-        let tmp = tempfile::tempdir().expect("tempdir");
-        write_direct_launcher_for(tmp.path(), "tool.launch", b"blob", &sidecar("bin/tool"), true)
-            .await
-            .expect("tool.launch.exe collides with no sidecar");
     }
 
     /// A `program` outside the root is refused with nothing written; a well-formed one is written.

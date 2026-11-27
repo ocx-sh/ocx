@@ -4,8 +4,6 @@
 //! First-invocation materialization of a deferred tool, the library half of `ocx launcher shim`.
 
 use std::collections::BTreeSet;
-use std::ffi::OsStr;
-use std::path::Path;
 
 use crate::concurrency::Concurrency;
 use crate::error::{Error, PackageError, PackageErrorKind};
@@ -15,24 +13,8 @@ use ocx_project::lazy::LazyReport;
 
 use super::super::PackageManager;
 
-/// Extensions a Windows producer appends beside an extensionless launcher (`ocx_shim`'s `SIDECAR_PROBE_ORDER`).
-const GENERATED_SIBLING_EXTENSIONS: [&str; 2] = ["exe", "shimref"];
-
-/// Whether `file_name` is a generated sibling of another launcher in `listing`, not a claimed name.
-fn is_generated_sibling(file_name: &str, listing: &BTreeSet<&str>) -> bool {
-    let Some(extension) = Path::new(file_name).extension().and_then(OsStr::to_str) else {
-        return false;
-    };
-    if !GENERATED_SIBLING_EXTENSIONS.contains(&extension) {
-        return false;
-    }
-    // Only with its extensionless twin present, or a claimed `mytool.exe` is refused as unclaimed.
-    // `- 1` strips the dot; a file stem would misreport `python3.12` as `python3`.
-    listing.contains(&file_name[..file_name.len() - extension.len() - 1])
-}
-
 impl PackageManager {
-    /// The interface names a deferred tool's shim directory claims, one launcher per name under `bin/`.
+    /// The interface names a deferred tool's shim directory claims: one `<name>.launch` record per name under `bin/`.
     ///
     /// # Errors
     ///
@@ -52,26 +34,23 @@ impl PackageManager {
             Err(error) => return Err(crate::error::file_error(&bin, error)),
         };
 
-        // Whole listing first: sibling classification needs the other entries.
-        let mut listing: Vec<String> = Vec::new();
+        // The record, not the launcher, names a claim: a Windows launcher is `<name>.exe`, and a claimed
+        // `mytool.exe` has the launcher `mytool.exe.exe`. A claimed name ending `.launch` has no launcher at all.
+        let suffix = format!(".{}", ocx_env_apply::launch::RECORD_EXTENSION);
+        let mut claimed = BTreeSet::new();
         while let Some(entry) = entries
             .next_entry()
             .await
             .map_err(|error| crate::error::file_error(&bin, error))?
         {
-            match entry.file_name().to_str() {
-                Some(file_name) => listing.push(file_name.to_owned()),
-                None => log::debug!("Ignoring non-UTF-8 shim launcher in {}", bin.display()),
-            }
-        }
-
-        let names: BTreeSet<&str> = listing.iter().map(String::as_str).collect();
-        let mut claimed = BTreeSet::new();
-        for file_name in &names {
-            if is_generated_sibling(file_name, &names) {
+            let Some(file_name) = entry.file_name().to_str().map(str::to_owned) else {
+                log::debug!("Ignoring non-UTF-8 shim launcher in {}", bin.display());
                 continue;
-            }
-            match BinaryName::try_from(*file_name) {
+            };
+            let Some(stem) = file_name.strip_suffix(&suffix) else {
+                continue;
+            };
+            match BinaryName::try_from(stem) {
                 Ok(name) => {
                     claimed.insert(name);
                 }
@@ -215,17 +194,12 @@ mod tests {
         );
     }
 
-    /// The claim set is the `bin/` listing: one entry per generated launcher,
-    /// with the Windows `.exe`/`.shimref` siblings folded onto the same name
-    /// rather than reported as three.
+    /// The claim set is the `bin/` records: one name per `<name>.launch`, whatever the launcher beside it is called.
     ///
-    /// The fixture names the sidecar `.shimref`, which is the extension a shim
-    /// tree's `bin/` can actually hold — `.shim` belongs to `entrypoints/` and
-    /// never lands here. Reds on a skip list that names `.shim`: `cmake.shimref`
-    /// is then admitted as a fourth claimed name, and a Windows shim invoked as
-    /// `cmake` would be refused for a name the store does list.
+    /// Reds on a reader that lists launchers: it reports `cmake.exe` on a Windows tree, and a dotted claim such as
+    /// `python3.12` or `mytool.exe` under its launcher's own name.
     #[tokio::test]
-    async fn claimed_shim_names_reads_the_bin_listing() {
+    async fn claimed_shim_names_reads_the_records() {
         let tmp = TempDir::new().unwrap();
         let file_structure = FileStructure::with_root(tmp.path().to_path_buf());
         let manager = manager_for(&file_structure);
@@ -233,8 +207,16 @@ mod tests {
 
         let bin = file_structure.shims.shim_dir(&package).bin();
         tokio::fs::create_dir_all(&bin).await.unwrap();
-        for launcher in ["cmake", "cmake.exe", "cmake.shimref", "python3.12", "ctest"] {
-            tokio::fs::write(bin.join(launcher), b"#!/bin/sh\n").await.unwrap();
+        for file in [
+            "cmake",
+            "cmake.launch",
+            "python3.12",
+            "python3.12.launch",
+            "mytool.exe.exe",
+            "mytool.exe.launch",
+            "stray",
+        ] {
+            tokio::fs::write(bin.join(file), b"x").await.unwrap();
         }
 
         let claimed = manager
@@ -242,45 +224,7 @@ mod tests {
             .await
             .expect("the listing is readable");
         let names: Vec<&str> = claimed.iter().map(BinaryName::as_str).collect();
-        assert_eq!(
-            names,
-            ["cmake", "ctest", "python3.12"],
-            "a dotted name keeps its suffix; only the `.exe`/`.shimref` siblings are folded away"
-        );
-    }
-
-    /// A publisher may claim `mytool.exe` outright — `BinaryName` permits
-    /// interior dots and imposes no suffix rule — and `prepare_lazy` then writes
-    /// exactly one launcher, with no extensionless partner.
-    ///
-    /// Reds on a fold that keys on the extension alone: `mytool.exe` drops out
-    /// of the claim set while its launcher stays on `PATH`, so every invocation
-    /// is refused as unclaimed — which names the wrong defect, since the
-    /// publisher did claim it.
-    #[tokio::test]
-    async fn a_claimed_dot_exe_name_without_a_partner_is_not_a_generated_sibling() {
-        let tmp = TempDir::new().unwrap();
-        let file_structure = FileStructure::with_root(tmp.path().to_path_buf());
-        let manager = manager_for(&file_structure);
-        let package = pinned(&ocx_oci::Algorithm::Sha256.hash(b"content"));
-
-        let bin = file_structure.shims.shim_dir(&package).bin();
-        tokio::fs::create_dir_all(&bin).await.unwrap();
-        // `mytool.exe` stands alone; `cmake` + `cmake.exe` are a real pair.
-        for launcher in ["mytool.exe", "cmake", "cmake.exe"] {
-            tokio::fs::write(bin.join(launcher), b"#!/bin/sh\n").await.unwrap();
-        }
-
-        let claimed = manager
-            .claimed_shim_names(&package)
-            .await
-            .expect("the listing is readable");
-        let names: Vec<&str> = claimed.iter().map(BinaryName::as_str).collect();
-        assert_eq!(
-            names,
-            ["cmake", "mytool.exe"],
-            "a `.exe` is folded away only when the extensionless launcher it belongs to is present"
-        );
+        assert_eq!(names, ["cmake", "mytool.exe", "python3.12"]);
     }
 
     /// An absent shim directory claims nothing, so every name is refused — the

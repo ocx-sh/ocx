@@ -702,7 +702,7 @@ async fn setup_owned_impl(
         let final_pkg_root = dest_override
             .map(std::path::Path::to_path_buf)
             .unwrap_or_else(|| fs.packages.path(pinned));
-        crate::launcher::generate(&final_pkg_root, entrypoints, &dest, &fs.shim_bin)
+        crate::launcher::generate(&final_pkg_root, entrypoints, &dest)
             .await
             .map_err(PackageErrorKind::Internal)?;
     }
