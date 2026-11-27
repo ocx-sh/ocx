@@ -137,11 +137,23 @@ impl ShimError {
 }
 
 /// `text` with each control character escaped as `{:?}` writes it, so a program path cannot drive the terminal.
+///
+/// Bidirectional controls and zero-width characters (`Cf`, which `is_control` misses) are escaped too, by explicit
+/// code point: the classes the `ocx` CLI strips from its terminal output.
 fn escape_controls(text: &str) -> String {
     let mut escaped = String::with_capacity(text.len());
     for c in text.chars() {
         if c.is_control() {
             escaped.extend(c.escape_debug());
+        } else if matches!(
+            c,
+            '\u{061c}'
+                | '\u{200b}'..='\u{200f}'
+                | '\u{202a}'..='\u{202e}'
+                | '\u{2066}'..='\u{2069}'
+                | '\u{feff}'
+        ) {
+            escaped.push_str(&format!("\\u{{{:x}}}", u32::from(c)));
         } else {
             escaped.push(c);
         }
@@ -795,6 +807,18 @@ mod tests {
         let notice = crate::direct::canonicalize_notice("/o/pk\u{1b}g\n", "denied");
         assert!(!notice.contains(char::is_control), "{notice:?}");
         assert!(notice.contains("/o/pk\\u{1b}g\\n"), "{notice:?}");
+    }
+
+    /// Bidirectional controls and zero-width characters are `Cf`, which `char::is_control` misses; the `ocx` CLI
+    /// strips the same classes from its terminal output.
+    #[test]
+    fn a_diagnostic_escapes_bidi_controls_and_zero_width_characters() {
+        let text = "a\u{202e}b\u{2066}c\u{200f}d\u{061c}e\u{200b}f\u{feff}g";
+        assert_eq!(
+            crate::escape_controls(text),
+            "a\\u{202e}b\\u{2066}c\\u{200f}d\\u{61c}e\\u{200b}f\\u{feff}g"
+        );
+        assert_eq!(crate::escape_controls("plain \u{e9}\u{4e2d}"), "plain \u{e9}\u{4e2d}");
     }
 
     #[test]
